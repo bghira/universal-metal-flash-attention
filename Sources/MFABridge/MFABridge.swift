@@ -279,7 +279,7 @@ public func mfa_attention_forward(
       descriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
 
       // Set causal masking using the proper native approach
-      descriptor.maskType = causal ? .causal : .none
+      descriptor.sparsityPattern = causal ? .causal : .none
 
       // Set precision based on input parameters
       // Note: MFA uses false = FP32, true = FP16
