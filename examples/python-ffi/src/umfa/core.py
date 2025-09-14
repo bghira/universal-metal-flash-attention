@@ -11,9 +11,14 @@ from typing import Optional, Tuple, Union, Any
 import numpy as np
 
 from ._ffi import (
-    _lib, _check_error, MFAError,
-    MFA_PRECISION_FP16, MFA_PRECISION_BF16, MFA_PRECISION_FP32,
-    mfa_context_t, mfa_buffer_t
+    _lib,
+    _check_error,
+    MFAError,
+    MFA_PRECISION_FP16,
+    MFA_PRECISION_BF16,
+    MFA_PRECISION_FP32,
+    mfa_context_t,
+    mfa_buffer_t,
 )
 
 # Type aliases for clarity
@@ -79,7 +84,12 @@ class MFABuffer:
     for zero-copy operations.
     """
 
-    def __init__(self, context: MFAContext, data: Optional[FloatArray] = None, size: Optional[int] = None):
+    def __init__(
+        self,
+        context: MFAContext,
+        data: Optional[FloatArray] = None,
+        size: Optional[int] = None,
+    ):
         """
         Create MFA buffer.
 
@@ -99,14 +109,16 @@ class MFABuffer:
 
             data_ptr = data.ctypes.data_as(ctypes.c_void_p)
             size_bytes = data.nbytes
-            _check_error(_lib.mfa_buffer_from_ptr(
-                context.handle, data_ptr, size_bytes, ctypes.byref(self._handle)
-            ))
+            _check_error(
+                _lib.mfa_buffer_from_ptr(
+                    context.handle, data_ptr, size_bytes, ctypes.byref(self._handle)
+                )
+            )
         elif size is not None:
             # Create new buffer
-            _check_error(_lib.mfa_create_buffer(
-                context.handle, size, ctypes.byref(self._handle)
-            ))
+            _check_error(
+                _lib.mfa_create_buffer(context.handle, size, ctypes.byref(self._handle))
+            )
         else:
             raise ValueError("Must provide either data array or buffer size")
 
@@ -155,7 +167,9 @@ def _parse_precision(precision: Precision) -> int:
 
     precision_str = str(precision).lower()
     if precision_str not in precision_map:
-        raise ValueError(f"Unknown precision: {precision}. Use one of {list(precision_map.keys())}")
+        raise ValueError(
+            f"Unknown precision: {precision}. Use one of {list(precision_map.keys())}"
+        )
 
     return precision_map[precision_str]
 
@@ -225,9 +239,13 @@ def flash_attention_forward(
 
         # Current MFA implementation supports single head only
         if num_heads != 1:
-            raise ValueError("Multi-head attention not yet supported. Use num_heads=1 or 2D arrays.")
+            raise ValueError(
+                "Multi-head attention not yet supported. Use num_heads=1 or 2D arrays."
+            )
     else:
-        raise ValueError(f"Invalid tensor dimensions. Expected 2D or 4D, got q.shape={q.shape}")
+        raise ValueError(
+            f"Invalid tensor dimensions. Expected 2D or 4D, got q.shape={q.shape}"
+        )
 
     # Set default softmax scale
     if softmax_scale is None:
@@ -249,27 +267,29 @@ def flash_attention_forward(
 
     try:
         # Call MFA attention
-        _check_error(_lib.mfa_attention_forward(
-            context.handle,
-            q_buf.handle,
-            k_buf.handle,
-            v_buf.handle,
-            out_buf.handle,
-            batch_size,
-            seq_len_q,
-            seq_len_kv,
-            num_heads,
-            head_dim,
-            softmax_scale,
-            causal,
-            input_prec,
-            intermediate_prec,
-            output_prec,
-            False,  # transpose_q
-            False,  # transpose_k
-            False,  # transpose_v
-            False,  # transpose_o
-        ))
+        _check_error(
+            _lib.mfa_attention_forward(
+                context.handle,
+                q_buf.handle,
+                k_buf.handle,
+                v_buf.handle,
+                out_buf.handle,
+                batch_size,
+                seq_len_q,
+                seq_len_kv,
+                num_heads,
+                head_dim,
+                softmax_scale,
+                causal,
+                input_prec,
+                intermediate_prec,
+                output_prec,
+                False,  # transpose_q
+                False,  # transpose_k
+                False,  # transpose_v
+                False,  # transpose_o
+            )
+        )
     finally:
         # Clean up buffers
         q_buf.close()
@@ -285,7 +305,7 @@ def attention(
     k: FloatArray,
     v: FloatArray,
     context: Optional[MFAContext] = None,
-    **kwargs
+    **kwargs,
 ) -> FloatArray:
     """
     Convenience function for flash attention with automatic context management.

@@ -39,11 +39,7 @@ def get_version() -> Tuple[int, int, int]:
     minor = ctypes.c_int()
     patch = ctypes.c_int()
 
-    _lib.mfa_get_version(
-        ctypes.byref(major),
-        ctypes.byref(minor),
-        ctypes.byref(patch)
-    )
+    _lib.mfa_get_version(ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch))
 
     return (major.value, minor.value, patch.value)
 

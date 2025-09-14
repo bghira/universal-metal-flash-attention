@@ -16,6 +16,7 @@ struct PipelineCacheKey: Hashable {
   let transposeK: Bool
   let transposeV: Bool
   let transposeO: Bool
+  let softmaxScale: Float
 }
 
 final class MFAContext {
@@ -257,13 +258,13 @@ public func mfa_attention_forward(
   }
 
   do {
-    // Note: Debug output removed - FFI is now working correctly
-
     // Create cache key for pipeline deduplication
     let cacheKey = PipelineCacheKey(
       seqLenQ: seqLenQ, seqLenKV: seqLenKV, headDim: headDim, causal: causal,
       inputPrecision: inputPrecision, intermediatePrecision: intermediatePrecision,
-      transposeQ: transposeQ, transposeK: transposeK, transposeV: transposeV, transposeO: transposeO
+      transposeQ: transposeQ, transposeK: transposeK, transposeV: transposeV,
+      transposeO: transposeO,
+      softmaxScale: softmaxScale
     )
 
     // Check if we have cached pipeline and kernel
@@ -280,6 +281,9 @@ public func mfa_attention_forward(
 
       // Set causal masking using the proper native approach
       descriptor.sparsityPattern = causal ? .causal : .none
+
+      // Set custom scale factor - this fixes the root cause of the correctness issue
+      descriptor.softmaxScale = softmaxScale
 
       // Set precision based on input parameters
       // Note: MFA uses false = FP32, true = FP16

@@ -50,9 +50,7 @@ def main():
         print("\n🚀 Running attention with context manager...")
         with umfa.MFAContext() as ctx:
             output1 = umfa.flash_attention_forward(
-                ctx, q, k, v,
-                causal=False,
-                input_precision="fp16"
+                ctx, q, k, v, causal=False, input_precision="fp16"
             )
 
         print(f"✅ Output shape: {output1.shape}, dtype: {output1.dtype}")
@@ -78,9 +76,7 @@ def main():
         v_fp32 = v.astype(np.float32)
 
         output_fp32 = umfa.attention(
-            q_fp32, k_fp32, v_fp32,
-            input_precision="fp32",
-            output_precision="fp32"
+            q_fp32, k_fp32, v_fp32, input_precision="fp32", output_precision="fp32"
         )
         print(f"✅ FP32 output: shape={output_fp32.shape}, dtype={output_fp32.dtype}")
 
