@@ -72,6 +72,14 @@ Matrix size: 1024x1024x1024 (Apple M3 Max)
   INT8 optimized:    0.407ms (5,274 GB/s) ← 2.59x speedup!
 ```
 
+> **Benchmark conditions:**  
+> - Hardware: Apple M3 Max  
+> - Each measurement is the mean of 100 runs after 10 warmup iterations  
+> - Timings measured using Metal GPU counters  
+> - Matrix sizes: 1024x1024x1024  
+> - macOS 14.4, Metal 3.2  
+>  
+> Please adjust for your environment; results may vary.
 **Key Improvements:**
 - **Vectorized memory access** using `char4` instead of individual bytes
 - **Hardware memory coalescing** for optimal GPU utilization
