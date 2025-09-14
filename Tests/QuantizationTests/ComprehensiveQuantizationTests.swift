@@ -257,14 +257,4 @@ private func calculateRMSE(_ original: [Float], _ reconstructed: [Float]) -> Flo
 
 // MARK: - Extensions
 
-extension Int8 {
-  fileprivate init(clamping value: Int) {
-    if value < Int(Int8.min) {
-      self = Int8.min
-    } else if value > Int(Int8.max) {
-      self = Int8.max
-    } else {
-      self = Int8(value)
-    }
-  }
-}
+// Note: Int8(clamping:) is provided by Swift standard library

@@ -160,8 +160,8 @@ private func quantizeInt4Fast(_ input: [Float]) -> ([UInt8], Float) {
     let val1 = Int32(round(input[i] / scale))
     let val2 = i + 1 < input.count ? Int32(round(input[i + 1] / scale)) : 0
 
-    let packed1 = UInt8(clamping: val1 + 8) & 0xF
-    let packed2 = UInt8(clamping: val2 + 8) & 0xF
+    let packed1 = UInt8(max(0, min(15, val1 + 8)))  // Clamp [-8,7] to [0,15] before UInt8 conversion
+    let packed2 = UInt8(max(0, min(15, val2 + 8)))
 
     packed.append((packed2 << 4) | packed1)
   }
@@ -171,26 +171,4 @@ private func quantizeInt4Fast(_ input: [Float]) -> ([UInt8], Float) {
 
 // MARK: - Extensions
 
-extension Int8 {
-  fileprivate init(clamping value: Int32) {
-    if value < Int32(Int8.min) {
-      self = Int8.min
-    } else if value > Int32(Int8.max) {
-      self = Int8.max
-    } else {
-      self = Int8(value)
-    }
-  }
-}
-
-extension UInt8 {
-  fileprivate init(clamping value: Int32) {
-    if value < 0 {
-      self = 0
-    } else if value > Int32(UInt8.max) {
-      self = UInt8.max
-    } else {
-      self = UInt8(value)
-    }
-  }
-}
+// Note: Int8(clamping:) and UInt8(clamping:) are provided by Swift standard library
