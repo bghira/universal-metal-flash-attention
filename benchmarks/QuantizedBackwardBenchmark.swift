@@ -320,6 +320,6 @@ do {
     let benchmark = try QuantizedBackwardBenchmark()
     try benchmark.runBenchmark()
 } catch {
-    print("❌ Benchmark failed: \\(error)")
+    print("❌ Benchmark failed: \(error)")
     exit(1)
 }
