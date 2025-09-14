@@ -46,5 +46,26 @@ let package = Package(
             name: "MFAFFITests",
             dependencies: ["MFAFFI"]
         ),
+        .testTarget(
+            name: "FlashAttentionTests",
+            dependencies: [
+                "MFABridge",
+                .product(name: "FlashAttention", package: "metal-flash-attention")
+            ]
+        ),
+        .testTarget(
+            name: "QuantizationTests",
+            dependencies: [
+                "MFABridge",
+                .product(name: "FlashAttention", package: "metal-flash-attention")
+            ]
+        ),
+        .testTarget(
+            name: "PerformanceTests",
+            dependencies: [
+                "MFABridge",
+                .product(name: "FlashAttention", package: "metal-flash-attention")
+            ]
+        ),
     ]
 )
