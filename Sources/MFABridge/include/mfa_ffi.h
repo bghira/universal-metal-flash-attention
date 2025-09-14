@@ -227,6 +227,18 @@ bool mfa_is_device_supported(void);
  */
 void mfa_get_version(int* major, int* minor, int* patch);
 
+/**
+ * @brief Get GPU execution time of the last attention operation
+ *
+ * Returns the pure GPU execution time (excluding CPU overhead) of the
+ * most recent attention operation. This provides zero-overhead timing
+ * measurements equivalent to native Swift benchmarks.
+ *
+ * @param context The MFA context
+ * @return GPU execution time in seconds, or 0.0 on error
+ */
+double mfa_get_gpu_latency(mfa_context_t context);
+
 #ifdef __cplusplus
 }
 #endif
