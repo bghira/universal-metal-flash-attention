@@ -44,3 +44,4 @@ examples/rust/target/release/build/*/out/
 **/build/*/venv/*
 */target/*
 **/target/*
+.venv
