@@ -67,7 +67,7 @@ mfa_attention_forward(
 
 ### Swift Package Manager
 ```bash
-git clone --recursive https://github.com/your-org/universal-metal-flash-attention.git
+git clone --recursive https://github.com/bghira/universal-metal-flash-attention.git
 cd universal-metal-flash-attention
 swift build -c release
 ```
