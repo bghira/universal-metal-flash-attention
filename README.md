@@ -244,4 +244,6 @@ The C interface can be used with any language that supports C FFI:
 
 ## License
 
+MIT.
+
 Same license as the parent Metal Flash Attention project.
