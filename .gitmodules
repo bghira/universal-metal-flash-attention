@@ -1,3 +1,3 @@
 [submodule "metal-flash-attention"]
 	path = metal-flash-attention
-	url = https://github.com/philipturner/metal-flash-attention.git
+	url = https://github.com/bghira/metal-flash-attention-plus.git
