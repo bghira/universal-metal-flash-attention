@@ -117,18 +117,41 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          # Install any system dependencies needed for Metal/PyTorch
-          brew install cmake ninja
+          # Install/upgrade system dependencies needed for Metal/PyTorch
+          # Handle potential conflicts with existing installations gracefully
+
+          echo "Checking and installing/upgrading build dependencies..."
+
+          # Function to safely install or upgrade brew packages
+          install_or_upgrade() {
+            local package=$1
+            if brew list "$package" &>/dev/null; then
+              echo "$package is already installed, checking for updates..."
+              brew upgrade "$package" || echo "$package is already up to date"
+            else
+              echo "Installing $package..."
+              brew install "$package"
+            fi
+          }
+
+          install_or_upgrade cmake
+          install_or_upgrade ninja
+
+          echo "Build dependencies ready!"
+          cmake --version
+          ninja --version
 
       - name: Build Swift package first
         run: swift build -c release
 
       - name: Install Python dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools wheel
           cd examples/pytorch-custom-op-ffi
+          # Install PyTorch with MPS support (default index includes MPS for macOS)
           pip install torch torchvision torchaudio
-          pip install numpy pytest pytest-cov
+          # Install other dependencies
+          pip install numpy pytest pytest-cov pybind11
 
       - name: Build Python extension
         run: |
