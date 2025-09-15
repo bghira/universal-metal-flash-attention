@@ -62,6 +62,16 @@ repos:
         args: ["--fix"]
         files: '\.md$'
 
+  # Swift testing
+  - repo: local
+    hooks:
+      - id: swift-test
+        name: Swift Tests
+        entry: swift test
+        language: system
+        files: '\.(swift)$'
+        pass_filenames: false
+
 # Configuration for ci
 ci:
   autofix_commit_msg: |
