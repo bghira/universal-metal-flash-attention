@@ -497,86 +497,80 @@ public func mfa_attention_forward_quantized(
     return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
   }
 
-  do {
-    // Create quantized attention descriptor
-    var baseDescriptor = AttentionDescriptor()
-    baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
-    baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
-    baseDescriptor.sparsityPattern = causal ? .causal : .none
+  // Create quantized attention descriptor
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
+  baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
 
-    // Create quantization configuration
-    var quantConfig = QuantizedAttention.Configuration()
-    quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
-    quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
-    quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
+  // Create quantization configuration
+  var quantConfig = QuantizedAttention.Configuration()
+  quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
+  quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
+  quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
 
-    let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
-      baseDescriptor: baseDescriptor,
-      quantizationConfig: quantConfig
+  let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
+    baseDescriptor: baseDescriptor,
+    quantizationConfig: quantConfig
+  )
+
+  // Create quantized attention instance
+  let quantizedAttention = QuantizedAttention(device: mfaContext.device)
+
+  // Create quantized tensors from buffers
+  let qParams = QuantizationParameters(
+    scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
+  )
+  let kParams = QuantizationParameters(
+    scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
+  )
+  let vParams = QuantizationParameters(
+    scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
+  )
+
+  let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
+  let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
+
+  let qTensor = QuantizedTensor(
+    device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
+    elementCount: elementCount, shape: shape
+  )
+  let kTensor = QuantizedTensor(
+    device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
+    elementCount: elementCount, shape: shape
+  )
+  let vTensor = QuantizedTensor(
+    device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
+    elementCount: elementCount, shape: shape
+  )
+
+  // Execute quantized forward pass
+  guard
+    let commandBuffer = quantizedAttention.forward(
+      query: qTensor,
+      key: kTensor,
+      value: vTensor,
+      output: outBuffer.buffer,
+      descriptor: quantDescriptor
     )
-
-    // Create quantized attention instance
-    let quantizedAttention = QuantizedAttention(device: mfaContext.device)
-
-    // Create quantized tensors from buffers
-    let qParams = QuantizationParameters(
-      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
-    )
-    let kParams = QuantizationParameters(
-      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
-    )
-    let vParams = QuantizationParameters(
-      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
-    )
-
-    let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
-    let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
-
-    let qTensor = QuantizedTensor(
-      device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-      elementCount: elementCount, shape: shape
-    )
-    let kTensor = QuantizedTensor(
-      device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-      elementCount: elementCount, shape: shape
-    )
-    let vTensor = QuantizedTensor(
-      device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-      elementCount: elementCount, shape: shape
-    )
-
-    // Execute quantized forward pass
-    guard
-      let commandBuffer = quantizedAttention.forward(
-        query: qTensor,
-        key: kTensor,
-        value: vTensor,
-        output: outBuffer.buffer,
-        descriptor: quantDescriptor
-      )
-    else {
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Execute and wait for completion
-    commandBuffer.commit()
-    commandBuffer.waitUntilCompleted()
-
-    if let error = commandBuffer.error {
-      print("Metal execution error: \(error)")
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Store GPU timing for zero-overhead measurement
-    let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    globalContext?.lastGPULatency = gpuLatency
-
-    return 0 // MFA_SUCCESS
-
-  } catch {
-    print("MFA Quantized Error: \(error)")
-    return 4 // MFA_ERROR_KERNEL_COMPILATION
+  else {
+    return 5 // MFA_ERROR_EXECUTION_FAILED
   }
+
+  // Execute and wait for completion
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Metal execution error: \(error)")
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  // Store GPU timing for zero-overhead measurement
+  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+  globalContext?.lastGPULatency = gpuLatency
+
+  return 0 // MFA_SUCCESS
 }
 
 @_cdecl("mfa_attention_backward_query_quantized")
@@ -634,89 +628,83 @@ public func mfa_attention_backward_query_quantized(
     return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
   }
 
-  do {
-    // Create quantized attention descriptor
-    var baseDescriptor = AttentionDescriptor()
-    baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
-    baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
-    baseDescriptor.sparsityPattern = causal ? .causal : .none
+  // Create quantized attention descriptor
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
+  baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
 
-    // Create quantization configuration
-    var quantConfig = QuantizedAttention.Configuration()
-    quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
-    quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
-    quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
+  // Create quantization configuration
+  var quantConfig = QuantizedAttention.Configuration()
+  quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
+  quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
+  quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
 
-    let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
-      baseDescriptor: baseDescriptor,
-      quantizationConfig: quantConfig
+  let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
+    baseDescriptor: baseDescriptor,
+    quantizationConfig: quantConfig
+  )
+
+  // Create quantized attention instance
+  let quantizedAttention = QuantizedAttention(device: mfaContext.device)
+
+  // Create quantized tensors from buffers
+  let qParams = QuantizationParameters(
+    scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
+  )
+  let kParams = QuantizationParameters(
+    scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
+  )
+  let vParams = QuantizationParameters(
+    scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
+  )
+
+  let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
+  let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
+
+  let qTensor = QuantizedTensor(
+    device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
+    elementCount: elementCount, shape: shape
+  )
+  let kTensor = QuantizedTensor(
+    device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
+    elementCount: elementCount, shape: shape
+  )
+  let vTensor = QuantizedTensor(
+    device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
+    elementCount: elementCount, shape: shape
+  )
+
+  // Execute quantized backward query pass
+  guard
+    let commandBuffer = quantizedAttention.backwardQuery(
+      query: qTensor,
+      key: kTensor,
+      value: vTensor,
+      gradOutput: gradOutputBuffer.buffer,
+      logsumexp: logsumexpBuffer.buffer,
+      gradQuery: gradQueryBuffer.buffer,
+      dValues: dValuesBuffer.buffer,
+      descriptor: quantDescriptor
     )
-
-    // Create quantized attention instance
-    let quantizedAttention = QuantizedAttention(device: mfaContext.device)
-
-    // Create quantized tensors from buffers
-    let qParams = QuantizationParameters(
-      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
-    )
-    let kParams = QuantizationParameters(
-      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
-    )
-    let vParams = QuantizationParameters(
-      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
-    )
-
-    let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
-    let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
-
-    let qTensor = QuantizedTensor(
-      device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-      elementCount: elementCount, shape: shape
-    )
-    let kTensor = QuantizedTensor(
-      device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-      elementCount: elementCount, shape: shape
-    )
-    let vTensor = QuantizedTensor(
-      device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-      elementCount: elementCount, shape: shape
-    )
-
-    // Execute quantized backward query pass
-    guard
-      let commandBuffer = quantizedAttention.backwardQuery(
-        query: qTensor,
-        key: kTensor,
-        value: vTensor,
-        gradOutput: gradOutputBuffer.buffer,
-        logsumexp: logsumexpBuffer.buffer,
-        gradQuery: gradQueryBuffer.buffer,
-        dValues: dValuesBuffer.buffer,
-        descriptor: quantDescriptor
-      )
-    else {
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Execute and wait for completion
-    commandBuffer.commit()
-    commandBuffer.waitUntilCompleted()
-
-    if let error = commandBuffer.error {
-      print("Metal execution error: \(error)")
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Store GPU timing
-    let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    globalContext?.lastGPULatency = gpuLatency
-
-    return 0 // MFA_SUCCESS
-
-  } catch {
-    print("MFA Quantized Backward Query Error: \(error)")
-    return 4 // MFA_ERROR_KERNEL_COMPILATION
+  else {
+    return 5 // MFA_ERROR_EXECUTION_FAILED
   }
+
+  // Execute and wait for completion
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Metal execution error: \(error)")
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  // Store GPU timing
+  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+  globalContext?.lastGPULatency = gpuLatency
+
+  return 0 // MFA_SUCCESS
 }
 
 @_cdecl("mfa_attention_backward_kv_quantized")
@@ -777,89 +765,83 @@ public func mfa_attention_backward_kv_quantized(
     return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
   }
 
-  do {
-    // Create quantized attention descriptor
-    var baseDescriptor = AttentionDescriptor()
-    baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
-    baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
-    baseDescriptor.sparsityPattern = causal ? .causal : .none
+  // Create quantized attention descriptor
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
+  baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
 
-    // Create quantization configuration
-    var quantConfig = QuantizedAttention.Configuration()
-    quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
-    quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
-    quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
+  // Create quantization configuration
+  var quantConfig = QuantizedAttention.Configuration()
+  quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
+  quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
+  quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
 
-    let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
-      baseDescriptor: baseDescriptor,
-      quantizationConfig: quantConfig
+  let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
+    baseDescriptor: baseDescriptor,
+    quantizationConfig: quantConfig
+  )
+
+  // Create quantized attention instance
+  let quantizedAttention = QuantizedAttention(device: mfaContext.device)
+
+  // Create quantized tensors from buffers
+  let qParams = QuantizationParameters(
+    scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
+  )
+  let kParams = QuantizationParameters(
+    scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
+  )
+  let vParams = QuantizationParameters(
+    scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
+  )
+
+  let elementCount = Int(batchSize * seqLenKV * UInt32(headDim))
+  let shape = [Int(batchSize), Int(seqLenKV), Int(headDim)]
+
+  let qTensor = QuantizedTensor(
+    device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
+    elementCount: Int(batchSize * seqLenQ * UInt32(headDim)),
+    shape: [Int(batchSize), Int(seqLenQ), Int(headDim)]
+  )
+  let kTensor = QuantizedTensor(
+    device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
+    elementCount: elementCount, shape: shape
+  )
+  let vTensor = QuantizedTensor(
+    device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
+    elementCount: elementCount, shape: shape
+  )
+
+  // Execute quantized backward key-value pass
+  guard
+    let commandBuffer = quantizedAttention.backwardKeyValue(
+      query: qTensor,
+      key: kTensor,
+      value: vTensor,
+      gradOutput: gradOutputBuffer.buffer,
+      logsumexp: logsumexpBuffer.buffer,
+      dValues: dValuesBuffer.buffer,
+      gradKey: gradKeyBuffer.buffer,
+      gradValue: gradValueBuffer.buffer,
+      descriptor: quantDescriptor
     )
-
-    // Create quantized attention instance
-    let quantizedAttention = QuantizedAttention(device: mfaContext.device)
-
-    // Create quantized tensors from buffers
-    let qParams = QuantizationParameters(
-      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
-    )
-    let kParams = QuantizationParameters(
-      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
-    )
-    let vParams = QuantizationParameters(
-      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
-    )
-
-    let elementCount = Int(batchSize * seqLenKV * UInt32(headDim))
-    let shape = [Int(batchSize), Int(seqLenKV), Int(headDim)]
-
-    let qTensor = QuantizedTensor(
-      device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-      elementCount: Int(batchSize * seqLenQ * UInt32(headDim)),
-      shape: [Int(batchSize), Int(seqLenQ), Int(headDim)]
-    )
-    let kTensor = QuantizedTensor(
-      device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-      elementCount: elementCount, shape: shape
-    )
-    let vTensor = QuantizedTensor(
-      device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-      elementCount: elementCount, shape: shape
-    )
-
-    // Execute quantized backward key-value pass
-    guard
-      let commandBuffer = quantizedAttention.backwardKeyValue(
-        query: qTensor,
-        key: kTensor,
-        value: vTensor,
-        gradOutput: gradOutputBuffer.buffer,
-        logsumexp: logsumexpBuffer.buffer,
-        dValues: dValuesBuffer.buffer,
-        gradKey: gradKeyBuffer.buffer,
-        gradValue: gradValueBuffer.buffer,
-        descriptor: quantDescriptor
-      )
-    else {
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Execute and wait for completion
-    commandBuffer.commit()
-    commandBuffer.waitUntilCompleted()
-
-    if let error = commandBuffer.error {
-      print("Metal execution error: \(error)")
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Store GPU timing
-    let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    globalContext?.lastGPULatency = gpuLatency
-
-    return 0 // MFA_SUCCESS
-
-  } catch {
-    print("MFA Quantized Backward KV Error: \(error)")
-    return 4 // MFA_ERROR_KERNEL_COMPILATION
+  else {
+    return 5 // MFA_ERROR_EXECUTION_FAILED
   }
+
+  // Execute and wait for completion
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Metal execution error: \(error)")
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  // Store GPU timing
+  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+  globalContext?.lastGPULatency = gpuLatency
+
+  return 0 // MFA_SUCCESS
 }
