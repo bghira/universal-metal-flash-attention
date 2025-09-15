@@ -13,28 +13,28 @@ final class BackwardPassTests: XCTestCase {
       throw XCTSkip("Metal device not available")
     }
     self.device = device
-    self.quantizedAttention = QuantizedAttention(device: device)
+    quantizedAttention = QuantizedAttention(device: device)
   }
 
   func testMetalKernelCompilation() throws {
     let testKernel = """
-      #include <metal_stdlib>
-      using namespace metal;
+    #include <metal_stdlib>
+    using namespace metal;
 
-      kernel void test_quantized_kernel(
-          device const char *input [[buffer(0)]],
-          device float *output [[buffer(1)]],
-          constant float &scale [[buffer(2)]],
-          constant int32_t &zero_point [[buffer(3)]],
-          uint gid [[thread_position_in_grid]]
-      ) {
-          if (gid >= 256) return;
+    kernel void test_quantized_kernel(
+        device const char *input [[buffer(0)]],
+        device float *output [[buffer(1)]],
+        constant float &scale [[buffer(2)]],
+        constant int32_t &zero_point [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]
+    ) {
+        if (gid >= 256) return;
 
-          char quantized = input[gid];
-          float dequantized = (float(quantized) - float(zero_point)) * scale;
-          output[gid] = dequantized * dequantized; // Simple test computation
-      }
-      """
+        char quantized = input[gid];
+        float dequantized = (float(quantized) - float(zero_point)) * scale;
+        output[gid] = dequantized * dequantized; // Simple test computation
+    }
+    """
 
     let library = try device.makeLibrary(source: testKernel, options: nil)
     let function = try XCTUnwrap(library.makeFunction(name: "test_quantized_kernel"))
@@ -46,23 +46,23 @@ final class BackwardPassTests: XCTestCase {
 
   func testBasicGPUComputation() throws {
     let testKernel = """
-      #include <metal_stdlib>
-      using namespace metal;
+    #include <metal_stdlib>
+    using namespace metal;
 
-      kernel void test_quantized_kernel(
-          device const char *input [[buffer(0)]],
-          device float *output [[buffer(1)]],
-          constant float &scale [[buffer(2)]],
-          constant int32_t &zero_point [[buffer(3)]],
-          uint gid [[thread_position_in_grid]]
-      ) {
-          if (gid >= 256) return;
+    kernel void test_quantized_kernel(
+        device const char *input [[buffer(0)]],
+        device float *output [[buffer(1)]],
+        constant float &scale [[buffer(2)]],
+        constant int32_t &zero_point [[buffer(3)]],
+        uint gid [[thread_position_in_grid]]
+    ) {
+        if (gid >= 256) return;
 
-          char quantized = input[gid];
-          float dequantized = (float(quantized) - float(zero_point)) * scale;
-          output[gid] = dequantized * dequantized;
-      }
-      """
+        char quantized = input[gid];
+        float dequantized = (float(quantized) - float(zero_point)) * scale;
+        output[gid] = dequantized * dequantized;
+    }
+    """
 
     let library = try device.makeLibrary(source: testKernel, options: nil)
     let function = try XCTUnwrap(library.makeFunction(name: "test_quantized_kernel"))
@@ -72,12 +72,13 @@ final class BackwardPassTests: XCTestCase {
     let commandQueue = try XCTUnwrap(device.makeCommandQueue())
     let inputBuffer = try XCTUnwrap(device.makeBuffer(length: 256, options: .storageModeShared))
     let outputBuffer = try XCTUnwrap(
-      device.makeBuffer(length: 256 * 4, options: .storageModeShared))
+      device.makeBuffer(length: 256 * 4, options: .storageModeShared)
+    )
 
     // Fill input with test data
     let inputPtr = inputBuffer.contents().bindMemory(to: Int8.self, capacity: 256)
     for i in 0..<256 {
-      inputPtr[i] = Int8(i - 128)  // Range -128 to 127
+      inputPtr[i] = Int8(i - 128) // Range -128 to 127
     }
 
     // Run kernel
@@ -94,7 +95,7 @@ final class BackwardPassTests: XCTestCase {
     encoder.setBytes(&zeroPoint, length: MemoryLayout<Int32>.size, index: 3)
 
     let threadgroupSize = MTLSize(width: 64, height: 1, depth: 1)
-    let threadgroupCount = MTLSize(width: 4, height: 1, depth: 1)  // 256/64 = 4
+    let threadgroupCount = MTLSize(width: 4, height: 1, depth: 1) // 256/64 = 4
 
     encoder.dispatchThreadgroups(threadgroupCount, threadsPerThreadgroup: threadgroupSize)
     encoder.endEncoding()

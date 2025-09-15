@@ -22,26 +22,26 @@ final class ComprehensiveQuantizationTests: XCTestCase {
 
   func testSimdgroupMatrixQuantizedLoadIntegration() throws {
     let source = """
-      #include <metal_stdlib>
-      using namespace metal;
+    #include <metal_stdlib>
+    using namespace metal;
 
-      // Test the quantization parameter integration
-      kernel void test_simdgroup_quantized_load(
-          device char *input [[buffer(0)]],
-          device float *output [[buffer(1)]],
-          constant float &scale [[buffer(2)]],
-          constant int32_t &zero_point [[buffer(3)]],
-          constant uint &size [[buffer(4)]],
-          uint gid [[thread_position_in_grid]]
-      ) {
-          if (gid >= size) return;
+    // Test the quantization parameter integration
+    kernel void test_simdgroup_quantized_load(
+        device char *input [[buffer(0)]],
+        device float *output [[buffer(1)]],
+        constant float &scale [[buffer(2)]],
+        constant int32_t &zero_point [[buffer(3)]],
+        constant uint &size [[buffer(4)]],
+        uint gid [[thread_position_in_grid]]
+    ) {
+        if (gid >= size) return;
 
-          // Simulate quantized load operation with parameters
-          char quantized_value = input[gid];
-          float dequantized = (float(quantized_value) - float(zero_point)) * scale;
-          output[gid] = dequantized;
-      }
-      """
+        // Simulate quantized load operation with parameters
+        char quantized_value = input[gid];
+        float dequantized = (float(quantized_value) - float(zero_point)) * scale;
+        output[gid] = dequantized;
+    }
+    """
 
     let library = try device.makeLibrary(source: source, options: nil)
     let function = try XCTUnwrap(library.makeFunction(name: "test_simdgroup_quantized_load"))
@@ -55,9 +55,11 @@ final class ComprehensiveQuantizationTests: XCTestCase {
 
     // Create buffers
     let inputBuffer = try XCTUnwrap(
-      device.makeBuffer(bytes: inputData, length: size, options: .storageModeShared))
+      device.makeBuffer(bytes: inputData, length: size, options: .storageModeShared)
+    )
     let outputBuffer = try XCTUnwrap(
-      device.makeBuffer(length: size * 4, options: .storageModeShared))
+      device.makeBuffer(length: size * 4, options: .storageModeShared)
+    )
 
     // Execute kernel
     let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
@@ -86,7 +88,8 @@ final class ComprehensiveQuantizationTests: XCTestCase {
       let expected = Float(Int32(inputData[i]) - Int32(zeroPoint)) * scale
       XCTAssertEqual(
         outputPtr[i], expected, accuracy: 1e-6,
-        "Quantization parameter integration should work correctly at index \(i)")
+        "Quantization parameter integration should work correctly at index \(i)"
+      )
     }
   }
 
@@ -102,23 +105,23 @@ final class ComprehensiveQuantizationTests: XCTestCase {
       print("Testing: \(testCase.description)")
 
       let source = """
-        #include <metal_stdlib>
-        using namespace metal;
+      #include <metal_stdlib>
+      using namespace metal;
 
-        kernel void test_parameter_variations(
-            device char *input [[buffer(0)]],
-            device float *output [[buffer(1)]],
-            constant float &scale [[buffer(2)]],
-            constant int32_t &zero_point [[buffer(3)]],
-            uint gid [[thread_position_in_grid]]
-        ) {
-            if (gid >= 128) return;
+      kernel void test_parameter_variations(
+          device char *input [[buffer(0)]],
+          device float *output [[buffer(1)]],
+          constant float &scale [[buffer(2)]],
+          constant int32_t &zero_point [[buffer(3)]],
+          uint gid [[thread_position_in_grid]]
+      ) {
+          if (gid >= 128) return;
 
-            char quantized = input[gid];
-            float dequantized = (float(quantized) - float(zero_point)) * scale;
-            output[gid] = dequantized * dequantized; // Square for validation
-        }
-        """
+          char quantized = input[gid];
+          float dequantized = (float(quantized) - float(zero_point)) * scale;
+          output[gid] = dequantized * dequantized; // Square for validation
+      }
+      """
 
       let library = try device.makeLibrary(source: source, options: nil)
       let function = try XCTUnwrap(library.makeFunction(name: "test_parameter_variations"))
@@ -128,9 +131,11 @@ final class ComprehensiveQuantizationTests: XCTestCase {
       let inputData: [Int8] = (0..<128).map { Int8(clamping: $0 - 64) }
 
       let inputBuffer = try XCTUnwrap(
-        device.makeBuffer(bytes: inputData, length: 128, options: .storageModeShared))
+        device.makeBuffer(bytes: inputData, length: 128, options: .storageModeShared)
+      )
       let outputBuffer = try XCTUnwrap(
-        device.makeBuffer(length: 128 * 4, options: .storageModeShared))
+        device.makeBuffer(length: 128 * 4, options: .storageModeShared)
+      )
 
       let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
       let encoder = try XCTUnwrap(commandBuffer.makeComputeCommandEncoder())
@@ -143,7 +148,8 @@ final class ComprehensiveQuantizationTests: XCTestCase {
 
       encoder.dispatchThreads(
         MTLSize(width: 128, height: 1, depth: 1),
-        threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1)
+      )
       encoder.endEncoding()
 
       commandBuffer.commit()
@@ -151,7 +157,8 @@ final class ComprehensiveQuantizationTests: XCTestCase {
 
       XCTAssertNil(
         commandBuffer.error,
-        "Kernel execution should complete without errors for \(testCase.description)")
+        "Kernel execution should complete without errors for \(testCase.description)"
+      )
 
       // Verify some outputs are computed correctly
       let outputPtr = outputBuffer.contents().bindMemory(to: Float.self, capacity: 128)
@@ -164,7 +171,8 @@ final class ComprehensiveQuantizationTests: XCTestCase {
         }
       }
       XCTAssertTrue(
-        hasValidOutput, "Should have at least some valid computations for \(testCase.description)")
+        hasValidOutput, "Should have at least some valid computations for \(testCase.description)"
+      )
     }
   }
 
@@ -180,11 +188,14 @@ final class ComprehensiveQuantizationTests: XCTestCase {
 
     // Create quantized tensors with different parameters
     let qTensor = QuantizedTensor.from(
-      device: device, floatData: testData, shape: shape, precision: .INT8)
+      device: device, floatData: testData, shape: shape, precision: .INT8
+    )
     let kTensor = QuantizedTensor.from(
-      device: device, floatData: testData, shape: shape, precision: .INT8)
+      device: device, floatData: testData, shape: shape, precision: .INT8
+    )
     let vTensor = QuantizedTensor.from(
-      device: device, floatData: testData, shape: shape, precision: .INT8)
+      device: device, floatData: testData, shape: shape, precision: .INT8
+    )
 
     XCTAssertEqual(qTensor.parameters.precision, .INT8)
     XCTAssertEqual(kTensor.parameters.precision, .INT8)
@@ -209,7 +220,8 @@ final class ComprehensiveQuantizationTests: XCTestCase {
 
       // Test INT8 quantization
       let qTensorInt8 = QuantizedTensor.from(
-        device: device, floatData: testData, shape: [1, 1000], precision: .INT8)
+        device: device, floatData: testData, shape: [1, 1000], precision: .INT8
+      )
       let reconstructedInt8 = qTensorInt8.toFloats()
 
       let rmseInt8 = calculateRMSE(testData, reconstructedInt8)
@@ -220,12 +232,14 @@ final class ComprehensiveQuantizationTests: XCTestCase {
         "Range \(range.description): INT8 relative error = \(String(format: "%.4f", relativeErrorInt8))"
       )
       XCTAssertLessThan(
-        relativeErrorInt8, 0.05, "INT8 relative error should be < 5% for \(range.description)")
+        relativeErrorInt8, 0.05, "INT8 relative error should be < 5% for \(range.description)"
+      )
 
       // Test INT4 quantization for smaller ranges
       if rangeSize <= 2.0 {
         let qTensorInt4 = QuantizedTensor.from(
-          device: device, floatData: testData, shape: [1, 1000], precision: .INT4)
+          device: device, floatData: testData, shape: [1, 1000], precision: .INT4
+        )
         let reconstructedInt4 = qTensorInt4.toFloats()
 
         let rmseInt4 = calculateRMSE(testData, reconstructedInt4)
@@ -235,7 +249,8 @@ final class ComprehensiveQuantizationTests: XCTestCase {
           "Range \(range.description): INT4 relative error = \(String(format: "%.4f", relativeErrorInt4))"
         )
         XCTAssertLessThan(
-          relativeErrorInt4, 0.1, "INT4 relative error should be < 10% for \(range.description)")
+          relativeErrorInt4, 0.1, "INT4 relative error should be < 10% for \(range.description)"
+        )
       }
     }
   }
@@ -246,7 +261,7 @@ final class ComprehensiveQuantizationTests: XCTestCase {
 private func calculateRMSE(_ original: [Float], _ reconstructed: [Float]) -> Float {
   guard original.count == reconstructed.count else { return Float.infinity }
 
-  let squaredErrors = zip(original, reconstructed).map { (orig, recon) in
+  let squaredErrors = zip(original, reconstructed).map { orig, recon in
     let error = orig - recon
     return error * error
   }

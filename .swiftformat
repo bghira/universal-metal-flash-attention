@@ -1,0 +1,57 @@
+# SwiftFormat configuration for Universal Metal Flash Attention
+# See https://github.com/nicklockwood/SwiftFormat for more information
+
+# Basic rules
+--indent 2
+--linebreaks lf
+--maxwidth 100
+--semicolons never
+--trimwhitespace always
+--insertlines enabled
+--removelines enabled
+
+# Swift version (align with your target)
+--swiftversion 5.10
+
+# Import organization
+--importgrouping testable-bottom
+
+# Wrapping options
+--wraparguments before-first
+--wrapcollections before-first
+--wrapparameters before-first
+--wrapconditions before-first
+--wrapreturntype if-multiline
+
+# Spacing and alignment
+--operatorfunc spaced
+--nospaceoperators ..<,...
+--ranges spaced
+--typeattributes prev-line
+--varattributes same-line
+
+# Function declarations
+--funcattributes prev-line
+--typeattributes prev-line
+--storedvarattrs same-line
+
+# Control flow
+--elseposition same-line
+--guardelse auto
+--ifdef indent
+
+# Enabled rules (explicit for clarity)
+--enable isEmpty
+--enable sortedImports
+--enable duplicateImports
+--enable unusedArguments
+--enable redundantSelf
+--enable redundantParens
+--enable redundantReturn
+--enable redundantVoidReturnType
+--enable consecutiveSpaces
+--enable trailingSpace
+
+# Disabled rules that might be too aggressive
+--disable strongOutlets
+--disable redundantRawValues

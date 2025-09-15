@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 
-import numpy as np
 import sys
 from pathlib import Path
+
+import numpy as np
 
 # Add the source directory to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import umfa
+
 
 def main():
     print("Buffer Debug Test")
@@ -55,10 +57,13 @@ def main():
             # Test basic attention
             print(f"\n🚀 Running attention...")
             output = umfa.flash_attention_forward(
-                ctx, q, k, v,
+                ctx,
+                q,
+                k,
+                v,
                 causal=False,
                 input_precision="fp32",
-                intermediate_precision="fp32"
+                intermediate_precision="fp32",
             )
 
             print(f"✅ Output shape: {output.shape}, dtype: {output.dtype}")
@@ -72,10 +77,12 @@ def main():
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
+
         traceback.print_exc()
         return 1
 
     return 0
+
 
 if __name__ == "__main__":
     exit(main())

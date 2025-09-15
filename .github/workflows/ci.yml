@@ -1,0 +1,257 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run tests weekly on Sunday at 2 AM UTC
+    - cron: '0 2 * * 0'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Pre-commit hooks and linting
+  lint:
+    name: Lint and Format Check
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pre-commit
+
+      - name: Cache pre-commit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+
+  # Swift package testing
+  swift-tests:
+    name: Swift Tests
+    runs-on: macos-15
+    strategy:
+      matrix:
+        configuration: [debug, release]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: List available Xcode versions
+        run: |
+          echo "Available Xcode versions:"
+          ls /Applications/ | grep Xcode || echo "No Xcode apps found"
+          echo "Current Xcode version:"
+          xcodebuild -version || echo "xcodebuild not found"
+          echo "Current developer directory:"
+          xcode-select -p || echo "xcode-select not working"
+
+      - name: Cache Swift Package Manager
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build
+            ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      - name: Build Swift Package
+        run: swift build -c ${{ matrix.configuration }}
+
+      - name: Run Swift Tests
+        run: swift test -c ${{ matrix.configuration }} --parallel
+
+      - name: Generate test coverage (release only)
+        if: matrix.configuration == 'release'
+        run: |
+          swift test --enable-code-coverage
+          xcrun llvm-cov export -format="lcov" \
+            .build/debug/universal-metal-flash-attentionPackageTests.xctest/Contents/MacOS/universal-metal-flash-attentionPackageTests \
+            -instr-profile .build/debug/codecov/default.profdata > coverage.lcov
+
+      - name: Upload coverage to Codecov
+        if: matrix.configuration == 'release'
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.lcov
+          flags: swift
+          name: swift-tests
+
+  # Python integration tests
+  python-tests:
+    name: Python Integration Tests
+    runs-on: macos-15
+    strategy:
+      matrix:
+        python-version: ['3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/requirements*.txt', '**/setup.py') }}
+
+      - name: Install system dependencies
+        run: |
+          # Install/upgrade system dependencies needed for Metal/PyTorch
+          # Handle potential conflicts with existing installations gracefully
+
+          echo "Checking and installing/upgrading build dependencies..."
+
+          # Function to safely install or upgrade brew packages
+          install_or_upgrade() {
+            local package=$1
+            if brew list "$package" &>/dev/null; then
+              echo "$package is already installed, checking for updates..."
+              brew upgrade "$package" || echo "$package is already up to date"
+            else
+              echo "Installing $package..."
+              brew install "$package"
+            fi
+          }
+
+          install_or_upgrade cmake
+          install_or_upgrade ninja
+
+          echo "Build dependencies ready!"
+          cmake --version
+          ninja --version
+
+      - name: Build Swift package first
+        run: swift build -c release
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          cd examples/pytorch-custom-op-ffi
+          # Install PyTorch with MPS support (default index includes MPS for macOS)
+          pip install torch torchvision torchaudio
+          # Install other dependencies
+          pip install numpy pytest pytest-cov pybind11
+
+      - name: Build Python extension
+        run: |
+          cd examples/pytorch-custom-op-ffi
+          python setup.py build_ext --inplace
+
+      - name: Run Python tests
+        run: |
+          cd examples/pytorch-custom-op-ffi
+          # Skip GPU tests on CI runners (no proper Metal support)
+          # Only run unit tests and integration tests that don't require GPU
+          python -m pytest tests/ -v --cov=. --cov-report=xml -m "not gpu"
+        env:
+          PYTORCH_ENABLE_MPS_FALLBACK: 1
+
+      - name: Upload Python coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: examples/pytorch-custom-op-ffi/coverage.xml
+          flags: python
+          name: python-${{ matrix.python-version }}
+
+  # Performance benchmarks
+  benchmarks:
+    name: Performance Benchmarks
+    runs-on: macos-14
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build release package
+        run: swift build -c release
+
+      - name: Run benchmarks
+        run: |
+          cd benchmarks
+          swift run -c release AttentionBenchmark --iterations 100 --output results.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmarks/results.json
+
+  # Security scanning
+  security:
+    name: Security Scan
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # Documentation checks
+  docs:
+    name: Documentation Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for broken links
+        uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          use-quiet-mode: 'yes'
+          use-verbose-mode: 'yes'
+          config-file: '.github/markdown-link-check.json'
+
+      - name: Validate README structure
+        run: |
+          # Check that README has required sections
+          if ! grep -q "## Installation" README.md; then
+            echo "❌ README missing Installation section"
+            exit 1
+          fi
+          if ! grep -q "## Usage" README.md; then
+            echo "❌ README missing Usage section"
+            exit 1
+          fi
+          echo "✅ README structure is valid"

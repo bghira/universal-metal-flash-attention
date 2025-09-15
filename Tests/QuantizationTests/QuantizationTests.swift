@@ -4,7 +4,6 @@ import XCTest
 @testable import MFABridge
 
 final class QuantizationTests: XCTestCase {
-
   func testInt8QuantizationAccuracy() throws {
     let testData: [Float] = Array(stride(from: -5.0, through: 5.0, by: 0.1))
 
@@ -22,7 +21,8 @@ final class QuantizationTests: XCTestCase {
 
     let (packed, scale, zeroPoint) = quantizeInt4(testData)
     let reconstructed = dequantizeInt4(
-      packed, count: testData.count, scale: scale, zeroPoint: zeroPoint)
+      packed, count: testData.count, scale: scale, zeroPoint: zeroPoint
+    )
     let rmse = calculateRMSE(testData, reconstructed)
 
     XCTAssertLessThan(rmse, 0.2, "INT4 quantization RMSE should be reasonable for small ranges")
@@ -40,7 +40,8 @@ final class QuantizationTests: XCTestCase {
     // Test INT4 compression
     let (packedInt4, _, _) = quantizeInt4(testData)
     XCTAssertEqual(
-      packedInt4.count, (testData.count + 1) / 2, "INT4 should use 0.5 bytes per element")
+      packedInt4.count, (testData.count + 1) / 2, "INT4 should use 0.5 bytes per element"
+    )
   }
 
   func testQuantizationWithEdgeCases() throws {
@@ -51,13 +52,15 @@ final class QuantizationTests: XCTestCase {
 
     XCTAssertTrue(
       reconstructedZeros.allSatisfy { abs($0) < 1e-6 },
-      "Zero data should remain zero after quantization")
+      "Zero data should remain zero after quantization"
+    )
 
     // Test with single value
     let constantData = Array(repeating: Float(5.0), count: 100)
     let (quantizedConstant, scaleConstant, _) = quantizeInt8(constantData)
     let reconstructedConstant = dequantizeInt8(
-      quantizedConstant, scale: scaleConstant, zeroPoint: 0)
+      quantizedConstant, scale: scaleConstant, zeroPoint: 0
+    )
 
     let constantRmse = calculateRMSE(constantData, reconstructedConstant)
     XCTAssertLessThan(constantRmse, 0.1, "Constant data should quantize accurately")
@@ -70,8 +73,8 @@ private func quantizeInt8(_ input: [Float]) -> ([Int8], Float, Int32) {
   let maxVal = input.max() ?? 0.0
   let minVal = input.min() ?? 0.0
   let absMax = max(abs(maxVal), abs(minVal))
-  let scale = absMax > 0 ? absMax / 127.0 : 1.0  // Avoid division by zero
-  let zeroPoint: Int32 = 0  // Symmetric quantization
+  let scale = absMax > 0 ? absMax / 127.0 : 1.0 // Avoid division by zero
+  let zeroPoint: Int32 = 0 // Symmetric quantization
 
   let quantized = input.map { value in
     let quantizedValue = Int32(round(value / scale)) + zeroPoint
@@ -85,15 +88,15 @@ private func quantizeInt4(_ input: [Float]) -> ([UInt8], Float, Int32) {
   let maxVal = input.max() ?? 0.0
   let minVal = input.min() ?? 0.0
   let absMax = max(abs(maxVal), abs(minVal))
-  let scale = absMax > 0 ? absMax / 7.0 : 1.0  // Avoid division by zero
-  let zeroPoint: Int32 = 0  // Symmetric quantization
+  let scale = absMax > 0 ? absMax / 7.0 : 1.0 // Avoid division by zero
+  let zeroPoint: Int32 = 0 // Symmetric quantization
 
   var packed = [UInt8]()
   for i in stride(from: 0, to: input.count, by: 2) {
     let val1 = Int32(round(input[i] / scale)) + zeroPoint
     let val2 = i + 1 < input.count ? Int32(round(input[i + 1] / scale)) + zeroPoint : 0
 
-    let packed1 = UInt8(max(0, min(15, val1 + 8)))  // Clamp [-8,7] to [0,15] before UInt8 conversion
+    let packed1 = UInt8(max(0, min(15, val1 + 8))) // Clamp [-8,7] to [0,15] before UInt8 conversion
     let packed2 = UInt8(max(0, min(15, val2 + 8)))
 
     packed.append((packed2 << 4) | packed1)
@@ -103,7 +106,7 @@ private func quantizeInt4(_ input: [Float]) -> ([UInt8], Float, Int32) {
 }
 
 private func dequantizeInt8(_ quantized: [Int8], scale: Float, zeroPoint: Int32) -> [Float] {
-  return quantized.map { value in
+  quantized.map { value in
     (Float(value) - Float(zeroPoint)) * scale
   }
 }
@@ -113,7 +116,7 @@ private func dequantizeInt4(_ packed: [UInt8], count: Int, scale: Float, zeroPoi
 {
   var result = [Float]()
   for packedByte in packed {
-    let val1 = Int32(packedByte & 0xF) - 8  // Convert from [0,15] to [-8,7]
+    let val1 = Int32(packedByte & 0xF) - 8 // Convert from [0,15] to [-8,7]
     let val2 = Int32(packedByte >> 4) - 8
 
     result.append((Float(val1) - Float(zeroPoint)) * scale)
@@ -127,7 +130,7 @@ private func dequantizeInt4(_ packed: [UInt8], count: Int, scale: Float, zeroPoi
 private func calculateRMSE(_ original: [Float], _ reconstructed: [Float]) -> Float {
   guard original.count == reconstructed.count else { return Float.infinity }
 
-  let squaredErrors = zip(original, reconstructed).map { (orig, recon) in
+  let squaredErrors = zip(original, reconstructed).map { orig, recon in
     let error = orig - recon
     return error * error
   }

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 
-import time
-import numpy as np
 import sys
+import time
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / "examples/python-ffi/src"))
 
 import umfa
+
 
 def benchmark_metal_fa():
     print("🚀 Metal Flash Attention Performance Test")
@@ -28,9 +30,7 @@ def benchmark_metal_fa():
         # Warmup
         for _ in range(5):
             _ = umfa.flash_attention_forward(
-                ctx, q, k, v,
-                causal=True,
-                input_precision="fp16"
+                ctx, q, k, v, causal=True, input_precision="fp16"
             )
 
         # Benchmark
@@ -38,14 +38,14 @@ def benchmark_metal_fa():
         for i in range(20):
             start = time.time()
             output = umfa.flash_attention_forward(
-                ctx, q, k, v,
-                causal=True,
-                input_precision="fp16"
+                ctx, q, k, v, causal=True, input_precision="fp16"
             )
             times.append(time.time() - start)
 
             if i == 0:
-                print(f"✅ First output range: [{output.min():.4f}, {output.max():.4f}]")
+                print(
+                    f"✅ First output range: [{output.min():.4f}, {output.max():.4f}]"
+                )
 
         mean_time = np.mean(times) * 1000  # ms
         std_time = np.std(times) * 1000
@@ -53,7 +53,10 @@ def benchmark_metal_fa():
 
         print(f"📊 Wall-clock time: {mean_time:.2f} ± {std_time:.2f} ms")
         print(f"📊 Min time: {min_time:.2f} ms")
-        print(f"📊 GFLOPS estimate: {(2 * seq_len * seq_len * head_dim) / (mean_time * 1e6):.1f}")
+        print(
+            f"📊 GFLOPS estimate: {(2 * seq_len * seq_len * head_dim) / (mean_time * 1e6):.1f}"
+        )
+
 
 if __name__ == "__main__":
     benchmark_metal_fa()

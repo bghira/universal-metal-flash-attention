@@ -6,7 +6,8 @@ Provides convenience functions for common operations and compatibility checks.
 
 import ctypes
 from typing import Tuple
-from ._ffi import _lib, _check_error
+
+from ._ffi import _check_error, _lib
 from .core import MFAContext
 
 
@@ -39,11 +40,7 @@ def get_version() -> Tuple[int, int, int]:
     minor = ctypes.c_int()
     patch = ctypes.c_int()
 
-    _lib.mfa_get_version(
-        ctypes.byref(major),
-        ctypes.byref(minor),
-        ctypes.byref(patch)
-    )
+    _lib.mfa_get_version(ctypes.byref(major), ctypes.byref(minor), ctypes.byref(patch))
 
     return (major.value, minor.value, patch.value)
 

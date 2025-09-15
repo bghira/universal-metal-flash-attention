@@ -1,0 +1,78 @@
+# Pre-commit hooks configuration for Universal Metal Flash Attention
+# See https://pre-commit.com for more information
+repos:
+  # Python formatting and linting
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+        language_version: python3
+        files: '\.py$'
+
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ["--profile", "black"]
+
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.1
+    hooks:
+      - id: flake8
+        args: ["--max-line-length=88", "--extend-ignore=E203,W503,E501,F401,F541,F841,E402,E722"]
+        exclude: '(examples/.*|.*debug.*\.py|.*test.*\.py|.*_test\.py|setup\.py)'
+
+  # Swift formatting
+  - repo: https://github.com/nicklockwood/SwiftFormat
+    rev: 0.54.3
+    hooks:
+      - id: swiftformat
+        args: ["--config", ".swiftformat"]
+
+  # General file formatting
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+        exclude: '\.md$'
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  # Markdown formatting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.41.0
+    hooks:
+      - id: markdownlint
+        args: ["--fix", "--config", ".markdownlint.yaml"]
+        files: '\.md$'
+
+  # Swift testing
+  - repo: local
+    hooks:
+      - id: swift-test
+        name: Swift Tests
+        entry: swift test
+        language: system
+        files: '\.(swift)$'
+        pass_filenames: false
+
+# Configuration for ci
+ci:
+  autofix_commit_msg: |
+    [pre-commit.ci] auto fixes from pre-commit hooks
+
+    for more information, see https://pre-commit.ci
+  autofix_prs: true
+  autoupdate_branch: ''
+  autoupdate_commit_msg: '[pre-commit.ci] pre-commit autoupdate'
+  autoupdate_schedule: weekly
+  skip: []
+  submodules: false

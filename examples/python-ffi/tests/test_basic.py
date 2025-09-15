@@ -7,6 +7,7 @@ Tests core functionality, error handling, and API compatibility.
 
 import sys
 from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -181,10 +182,12 @@ class TestPrecisions:
         v = np.random.randn(seq_len, head_dim).astype(np.float32)
 
         output = umfa.attention(
-            q, k, v,
+            q,
+            k,
+            v,
             input_precision="fp32",
             intermediate_precision="fp16",
-            output_precision="fp32"
+            output_precision="fp32",
         )
 
         assert output.shape == q.shape

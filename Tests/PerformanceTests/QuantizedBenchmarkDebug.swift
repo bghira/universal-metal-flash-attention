@@ -5,7 +5,6 @@ import XCTest
 @testable import MFABridge
 
 final class QuantizedBenchmarkDebugTests: XCTestCase {
-
   func testIsolatedQuantizedBenchmark() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
       throw XCTSkip("Metal device not available")
@@ -18,9 +17,9 @@ final class QuantizedBenchmarkDebugTests: XCTestCase {
     // Try the smallest possible test case to isolate the error
     let results = quantizedAttention.benchmark(
       batchSize: 1,
-      sequenceLength: 32,  // Very small size
-      headDim: 16,  // Very small head dimension
-      iterations: 1  // Just one iteration to see the error
+      sequenceLength: 32, // Very small size
+      headDim: 16, // Very small head dimension
+      iterations: 1 // Just one iteration to see the error
     )
 
     print("Benchmark completed successfully")

@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 
-import torch
-import torch.nn.functional as F
-import numpy as np
 import sys
 from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
 
 # Add UMFA to path
 sys.path.insert(0, str(Path(__file__).parent / "examples/python-ffi/src"))
 
 try:
     import umfa
+
     print("✅ UMFA successfully imported")
 
     # Simple PyTorch tensor test
@@ -31,9 +33,7 @@ try:
     # Use Metal Flash Attention
     with umfa.MFAContext() as ctx:
         output_np = umfa.flash_attention_forward(
-            ctx, q_np, k_np, v_np,
-            causal=False,
-            input_precision="fp32"
+            ctx, q_np, k_np, v_np, causal=False, input_precision="fp32"
         )
 
     # Convert back to PyTorch
@@ -48,4 +48,5 @@ try:
 except Exception as e:
     print(f"❌ Error: {e}")
     import traceback
+
     traceback.print_exc()
