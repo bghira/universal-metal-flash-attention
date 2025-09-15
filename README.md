@@ -81,6 +81,7 @@ Matrix size: 1024x1024x1024 (Apple M3 Max)
 > - macOS 14.4, Metal 3.2  
 >  
 > Please adjust for your environment; results may vary.
+
 **Key Improvements:**
 
 - **Vectorized memory access** using `char4` instead of individual bytes
