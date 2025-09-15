@@ -128,7 +128,7 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
     }
 
     // Create MFA buffers from tensor data
-    mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
+    mfa_buffer_t q_buffer = nullptr, k_buffer = nullptr, v_buffer = nullptr, out_buffer = nullptr;
 
     size_t q_bytes = q_cpu.numel() * q_cpu.element_size();
     size_t k_bytes = k_cpu.numel() * k_cpu.element_size();
@@ -144,22 +144,25 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
 
     result = mfa_buffer_from_ptr(swift_context_, k_cpu.data_ptr(), k_bytes, &k_buffer);
     if (result != MFA_SUCCESS) {
-        mfa_destroy_buffer(q_buffer);
+        // Note: Don't destroy external memory buffers
+        // if (q_buffer) mfa_destroy_buffer(q_buffer);
         throw std::runtime_error("Failed to create key buffer");
     }
 
     result = mfa_buffer_from_ptr(swift_context_, v_cpu.data_ptr(), v_bytes, &v_buffer);
     if (result != MFA_SUCCESS) {
-        mfa_destroy_buffer(q_buffer);
-        mfa_destroy_buffer(k_buffer);
+        // Note: Don't destroy external memory buffers
+        // if (q_buffer) mfa_destroy_buffer(q_buffer);
+        // if (k_buffer) mfa_destroy_buffer(k_buffer);
         throw std::runtime_error("Failed to create value buffer");
     }
 
     result = mfa_buffer_from_ptr(swift_context_, output.data_ptr(), out_bytes, &out_buffer);
     if (result != MFA_SUCCESS) {
-        mfa_destroy_buffer(q_buffer);
-        mfa_destroy_buffer(k_buffer);
-        mfa_destroy_buffer(v_buffer);
+        // Note: Don't destroy external memory buffers
+        // if (q_buffer) mfa_destroy_buffer(q_buffer);
+        // if (k_buffer) mfa_destroy_buffer(k_buffer);
+        // if (v_buffer) mfa_destroy_buffer(v_buffer);
         throw std::runtime_error("Failed to create output buffer");
     }
 
@@ -174,10 +177,13 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
     );
 
     // Clean up buffers
-    mfa_destroy_buffer(q_buffer);
-    mfa_destroy_buffer(k_buffer);
-    mfa_destroy_buffer(v_buffer);
-    mfa_destroy_buffer(out_buffer);
+    // Note: For external memory buffers (created with deallocator: nil),
+    // we should NOT call mfa_destroy_buffer as it can cause crashes.
+    // The underlying PyTorch tensors manage their own memory.
+    // if (q_buffer) mfa_destroy_buffer(q_buffer);
+    // if (k_buffer) mfa_destroy_buffer(k_buffer);
+    // if (v_buffer) mfa_destroy_buffer(v_buffer);
+    // if (out_buffer) mfa_destroy_buffer(out_buffer);
 
     if (result != MFA_SUCCESS) {
         std::string error_msg = "Metal Flash Attention forward pass failed with code " + std::to_string(result);
