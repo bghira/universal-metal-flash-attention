@@ -27,12 +27,14 @@ This example uses the same C FFI interface as the Rust implementation, achieving
 ## Building and Running
 
 ### Quick Start
+
 ```bash
 # From the objc directory
 make run
 ```
 
 ### Manual Build
+
 ```bash
 # Build the Swift library first
 cd ../..
@@ -54,6 +56,7 @@ DYLD_LIBRARY_PATH=../../.build/debug ./simple_objc_example
 ## Code Structure
 
 ### simple_main.m (~160 lines)
+
 Simple C program that calls the Metal Flash Attention C FFI directly:
 
 ```c
@@ -78,7 +81,9 @@ double latency = mfa_get_gpu_latency(context);
 ```
 
 ### Makefile
+
 Simple build system that:
+
 1. Builds the Swift library (`swift build`)
 2. Compiles the C code with proper linking (`-lMFAFFI`)
 3. Runs with correct library path (`DYLD_LIBRARY_PATH`)

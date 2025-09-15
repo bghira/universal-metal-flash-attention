@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 
-import numpy as np
 import sys
 from pathlib import Path
+
+import numpy as np
 
 # Add the source directory to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 import umfa
+
 
 def main():
     print("Debug Test - Python FFI Issue")
@@ -33,16 +35,15 @@ def main():
 
     print(f"✅ Input shapes: Q={q.shape}, K={k.shape}, V={v.shape}")
     print(f"✅ Data type: {q.dtype}")
-    print(f"✅ Input data (first few elements): Q={q.flat[:5]}, K={k.flat[:5]}, V={v.flat[:5]}")
+    print(
+        f"✅ Input data (first few elements): Q={q.flat[:5]}, K={k.flat[:5]}, V={v.flat[:5]}"
+    )
 
     try:
         # Test with FP32 precision (like working Swift test)
         print("\n🚀 Running attention with FP32 precision...")
         output = umfa.attention(
-            q, k, v,
-            causal=False,
-            input_precision="fp32",
-            output_precision="fp32"
+            q, k, v, causal=False, input_precision="fp32", output_precision="fp32"
         )
 
         print(f"✅ Output shape: {output.shape}, dtype: {output.dtype}")
@@ -64,6 +65,7 @@ def main():
         return 1
 
     return 0
+
 
 if __name__ == "__main__":
     exit(main())

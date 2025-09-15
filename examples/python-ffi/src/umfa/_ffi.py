@@ -63,7 +63,9 @@ def _find_library() -> str:
     # Fallback to system search
     for lib_name in lib_names:
         try:
-            lib = ctypes.util.find_library(lib_name.replace("lib", "").replace(".dylib", ""))
+            lib = ctypes.util.find_library(
+                lib_name.replace("lib", "").replace(".dylib", "")
+            )
             if lib:
                 return lib
         except:
@@ -88,10 +90,19 @@ def _load_library():
     lib.mfa_destroy_context.restype = None
 
     # Buffer management
-    lib.mfa_create_buffer.argtypes = [mfa_context_t, ctypes.c_size_t, ctypes.POINTER(mfa_buffer_t)]
+    lib.mfa_create_buffer.argtypes = [
+        mfa_context_t,
+        ctypes.c_size_t,
+        ctypes.POINTER(mfa_buffer_t),
+    ]
     lib.mfa_create_buffer.restype = mfa_error_t
 
-    lib.mfa_buffer_from_ptr.argtypes = [mfa_context_t, ctypes.c_void_p, ctypes.c_size_t, ctypes.POINTER(mfa_buffer_t)]
+    lib.mfa_buffer_from_ptr.argtypes = [
+        mfa_context_t,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(mfa_buffer_t),
+    ]
     lib.mfa_buffer_from_ptr.restype = mfa_error_t
 
     lib.mfa_buffer_contents.argtypes = [mfa_buffer_t]
@@ -103,24 +114,24 @@ def _load_library():
     # Attention operations
     lib.mfa_attention_forward.argtypes = [
         mfa_context_t,  # context
-        mfa_buffer_t,   # q
-        mfa_buffer_t,   # k
-        mfa_buffer_t,   # v
-        mfa_buffer_t,   # out
+        mfa_buffer_t,  # q
+        mfa_buffer_t,  # k
+        mfa_buffer_t,  # v
+        mfa_buffer_t,  # out
         ctypes.c_uint32,  # batch_size
         ctypes.c_uint32,  # seq_len_q
         ctypes.c_uint32,  # seq_len_kv
         ctypes.c_uint32,  # num_heads
         ctypes.c_uint16,  # head_dim
-        ctypes.c_float,   # softmax_scale
-        ctypes.c_bool,    # causal
+        ctypes.c_float,  # softmax_scale
+        ctypes.c_bool,  # causal
         mfa_precision_t,  # input_precision
         mfa_precision_t,  # intermediate_precision
         mfa_precision_t,  # output_precision
-        ctypes.c_bool,    # transpose_q
-        ctypes.c_bool,    # transpose_k
-        ctypes.c_bool,    # transpose_v
-        ctypes.c_bool,    # transpose_o
+        ctypes.c_bool,  # transpose_q
+        ctypes.c_bool,  # transpose_k
+        ctypes.c_bool,  # transpose_v
+        ctypes.c_bool,  # transpose_o
     ]
     lib.mfa_attention_forward.restype = mfa_error_t
 
@@ -131,7 +142,11 @@ def _load_library():
     lib.mfa_is_device_supported.argtypes = []
     lib.mfa_is_device_supported.restype = ctypes.c_bool
 
-    lib.mfa_get_version.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    lib.mfa_get_version.argtypes = [
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+    ]
     lib.mfa_get_version.restype = None
 
     return lib
@@ -142,7 +157,7 @@ def _get_error_string(code: int) -> str:
     try:
         result = _lib.mfa_error_string(code)
         if result:
-            message = result.decode('utf-8')
+            message = result.decode("utf-8")
             # Note: MFA library allocates this string, we should free it
             # but ctypes doesn't give us direct access to free()
             return message
@@ -166,9 +181,17 @@ __all__ = [
     "MFAError",
     "_check_error",
     "_get_error_string",
-    "MFA_SUCCESS", "MFA_ERROR_INVALID_ARGS", "MFA_ERROR_MEMORY_ALLOCATION",
-    "MFA_ERROR_DEVICE_NOT_SUPPORTED", "MFA_ERROR_KERNEL_COMPILATION",
+    "MFA_SUCCESS",
+    "MFA_ERROR_INVALID_ARGS",
+    "MFA_ERROR_MEMORY_ALLOCATION",
+    "MFA_ERROR_DEVICE_NOT_SUPPORTED",
+    "MFA_ERROR_KERNEL_COMPILATION",
     "MFA_ERROR_EXECUTION_FAILED",
-    "MFA_PRECISION_FP16", "MFA_PRECISION_BF16", "MFA_PRECISION_FP32",
-    "mfa_error_t", "mfa_precision_t", "mfa_context_t", "mfa_buffer_t"
+    "MFA_PRECISION_FP16",
+    "MFA_PRECISION_BF16",
+    "MFA_PRECISION_FP32",
+    "mfa_error_t",
+    "mfa_precision_t",
+    "mfa_context_t",
+    "mfa_buffer_t",
 ]

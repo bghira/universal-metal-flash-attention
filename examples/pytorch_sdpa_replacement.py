@@ -6,12 +6,13 @@ This example demonstrates how to replace torch.nn.functional.scaled_dot_product_
 with our high-performance Metal implementation for 4400+ GINSTRS/sec performance.
 """
 
-import torch
-import torch.nn.functional as F
-import numpy as np
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
 
 # Add UMFA to path (adjust path as needed)
 umfa_path = Path(__file__).parent / "python-ffi/src"
@@ -20,10 +21,13 @@ if umfa_path.exists():
 
 try:
     import umfa
+
     UMFA_AVAILABLE = True
 except ImportError:
     UMFA_AVAILABLE = False
-    print("⚠️  UMFA not available. Install from: /path/to/universal-metal-flash-attention/examples/python")
+    print(
+        "⚠️  UMFA not available. Install from: /path/to/universal-metal-flash-attention/examples/python"
+    )
 
 
 def torch_to_numpy_zero_copy(tensor: torch.Tensor) -> np.ndarray:
@@ -65,7 +69,7 @@ class MetalSDPA:
         attn_mask: torch.Tensor = None,
         dropout_p: float = 0.0,
         is_causal: bool = False,
-        scale: float = None
+        scale: float = None,
     ) -> torch.Tensor:
         """
         Metal Flash Attention implementation of scaled_dot_product_attention.
@@ -87,7 +91,9 @@ class MetalSDPA:
             print("⚠️  Dropout not yet supported in Metal implementation")
 
         if attn_mask is not None:
-            print("⚠️  Custom attention masks not yet supported, using is_causal instead")
+            print(
+                "⚠️  Custom attention masks not yet supported, using is_causal instead"
+            )
 
         # Store original device and dtype
         orig_device = query.device
@@ -113,12 +119,14 @@ class MetalSDPA:
         # Call Metal Flash Attention
         output_np = umfa.flash_attention_forward(
             self.context,
-            q_np, k_np, v_np,
+            q_np,
+            k_np,
+            v_np,
             causal=is_causal,
             softmax_scale=scale,
             input_precision=precision,
             intermediate_precision=precision,
-            output_precision=precision
+            output_precision=precision,
         )
 
         # Convert back to PyTorch
@@ -245,7 +253,9 @@ def usage_examples():
 
             # Note: Current Metal FA supports single-head only
             if num_heads > 1:
-                print(f"⚠️  Multi-head attention ({num_heads} heads) will use single-head Metal FA")
+                print(
+                    f"⚠️  Multi-head attention ({num_heads} heads) will use single-head Metal FA"
+                )
 
             self.metal_sdpa = MetalSDPA()
 
@@ -266,9 +276,15 @@ def usage_examples():
                 attn_out = attn_out.view(batch_size, seq_len, self.d_model)
             else:
                 # Multi-head - fall back to PyTorch (for now)
-                q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-                k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-                v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+                q = q.view(
+                    batch_size, seq_len, self.num_heads, self.head_dim
+                ).transpose(1, 2)
+                k = k.view(
+                    batch_size, seq_len, self.num_heads, self.head_dim
+                ).transpose(1, 2)
+                v = v.view(
+                    batch_size, seq_len, self.num_heads, self.head_dim
+                ).transpose(1, 2)
 
                 attn_out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)
                 attn_out = attn_out.transpose(1, 2).contiguous()
@@ -297,7 +313,9 @@ def main():
 
     if not UMFA_AVAILABLE:
         print("❌ Universal Metal Flash Attention not available")
-        print("   Please install from: /path/to/universal-metal-flash-attention/examples/python")
+        print(
+            "   Please install from: /path/to/universal-metal-flash-attention/examples/python"
+        )
         return 1
 
     if not umfa.is_metal_available():

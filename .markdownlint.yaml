@@ -1,0 +1,17 @@
+# Markdownlint configuration
+# See https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
+
+# Disable line length enforcement for documentation-heavy files
+MD013: false  # Disable line length checks entirely for technical docs
+
+# Allow emphasis as headings for documentation
+MD036: false
+
+# Allow missing language specification in code blocks for simple examples
+MD040: false
+
+# Allow mixed ordered list prefixes for documentation
+MD029: false
+
+# Allow duplicate headings (common in technical docs with repeated sections)
+MD024: false

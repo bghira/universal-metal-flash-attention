@@ -5,11 +5,12 @@ Performance benchmarks for Universal Metal Flash Attention Python bindings.
 Measures throughput, memory usage, and compares with reference implementations.
 """
 
-import time
 import gc
 import sys
+import time
 from pathlib import Path
 from typing import List, Tuple
+
 import numpy as np
 
 # Add the source directory to path
@@ -19,10 +20,7 @@ import umfa
 
 
 def benchmark_attention(
-    seq_len: int,
-    head_dim: int,
-    num_runs: int = 10,
-    precision: str = "fp16"
+    seq_len: int, head_dim: int, num_runs: int = 10, precision: str = "fp16"
 ) -> Tuple[float, float]:
     """
     Benchmark attention performance.
@@ -107,11 +105,11 @@ def run_benchmarks():
 
     # Benchmark configurations
     configs = [
-        (128, 64),    # Small
-        (512, 64),    # Medium
-        (1024, 64),   # Large
-        (2048, 64),   # Very Large
-        (512, 128),   # Wide head
+        (128, 64),  # Small
+        (512, 64),  # Medium
+        (1024, 64),  # Large
+        (2048, 64),  # Very Large
+        (512, 128),  # Wide head
     ]
 
     print("\n📊 Performance Benchmarks")
@@ -128,16 +126,20 @@ def run_benchmarks():
             time_ms, throughput = benchmark_attention(seq_len, head_dim, num_runs=5)
             memory_mb = benchmark_memory_usage(seq_len, head_dim) / (1024 * 1024)
 
-            print(f"{config_name:<15} {time_ms:>8.2f}ms   {throughput:>8.1f} GINST/s   {memory_mb:>8.1f} MB")
+            print(
+                f"{config_name:<15} {time_ms:>8.2f}ms   {throughput:>8.1f} GINST/s   {memory_mb:>8.1f} MB"
+            )
 
-            results.append({
-                'config': config_name,
-                'seq_len': seq_len,
-                'head_dim': head_dim,
-                'time_ms': time_ms,
-                'throughput': throughput,
-                'memory_mb': memory_mb
-            })
+            results.append(
+                {
+                    "config": config_name,
+                    "seq_len": seq_len,
+                    "head_dim": head_dim,
+                    "time_ms": time_ms,
+                    "throughput": throughput,
+                    "memory_mb": memory_mb,
+                }
+            )
 
         except Exception as e:
             print(f"{config_name:<15} {'ERROR':<12} {str(e):<15}")
@@ -152,8 +154,12 @@ def run_benchmarks():
 
     for precision in ["fp16", "fp32"]:
         try:
-            time_ms, throughput = benchmark_attention(512, 64, num_runs=5, precision=precision)
-            print(f"{precision.upper():<12} {time_ms:>8.2f}ms   {throughput:>8.1f} GINST/s")
+            time_ms, throughput = benchmark_attention(
+                512, 64, num_runs=5, precision=precision
+            )
+            print(
+                f"{precision.upper():<12} {time_ms:>8.2f}ms   {throughput:>8.1f} GINST/s"
+            )
         except Exception as e:
             print(f"{precision.upper():<12} {'ERROR':<12} {str(e)}")
 
@@ -164,13 +170,17 @@ def run_benchmarks():
         print("\n💾 Memory Efficiency Analysis")
         print("-" * 40)
 
-        best_throughput = max(results, key=lambda x: x['throughput'])
-        most_efficient = min(results, key=lambda x: x['memory_mb'] / x['throughput'])
+        best_throughput = max(results, key=lambda x: x["throughput"])
+        most_efficient = min(results, key=lambda x: x["memory_mb"] / x["throughput"])
 
-        print(f"Highest Throughput: {best_throughput['config']} "
-              f"({best_throughput['throughput']:.1f} GINST/s)")
-        print(f"Most Memory Efficient: {most_efficient['config']} "
-              f"({most_efficient['throughput']/most_efficient['memory_mb']:.2f} GINST/s per MB)")
+        print(
+            f"Highest Throughput: {best_throughput['config']} "
+            f"({best_throughput['throughput']:.1f} GINST/s)"
+        )
+        print(
+            f"Most Memory Efficient: {most_efficient['config']} "
+            f"({most_efficient['throughput']/most_efficient['memory_mb']:.2f} GINST/s per MB)"
+        )
 
     print("\n✅ Benchmarks completed successfully!")
     print("\n📈 Key Performance Insights:")

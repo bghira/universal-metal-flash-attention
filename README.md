@@ -73,6 +73,7 @@ Matrix size: 1024x1024x1024 (Apple M3 Max)
 ```
 
 > **Benchmark conditions:**  
+>
 > - Hardware: Apple M3 Max  
 > - Each measurement is the mean of 100 runs after 10 warmup iterations  
 > - Timings measured using Metal GPU counters  
@@ -82,6 +83,7 @@ Matrix size: 1024x1024x1024 (Apple M3 Max)
 > Please adjust for your environment; results may vary.
 
 **Key Improvements:**
+
 - **Vectorized memory access** using `char4` instead of individual bytes
 - **Hardware memory coalescing** for optimal GPU utilization
 - **Direct dequantization** without intermediate type casting
@@ -98,6 +100,7 @@ Matrix size: 1024x1024x1024 (Apple M3 Max)
 ## API Overview
 
 ### Context Management
+
 ```c
 mfa_context_t context;
 mfa_create_context(&context);
@@ -106,6 +109,7 @@ mfa_destroy_context(context);
 ```
 
 ### Buffer Management
+
 ```c
 // Create new buffer
 mfa_buffer_t buffer;
@@ -122,6 +126,7 @@ void* data = mfa_buffer_contents(buffer);
 ### Attention Computation
 
 **C API:**
+
 ```c
 mfa_attention_forward(
     context,
@@ -134,6 +139,7 @@ mfa_attention_forward(
 ```
 
 **Swift API (for advanced sparsity patterns):**
+
 ```swift
 var descriptor = AttentionDescriptor()
 descriptor.matrixDimensions = (row: seq_len, column: seq_len, head: head_dim)
@@ -146,6 +152,7 @@ let kernel = AttentionKernel(descriptor: kernelDesc)
 ```
 
 **Quantized Attention API:**
+
 ```swift
 // Configure quantization
 var config = QuantizedAttention.Configuration()
@@ -302,6 +309,7 @@ float quantization_error = mfa_estimate_quantization_error(
 **Memory Bandwidth Optimization**: Use INT8 for key/value tensors in memory-bound scenarios. The 4x memory reduction often provides greater performance benefits than the computational overhead of dequantization.
 
 **Mixed Precision Strategies**:
+
 - Keep queries in FP16 for accuracy in attention score computation
 - Quantize keys to INT8 for 4x memory reduction with minimal quality loss
 - Use INT4 for values when extreme memory constraints exist
@@ -310,14 +318,16 @@ float quantization_error = mfa_estimate_quantization_error(
 
 **Parameter Selection**: Use symmetric quantization (zero_point = 0 or 128) when possible for optimal hardware utilization. Asymmetric quantization provides better accuracy but with slight performance overhead.
 
-## Building
+## Installation
 
 ### Prerequisites
+
 - macOS 14+ / iOS 17+ / tvOS 17+ / visionOS 1+
 - Xcode 15+ with Swift 5.10+
 - Metal-capable device
 
 ### Swift Package Manager
+
 ```bash
 git clone --recursive https://github.com/bghira/universal-metal-flash-attention.git
 cd universal-metal-flash-attention
@@ -325,11 +335,13 @@ swift build -c release
 ```
 
 If you've already cloned without `--recursive`, initialize the submodule:
+
 ```bash
 git submodule update --init --recursive
 ```
 
 ### For Rust Integration
+
 ```toml
 # In your Cargo.toml
 [build-dependencies]
@@ -339,9 +351,12 @@ bindgen = "0.69"
 metal = "0.29"
 ```
 
-## Usage Examples
+## Usage
+
+### Basic C API Usage
 
 ### Objective-C
+
 ```c
 #include <stdio.h>
 
@@ -374,6 +389,7 @@ int main() {
 ```
 
 ### Rust
+
 ```rust
 use std::ffi::c_void;
 
@@ -409,6 +425,7 @@ unsafe {
 ✅ **Full Test Coverage**: Comprehensive test suite with 100% pass rate
 
 **Performance characteristics match the underlying MFA library:**
+
 - **M1 Max**: 4400 GINSTRS/sec (83% ALU utilization)
 - **M3/M4**: Similar efficiency with improved register utilization
 - **Zero-copy**: Direct Metal buffer access with no data copying
@@ -431,12 +448,14 @@ make ci                # Full CI pipeline
 ## Current Status
 
 ✅ **All FFI implementations working and tested**
+
 - ✅ **Objective-C**: 1148 GINSTRS/s peak performance
 - ✅ **Rust**: 1088 GINSTRS/s peak performance
 - ✅ **Python**: 1.87x faster than PyTorch SDPA
 - ✅ **Zero-copy operations** across all languages
 
 🚀 **NEW: Sparse Attention Support**
+
 - ✅ **FlexAttention-compatible API** with superior performance
 - ✅ **Sliding Window Attention**: 33% faster than standard attention
 - ✅ **Causal Masking**: Full autoregressive model support
@@ -455,23 +474,31 @@ make ci                # Full CI pipeline
 Complete working examples are provided in the `examples/` directory:
 
 ### Objective-C
+
 **Performance**: 1148 GINSTRS/s peak (identical to Rust)
+
 ```bash
 cd examples/objc
 make run
 ```
+
 Simple C program using the FFI directly. Achieves optimal performance by using the same C interface as Rust.
 
 ### Rust
+
 **Performance**: 1088 GINSTRS/s peak
+
 ```bash
 cd examples/rust-ffi
 DYLD_LIBRARY_PATH=../../.build/debug cargo run --release benchmark
 ```
+
 Zero-copy Rust integration with bindgen-generated safe bindings.
 
 ### Python
+
 **Performance**: **1.87x faster than PyTorch SDPA** (0.44ms vs 0.81ms)
+
 ```bash
 cd examples/python-ffi
 # Basic Python FFI example
@@ -480,6 +507,7 @@ DYLD_LIBRARY_PATH=../../.build/release examples/python-ffi/venv/bin/python examp
 # PyTorch integration example
 DYLD_LIBRARY_PATH=../../.build/release examples/python-ffi/venv/bin/python examples/pytorch_sdpa_replacement.py
 ```
+
 ✅ **Zero-copy PyTorch integration** - Drop-in replacement for `torch.nn.functional.scaled_dot_product_attention`
 ✅ **87% faster than PyTorch SDPA** on Apple Silicon
 ✅ **4400+ GINSTRS/sec performance** maintained
@@ -518,6 +546,7 @@ mfa_attention_backward_kv_quantized(
 ```
 
 **Training Performance Results:**
+
 - **1.14-1.48x faster** than FP16 backward passes
 - **25-40% memory savings** during training
 - **FP32 gradient precision** maintained for stability
@@ -526,6 +555,7 @@ mfa_attention_backward_kv_quantized(
 ### Quantized Attention Examples
 
 **C FFI Quantized Example**:
+
 ```c
 // Create quantized attention context
 mfa_context_t context;
@@ -548,6 +578,7 @@ mfa_attention_forward_quantized(
 ```
 
 **Python Quantized Integration**:
+
 ```python
 import numpy as np
 import ctypes
@@ -576,6 +607,7 @@ output = qa.forward(
 ```
 
 **Rust Quantized Training**:
+
 ```rust
 // Configure quantized training
 let mut quantization_config = QuantizationConfig {
@@ -604,6 +636,7 @@ println!("Memory savings: {:.1}% reduction", backward_result.memory_savings * 10
 ```
 
 **Python Quantized Training Integration**:
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -663,6 +696,7 @@ descriptor.sparsityPattern = .none
 ```
 
 **Real-world Performance:**
+
 - **Mistral 7B**: Use `.slidingWindow(windowSize: 4096)` for 32K context length
 - **Local Chat Models**: Use `.slidingWindow(windowSize: 256)` for 33% speedup
 - **Code Models**: Use `.causal` for autoregressive generation

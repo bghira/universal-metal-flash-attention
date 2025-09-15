@@ -5,7 +5,6 @@ import XCTest
 @testable import MFABridge
 
 final class PerformanceTests: XCTestCase {
-
   func testQuantizationPerformance() throws {
     let sizes = [1024, 4096, 16384, 65536]
 
@@ -60,7 +59,7 @@ final class PerformanceTests: XCTestCase {
         batchSize: config.batchSize,
         sequenceLength: config.sequenceLength,
         headDim: config.headDim,
-        iterations: 50  // Reduced since we're doing multiple configs
+        iterations: 50 // Reduced since we're doing multiple configs
       )
 
       print("Results for \(config.name) (\(config.sequenceLength)x\(config.headDim)):")
@@ -135,12 +134,12 @@ private func measureTime<T>(_ operation: () throws -> T) rethrows -> (result: T,
 }
 
 private func generateTestData(size: Int) -> [Float] {
-  return (0..<size).map { Float($0) * 0.001 - Float(size / 2) * 0.001 }
+  (0..<size).map { Float($0) * 0.001 - Float(size / 2) * 0.001 }
 }
 
 private func quantizeInt8Fast(_ input: [Float]) -> ([Int8], Float) {
   let maxAbs = input.reduce(0) { max(abs($0), abs($1)) }
-  let scale = maxAbs > 0 ? maxAbs / 127.0 : 1.0  // Avoid division by zero
+  let scale = maxAbs > 0 ? maxAbs / 127.0 : 1.0 // Avoid division by zero
 
   let quantized = input.map { value in
     Int8(clamping: Int32(round(value / scale)))
@@ -151,7 +150,7 @@ private func quantizeInt8Fast(_ input: [Float]) -> ([Int8], Float) {
 
 private func quantizeInt4Fast(_ input: [Float]) -> ([UInt8], Float) {
   let maxAbs = input.reduce(0) { max(abs($0), abs($1)) }
-  let scale = maxAbs > 0 ? maxAbs / 7.0 : 1.0  // Avoid division by zero
+  let scale = maxAbs > 0 ? maxAbs / 7.0 : 1.0 // Avoid division by zero
 
   var packed = [UInt8]()
   packed.reserveCapacity((input.count + 1) / 2)
@@ -160,7 +159,7 @@ private func quantizeInt4Fast(_ input: [Float]) -> ([UInt8], Float) {
     let val1 = Int32(round(input[i] / scale))
     let val2 = i + 1 < input.count ? Int32(round(input[i + 1] / scale)) : 0
 
-    let packed1 = UInt8(max(0, min(15, val1 + 8)))  // Clamp [-8,7] to [0,15] before UInt8 conversion
+    let packed1 = UInt8(max(0, min(15, val1 + 8))) // Clamp [-8,7] to [0,15] before UInt8 conversion
     let packed2 = UInt8(max(0, min(15, val2 + 8)))
 
     packed.append((packed2 << 4) | packed1)
