@@ -266,10 +266,28 @@ public func mfa_attention_forward(
   let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
   let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
 
-  // For now, handle single-head case (MFA's current limitation)
-  // TODO: Add multi-head support by looping over heads
-  if numHeads != 1 {
-    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
+  // Handle multi-head attention using the new MultiHeadAttention implementation
+  if numHeads > 1 {
+    return mfa_attention_forward_multihead_internal(
+      context: mfaContext,
+      qBuffer: qBuffer.buffer,
+      kBuffer: kBuffer.buffer,
+      vBuffer: vBuffer.buffer,
+      outBuffer: outBuffer.buffer,
+      batchSize: 1, // For now, assume batch size 1 for FFI compatibility
+      seqLenQ: seqLenQ,
+      seqLenKV: seqLenKV,
+      numHeads: numHeads,
+      headDim: headDim,
+      softmaxScale: softmaxScale,
+      causal: causal,
+      inputPrecision: inputPrecision,
+      intermediatePrecision: intermediatePrecision,
+      transposeQ: transposeQ,
+      transposeK: transposeK,
+      transposeV: transposeV,
+      transposeO: transposeO
+    )
   }
 
   do {
@@ -459,7 +477,7 @@ public func mfa_attention_forward_quantized(
   _ seqLenKV: UInt32,
   _ numHeads: UInt32,
   _ headDim: UInt16,
-  _: Float,
+  _ softmaxScale: Float,
   _ causal: Bool,
   _ qScale: Float,
   _ qZeroPoint: Int32,
@@ -492,10 +510,12 @@ public func mfa_attention_forward_quantized(
   let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
   let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
 
-  // For now, handle single-head case (MFA's current limitation)
-  if numHeads != 1 {
-    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
-  }
+  print("🔍 DEBUG: mfa_attention_forward_quantized called")
+  print("   numHeads: \(numHeads), seqLenQ: \(seqLenQ), headDim: \(headDim)")
+  print("   qScale: \(qScale), kScale: \(kScale), vScale: \(vScale)")
+  print("   qPrecision: \(qPrecision), kPrecision: \(kPrecision), vPrecision: \(vPrecision)")
+
+  // Multi-head support is now enabled for quantized attention
 
   // Create quantized attention descriptor
   var baseDescriptor = AttentionDescriptor()
@@ -528,49 +548,60 @@ public func mfa_attention_forward_quantized(
     scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
   )
 
-  let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
-  let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
+  // For single head, use the original single-head implementation
+  if numHeads == 1 {
+    let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
+    let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
 
-  let qTensor = QuantizedTensor(
-    device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-    elementCount: elementCount, shape: shape
-  )
-  let kTensor = QuantizedTensor(
-    device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-    elementCount: elementCount, shape: shape
-  )
-  let vTensor = QuantizedTensor(
-    device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-    elementCount: elementCount, shape: shape
-  )
+    let qTensor = QuantizedTensor(
+      device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
+      elementCount: elementCount, shape: shape
+    )
+    let kTensor = QuantizedTensor(
+      device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
+      elementCount: elementCount, shape: shape
+    )
+    let vTensor = QuantizedTensor(
+      device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
+      elementCount: elementCount, shape: shape
+    )
 
-  // Execute quantized forward pass
-  guard
-    let commandBuffer = quantizedAttention.forward(
+    print("DEBUG: About to call quantizedAttention.forward() for single head")
+    let result = quantizedAttention.forward(
       query: qTensor,
       key: kTensor,
       value: vTensor,
       output: outBuffer.buffer,
       descriptor: quantDescriptor
     )
-  else {
-    return 5 // MFA_ERROR_EXECUTION_FAILED
+    print("DEBUG: quantizedAttention.forward() completed with result: \(result != nil)")
+
+    return result != nil ? 0 : 1
   }
 
-  // Execute and wait for completion
-  commandBuffer.commit()
-  commandBuffer.waitUntilCompleted()
-
-  if let error = commandBuffer.error {
-    print("Metal execution error: \(error)")
-    return 5 // MFA_ERROR_EXECUTION_FAILED
-  }
-
-  // Store GPU timing for zero-overhead measurement
-  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-  globalContext?.lastGPULatency = gpuLatency
-
-  return 0 // MFA_SUCCESS
+  // For multi-head case, call dedicated multi-head quantized function
+  return mfa_attention_forward_quantized_multihead_internal(
+    context: mfaContext,
+    qBuffer: qBuffer.buffer,
+    kBuffer: kBuffer.buffer,
+    vBuffer: vBuffer.buffer,
+    outBuffer: outBuffer.buffer,
+    batchSize: batchSize,
+    seqLenQ: seqLenQ,
+    seqLenKV: seqLenKV,
+    numHeads: numHeads,
+    headDim: headDim,
+    quantConfig: quantConfig,
+    qParams: qParams,
+    kParams: kParams,
+    vParams: vParams,
+    softmaxScale: softmaxScale,
+    causal: causal,
+    transposeQ: transposeQ,
+    transposeK: transposeK,
+    transposeV: transposeV,
+    transposeO: transposeO
+  )
 }
 
 @_cdecl("mfa_attention_backward_query_quantized")
@@ -844,4 +875,257 @@ public func mfa_attention_backward_kv_quantized(
   globalContext?.lastGPULatency = gpuLatency
 
   return 0 // MFA_SUCCESS
+}
+
+// MARK: - Multi-Head Attention Internal Implementation
+
+/// Internal multi-head attention implementation using the new MultiHeadAttention class
+private func mfa_attention_forward_multihead_internal(
+  context: MFAContext,
+  qBuffer: MTLBuffer,
+  kBuffer: MTLBuffer,
+  vBuffer: MTLBuffer,
+  outBuffer: MTLBuffer,
+  batchSize: UInt32,
+  seqLenQ: UInt32,
+  seqLenKV: UInt32,
+  numHeads: UInt32,
+  headDim: UInt16,
+  softmaxScale: Float,
+  causal: Bool,
+  inputPrecision: Int32,
+  intermediatePrecision: Int32,
+  transposeQ: Bool,
+  transposeK: Bool,
+  transposeV: Bool,
+  transposeO: Bool
+)
+  -> Int32
+{
+  do {
+    // Create multi-head attention instance
+    let multiHeadAttention = MultiHeadAttention(device: context.device)
+
+    // Create base attention descriptor
+    var baseDescriptor = AttentionDescriptor()
+    baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
+    baseDescriptor.lowPrecisionInputs = (inputPrecision == 0) // FP16 = true, FP32 = false
+    baseDescriptor
+      .lowPrecisionIntermediates = (intermediatePrecision == 0) // FP16 = true, FP32 = false
+    baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+    baseDescriptor.sparsityPattern = causal ? .causal : .none
+    baseDescriptor.softmaxScale = softmaxScale
+
+    // Create tensor shapes
+    let queryShape = MultiHeadShape(
+      batchSize: batchSize,
+      numHeads: numHeads,
+      sequenceLength: seqLenQ,
+      headDimension: headDim
+    )
+
+    let kvShape = MultiHeadShape(
+      batchSize: batchSize,
+      numHeads: numHeads, // Standard MHA for now
+      sequenceLength: seqLenKV,
+      headDimension: headDim
+    )
+
+    // Create multi-head descriptor with optimized dispatch strategy
+    let multiHeadDescriptor = MultiHeadAttentionDescriptor(
+      baseDescriptor: baseDescriptor,
+      queryShape: queryShape,
+      keyShape: kvShape,
+      valueShape: kvShape,
+      broadcastMode: .standard, // Standard MHA mode
+      dispatchStrategy: .perBatch // Use per-batch dispatch for better performance with small head
+      // counts
+    )
+
+    // Execute multi-head attention (no logsumexp for forward-only)
+    guard
+      let commandBuffer = multiHeadAttention.forward(
+        query: qBuffer,
+        key: kBuffer,
+        value: vBuffer,
+        output: outBuffer,
+        logsumexp: nil, // Skip logsumexp for forward-only passes
+        descriptor: multiHeadDescriptor
+      )
+    else {
+      return 5 // MFA_ERROR_EXECUTION_FAILED
+    }
+
+    // Execute and wait for completion
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+
+    if let error = commandBuffer.error {
+      print("Multi-head attention execution error: \(error)")
+      return 5 // MFA_ERROR_EXECUTION_FAILED
+    }
+
+    // Store GPU timing
+    let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+    context.lastGPULatency = gpuLatency
+
+    return 0 // MFA_SUCCESS
+
+  } catch {
+    print("Multi-head attention error: \(error)")
+    return 4 // MFA_ERROR_KERNEL_COMPILATION
+  }
+}
+
+// MARK: - Quantized Multi-Head Attention Internal Implementation
+
+private func mfa_attention_forward_quantized_multihead_internal(
+  context: MFAContext,
+  qBuffer: MTLBuffer,
+  kBuffer: MTLBuffer,
+  vBuffer: MTLBuffer,
+  outBuffer: MTLBuffer,
+  batchSize: UInt32,
+  seqLenQ: UInt32,
+  seqLenKV: UInt32,
+  numHeads: UInt32,
+  headDim: UInt16,
+  quantConfig: QuantizedAttention.Configuration,
+  qParams: QuantizationParameters,
+  kParams: QuantizationParameters,
+  vParams: QuantizationParameters,
+  softmaxScale: Float,
+  causal: Bool,
+  transposeQ: Bool,
+  transposeK: Bool,
+  transposeV: Bool,
+  transposeO: Bool
+)
+  -> Int32
+{
+  do {
+    // Create base attention descriptor for quantized attention
+    var baseDescriptor = AttentionDescriptor()
+    baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
+    baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+    baseDescriptor.sparsityPattern = causal ? .causal : .none
+    baseDescriptor.softmaxScale = softmaxScale
+
+    let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
+      baseDescriptor: baseDescriptor,
+      quantizationConfig: quantConfig
+    )
+
+    // Calculate total elements for multi-head layout
+    let totalElementsPerTensor = Int(batchSize * numHeads * seqLenQ * UInt32(headDim))
+    let shapePerHead = [Int(batchSize), Int(seqLenQ), Int(headDim)]
+    let elementCountPerHead = Int(batchSize * seqLenQ * UInt32(headDim))
+
+    // Calculate buffer offsets for each head
+    let bytesPerHead = elementCountPerHead * MemoryLayout<Float>.size
+    let qBytesPerHead = elementCountPerHead * quantConfig.queryPrecision.size
+    let kBytesPerHead = elementCountPerHead * quantConfig.keyPrecision.size
+    let vBytesPerHead = elementCountPerHead * quantConfig.valuePrecision.size
+
+    // Create quantized attention instance
+    let quantizedAttention = QuantizedAttention(device: context.device)
+
+    print("DEBUG: Starting quantized multi-head attention with \(numHeads) heads")
+
+    // Process each head sequentially
+    for headIdx in 0..<numHeads {
+      print("DEBUG: Processing head \(headIdx)")
+
+      // Calculate byte offsets for this head
+      let qByteOffset = Int(headIdx) * qBytesPerHead
+      let kByteOffset = Int(headIdx) * kBytesPerHead
+      let vByteOffset = Int(headIdx) * vBytesPerHead
+      let outByteOffset = Int(headIdx) * bytesPerHead
+
+      // Create buffer views for this head (use pointer arithmetic)
+      let qHeadBufferPtr = qBuffer.contents().advanced(by: qByteOffset)
+      let kHeadBufferPtr = kBuffer.contents().advanced(by: kByteOffset)
+      let vHeadBufferPtr = vBuffer.contents().advanced(by: vByteOffset)
+      let outHeadBufferPtr = outBuffer.contents().advanced(by: outByteOffset)
+
+      // Create temporary buffers for this head
+      guard
+        let qHeadBuffer = context.device.makeBuffer(
+          bytes: qHeadBufferPtr,
+          length: qBytesPerHead,
+          options: []
+        )
+      else {
+        print("ERROR: Failed to create Q subbuffer for head \(headIdx)")
+        return 1
+      }
+
+      guard
+        let kHeadBuffer = context.device.makeBuffer(
+          bytes: kHeadBufferPtr,
+          length: kBytesPerHead,
+          options: []
+        )
+      else {
+        print("ERROR: Failed to create K subbuffer for head \(headIdx)")
+        return 1
+      }
+
+      guard
+        let vHeadBuffer = context.device.makeBuffer(
+          bytes: vHeadBufferPtr,
+          length: vBytesPerHead,
+          options: []
+        )
+      else {
+        print("ERROR: Failed to create V subbuffer for head \(headIdx)")
+        return 1
+      }
+
+      guard let outHeadBuffer = context.device.makeBuffer(length: bytesPerHead, options: []) else {
+        print("ERROR: Failed to create output subbuffer for head \(headIdx)")
+        return 1
+      }
+
+      // Create tensors for this head
+      let qTensor = QuantizedTensor(
+        device: context.device, data: qHeadBuffer, parameters: qParams,
+        elementCount: elementCountPerHead, shape: shapePerHead
+      )
+      let kTensor = QuantizedTensor(
+        device: context.device, data: kHeadBuffer, parameters: kParams,
+        elementCount: elementCountPerHead, shape: shapePerHead
+      )
+      let vTensor = QuantizedTensor(
+        device: context.device, data: vHeadBuffer, parameters: vParams,
+        elementCount: elementCountPerHead, shape: shapePerHead
+      )
+
+      // Execute quantized attention for this head
+      print("DEBUG: Executing quantized attention for head \(headIdx)")
+      let result = quantizedAttention.forward(
+        query: qTensor,
+        key: kTensor,
+        value: vTensor,
+        output: outHeadBuffer,
+        descriptor: quantDescriptor
+      )
+
+      guard result != nil else {
+        print("ERROR: Quantized attention failed for head \(headIdx)")
+        return 1
+      }
+
+      // Copy result back to the correct location in the output buffer
+      memcpy(outHeadBufferPtr, outHeadBuffer.contents(), bytesPerHead)
+      print("DEBUG: Head \(headIdx) completed successfully")
+    }
+
+    print("DEBUG: All \(numHeads) heads completed successfully")
+    return 0 // MFA_SUCCESS
+
+  } catch {
+    print("Quantized multi-head attention error: \(error)")
+    return 4 // MFA_ERROR_KERNEL_COMPILATION
+  }
 }

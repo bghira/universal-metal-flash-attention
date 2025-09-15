@@ -34,6 +34,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("scale") = py::none(),
           py::arg("enable_gqa") = false);
 
+    // Quantized SDPA call
+    m.def("quantized_scaled_dot_product_attention",
+          &metal_sdpa::MetalSDPABackend::quantized_scaled_dot_product_attention,
+          "Direct call to Metal Flash Attention Quantized SDPA",
+          py::arg("query"),
+          py::arg("key"),
+          py::arg("value"),
+          py::arg("precision") = "int8",
+          py::arg("is_causal") = false,
+          py::arg("scale") = py::none());
+
     // Utility functions
     m.def("is_metal_available", []() { return mfa_is_device_supported(); },
           "Check if Metal is available on this device");

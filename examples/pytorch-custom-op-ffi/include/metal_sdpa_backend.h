@@ -24,7 +24,9 @@ extern "C" {
     typedef enum {
         MFA_PRECISION_FP16 = 0,
         MFA_PRECISION_BF16 = 1,
-        MFA_PRECISION_FP32 = 2
+        MFA_PRECISION_FP32 = 2,
+        MFA_PRECISION_INT8 = 3,
+        MFA_PRECISION_INT4 = 4
     } mfa_precision_t;
 
     // MFA functions
@@ -47,6 +49,20 @@ extern "C" {
         bool transpose_q, bool transpose_k, bool transpose_v, bool transpose_o
     );
 
+    mfa_error_t mfa_attention_forward_quantized(
+        mfa_context_t context,
+        mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v, mfa_buffer_t out,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim, float softmax_scale,
+        bool causal,
+        float q_scale, int32_t q_zero_point,
+        float k_scale, int32_t k_zero_point,
+        float v_scale, int32_t v_zero_point,
+        mfa_precision_t q_precision, mfa_precision_t k_precision,
+        mfa_precision_t v_precision, mfa_precision_t output_precision,
+        bool transpose_q, bool transpose_k, bool transpose_v, bool transpose_o
+    );
+
     bool mfa_is_device_supported(void);
     void mfa_get_version(int* major, int* minor, int* patch);
 }
@@ -66,6 +82,15 @@ public:
         bool is_causal = false,
         c10::optional<double> scale = c10::nullopt,
         bool enable_gqa = false
+    );
+
+    static torch::Tensor quantized_scaled_dot_product_attention(
+        const torch::Tensor& query,
+        const torch::Tensor& key,
+        const torch::Tensor& value,
+        const std::string& precision = "int8",
+        bool is_causal = false,
+        c10::optional<double> scale = c10::nullopt
     );
 
 private:

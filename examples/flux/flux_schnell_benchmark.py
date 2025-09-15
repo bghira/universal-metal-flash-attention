@@ -18,6 +18,8 @@ and compare performance, memory usage, and output quality.
 """
 
 import gc
+
+# Set up library path for Metal FFI library
 import os
 import sys
 import time
@@ -27,27 +29,34 @@ import numpy as np
 import psutil
 import torch
 
-# Add the pytorch-custom-op-ffi to path
-sys.path.append(str(Path(__file__).parent / "pytorch-custom-op-ffi"))
+lib_path = "/Users/kash/src/universal-metal-flash-attention/.build/arm64-apple-macosx/release:/Users/kash/src/universal-metal-flash-attention/.build/arm64-apple-macosx/debug"
+if "DYLD_LIBRARY_PATH" in os.environ:
+    os.environ["DYLD_LIBRARY_PATH"] = lib_path + ":" + os.environ["DYLD_LIBRARY_PATH"]
+else:
+    os.environ["DYLD_LIBRARY_PATH"] = lib_path
+
+# Add the pytorch-custom-op-ffi build directory to path (not just the root)
+sys.path.append(
+    str(
+        Path(__file__).parent
+        / "pytorch-custom-op-ffi"
+        / "build"
+        / "lib.macosx-15.0-arm64-cpython-312"
+    )
+)
 
 try:
     import metal_sdpa_extension
 
     METAL_PYTORCH_AVAILABLE = True
     print("✅ Metal PyTorch Custom Op available")
-except ImportError:
+except ImportError as e:
     METAL_PYTORCH_AVAILABLE = False
-    print("❌ Metal PyTorch Custom Op not available")
+    print(f"❌ Metal PyTorch Custom Op not available: {e}")
 
-try:
-    sys.path.append(str(Path(__file__).parent / "python-ffi" / "src"))
-    import umfa
-
-    METAL_PYTHON_FFI_AVAILABLE = True
-    print("✅ Metal Python FFI available")
-except ImportError:
-    METAL_PYTHON_FFI_AVAILABLE = False
-    print("❌ Metal Python FFI not available")
+# Skip Python FFI for now to focus on PyTorch Custom Op
+METAL_PYTHON_FFI_AVAILABLE = False
+print("⏭️ Skipping Metal Python FFI for now")
 
 try:
     from diffusers import FluxPipeline

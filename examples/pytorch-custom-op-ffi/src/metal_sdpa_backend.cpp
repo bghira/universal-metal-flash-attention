@@ -102,10 +102,7 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
         num_heads = static_cast<uint32_t>(q_sizes[2]);
         head_dim = static_cast<uint16_t>(q_sizes[3]);
 
-        // Note: Current MFA implementation is limited to num_heads=1
-        if (num_heads > 1) {
-            throw std::runtime_error("Multi-head attention not yet supported by Metal Flash Attention (num_heads > 1)");
-        }
+        // Multi-head attention is now supported!
     } else {
         throw std::runtime_error("Unsupported tensor dimensions. Expected 2D (seq_len, head_dim) or 4D (batch, seq_len, num_heads, head_dim)");
     }
@@ -280,6 +277,146 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
 void MetalSDPABackend::register_backend() {
     // Use the TORCH_LIBRARY_IMPL macro for modern PyTorch operator registration
     std::cout << "Metal SDPA backend registered successfully" << std::endl;
+}
+
+torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const std::string& precision,
+    bool is_causal,
+    c10::optional<double> scale
+) {
+    ensure_initialized();
+
+    // Convert all tensors to CPU and contiguous
+    auto q_cpu = ensure_contiguous_cpu(query);
+    auto k_cpu = ensure_contiguous_cpu(key);
+    auto v_cpu = ensure_contiguous_cpu(value);
+
+    // Get tensor dimensions (same logic as regular SDPA)
+    uint32_t batch_size, seq_len_q, seq_len_kv, num_heads, head_dim;
+
+    if (q_cpu.dim() == 4) {
+        auto q_sizes = q_cpu.sizes();
+        batch_size = static_cast<uint32_t>(q_sizes[0]);
+        seq_len_q = static_cast<uint32_t>(q_sizes[1]);
+        seq_len_kv = static_cast<uint32_t>(k_cpu.sizes()[1]);
+        num_heads = static_cast<uint32_t>(q_sizes[2]);
+        head_dim = static_cast<uint16_t>(q_sizes[3]);
+    } else {
+        throw std::runtime_error("Quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
+    }
+
+    // Create output tensor
+    auto output = torch::empty_like(q_cpu);
+
+    // Convert precision string to enum
+    mfa_precision_t k_precision, v_precision;
+    if (precision == "int8") {
+        k_precision = MFA_PRECISION_INT8;
+        v_precision = MFA_PRECISION_INT8;
+    } else if (precision == "int4") {
+        k_precision = MFA_PRECISION_INT4;
+        v_precision = MFA_PRECISION_INT4;
+    } else {
+        throw std::runtime_error("Unsupported quantization precision: " + precision + ". Use 'int8' or 'int4'.");
+    }
+
+    // Get query precision from tensor dtype
+    mfa_precision_t q_precision = torch_dtype_to_mfa_dtype(q_cpu.scalar_type());
+    mfa_precision_t output_precision = q_precision;
+
+    // Calculate softmax scale
+    float softmax_scale = scale ? static_cast<float>(*scale) : (1.0f / std::sqrt(static_cast<float>(head_dim)));
+
+    // Calculate quantization scales for K and V tensors
+    // Simple symmetric quantization: scale = max_abs_value / max_quantized_value
+    float k_scale, v_scale;
+    int32_t k_zero_point = 0, v_zero_point = 0;  // Symmetric quantization
+
+    if (precision == "int8") {
+        k_scale = k_cpu.abs().max().item<float>() / 127.0f;
+        v_scale = v_cpu.abs().max().item<float>() / 127.0f;
+    } else { // int4
+        k_scale = k_cpu.abs().max().item<float>() / 7.0f;
+        v_scale = v_cpu.abs().max().item<float>() / 7.0f;
+    }
+
+    // Create MFA buffers
+    mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
+
+    size_t q_bytes = q_cpu.numel() * q_cpu.element_size();
+    size_t k_bytes = k_cpu.numel() * k_cpu.element_size();
+    size_t v_bytes = v_cpu.numel() * v_cpu.element_size();
+    size_t out_bytes = output.numel() * output.element_size();
+
+    mfa_error_t result;
+
+    result = mfa_buffer_from_ptr(swift_context_, q_cpu.data_ptr(), q_bytes, &q_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create query buffer for quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, k_cpu.data_ptr(), k_bytes, &k_buffer);
+    if (result != MFA_SUCCESS) {
+        mfa_destroy_buffer(q_buffer);
+        throw std::runtime_error("Failed to create key buffer for quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, v_cpu.data_ptr(), v_bytes, &v_buffer);
+    if (result != MFA_SUCCESS) {
+        mfa_destroy_buffer(q_buffer);
+        mfa_destroy_buffer(k_buffer);
+        throw std::runtime_error("Failed to create value buffer for quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, output.data_ptr(), out_bytes, &out_buffer);
+    if (result != MFA_SUCCESS) {
+        mfa_destroy_buffer(q_buffer);
+        mfa_destroy_buffer(k_buffer);
+        mfa_destroy_buffer(v_buffer);
+        throw std::runtime_error("Failed to create output buffer for quantized attention");
+    }
+
+    try {
+        // Call quantized attention function
+        result = mfa_attention_forward_quantized(
+            swift_context_,
+            q_buffer, k_buffer, v_buffer, out_buffer,
+            batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
+            softmax_scale, is_causal,
+            1.0f, 0,  // Q scale and zero point (no quantization for query)
+            k_scale, k_zero_point,
+            v_scale, v_zero_point,
+            q_precision,
+            k_precision,
+            v_precision,
+            output_precision,
+            false, false, false, false  // No transpose for standard layout
+        );
+
+        if (result != MFA_SUCCESS) {
+            throw std::runtime_error("Quantized attention forward pass failed with error code: " + std::to_string(result));
+        }
+
+        // Cleanup buffers
+        mfa_destroy_buffer(q_buffer);
+        mfa_destroy_buffer(k_buffer);
+        mfa_destroy_buffer(v_buffer);
+        mfa_destroy_buffer(out_buffer);
+
+        // Move output back to original device
+        return output.to(query.device());
+
+    } catch (...) {
+        // Cleanup on exception
+        mfa_destroy_buffer(q_buffer);
+        mfa_destroy_buffer(k_buffer);
+        mfa_destroy_buffer(v_buffer);
+        mfa_destroy_buffer(out_buffer);
+        throw;
+    }
 }
 
 void MetalSDPABackend::unregister_backend() {
