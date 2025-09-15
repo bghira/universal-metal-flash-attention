@@ -54,12 +54,12 @@ repos:
         args: ["--fix", "--config", ".markdownlint.yaml"]
         files: '\.md$'
 
-  # Swift testing (macOS only)
+  # Swift testing
   - repo: local
     hooks:
       - id: swift-test
         name: Swift Tests
-        entry: bash -c 'if [[ "$OSTYPE" == "darwin"* ]]; then swift test; else echo "Skipping Swift tests on non-macOS platform"; fi'
+        entry: swift test
         language: system
         files: '\.(swift)$'
         pass_filenames: false

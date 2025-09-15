@@ -17,7 +17,7 @@ jobs:
   # Pre-commit hooks and linting
   lint:
     name: Lint and Format Check
-    runs-on: ubuntu-latest
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -207,7 +207,7 @@ jobs:
   # Security scanning
   security:
     name: Security Scan
-    runs-on: ubuntu-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
@@ -231,7 +231,7 @@ jobs:
   # Documentation checks
   docs:
     name: Documentation Check
-    runs-on: ubuntu-latest
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
