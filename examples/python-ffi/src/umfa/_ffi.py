@@ -24,6 +24,8 @@ MFA_ERROR_EXECUTION_FAILED = 5
 MFA_PRECISION_FP16 = 0
 MFA_PRECISION_BF16 = 1
 MFA_PRECISION_FP32 = 2
+MFA_PRECISION_INT8 = 3
+MFA_PRECISION_INT4 = 4
 
 # Type aliases
 mfa_error_t = ctypes.c_int32
@@ -135,6 +137,37 @@ def _load_library():
     ]
     lib.mfa_attention_forward.restype = mfa_error_t
 
+    # Quantized attention forward
+    lib.mfa_attention_forward_quantized.argtypes = [
+        mfa_context_t,  # context
+        mfa_buffer_t,  # q
+        mfa_buffer_t,  # k
+        mfa_buffer_t,  # v
+        mfa_buffer_t,  # out
+        ctypes.c_uint32,  # batch_size
+        ctypes.c_uint32,  # seq_len_q
+        ctypes.c_uint32,  # seq_len_kv
+        ctypes.c_uint32,  # num_heads
+        ctypes.c_uint16,  # head_dim
+        ctypes.c_float,  # softmax_scale
+        ctypes.c_bool,  # causal
+        ctypes.c_float,  # q_scale
+        ctypes.c_int32,  # q_zero_point
+        ctypes.c_float,  # k_scale
+        ctypes.c_int32,  # k_zero_point
+        ctypes.c_float,  # v_scale
+        ctypes.c_int32,  # v_zero_point
+        mfa_precision_t,  # q_precision
+        mfa_precision_t,  # k_precision
+        mfa_precision_t,  # v_precision
+        mfa_precision_t,  # output_precision
+        ctypes.c_bool,  # transpose_q
+        ctypes.c_bool,  # transpose_k
+        ctypes.c_bool,  # transpose_v
+        ctypes.c_bool,  # transpose_o
+    ]
+    lib.mfa_attention_forward_quantized.restype = mfa_error_t
+
     # Utility functions
     lib.mfa_error_string.argtypes = [mfa_error_t]
     lib.mfa_error_string.restype = ctypes.c_char_p
@@ -190,6 +223,8 @@ __all__ = [
     "MFA_PRECISION_FP16",
     "MFA_PRECISION_BF16",
     "MFA_PRECISION_FP32",
+    "MFA_PRECISION_INT8",
+    "MFA_PRECISION_INT4",
     "mfa_error_t",
     "mfa_precision_t",
     "mfa_context_t",

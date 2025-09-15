@@ -1,0 +1,23 @@
+# FLUX.1-Schnell Benchmark Requirements
+# Install with: pip install -r flux_requirements.txt
+
+# Core dependencies
+torch>=2.1.0
+torchvision
+torchaudio
+
+# Diffusion pipeline
+diffusers>=0.30.0
+transformers>=4.40.0
+accelerate>=0.30.0
+safetensors>=0.4.0
+
+# Image processing
+Pillow>=10.0.0
+
+# Utilities
+psutil>=5.9.0
+numpy>=1.24.0
+
+# Optional: For better performance
+# flash-attn>=2.5.0  # Standard flash attention for comparison

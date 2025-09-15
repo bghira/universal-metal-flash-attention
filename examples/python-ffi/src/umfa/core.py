@@ -15,6 +15,8 @@ from ._ffi import (
     MFA_PRECISION_BF16,
     MFA_PRECISION_FP16,
     MFA_PRECISION_FP32,
+    MFA_PRECISION_INT4,
+    MFA_PRECISION_INT8,
     MFAError,
     _check_error,
     _lib,
@@ -164,6 +166,8 @@ def _parse_precision(precision: Precision) -> int:
         "fp32": MFA_PRECISION_FP32,
         "float": MFA_PRECISION_FP32,
         "float32": MFA_PRECISION_FP32,
+        "int8": MFA_PRECISION_INT8,
+        "int4": MFA_PRECISION_INT4,
     }
 
     precision_str = str(precision).lower()
@@ -330,3 +334,186 @@ def attention(
     else:
         with MFAContext() as ctx:
             return flash_attention_forward(ctx, q, k, v, **kwargs)
+
+
+def quantized_attention(
+    q: FloatArray,
+    k: FloatArray,
+    v: FloatArray,
+    context: Optional[MFAContext] = None,
+    *,
+    causal: bool = False,
+    softmax_scale: Optional[float] = None,
+    query_precision: Precision = "bf16",
+    kv_precision: Precision = "int8",
+    output_precision: Precision = "bf16",
+    q_scale: float = 1.0,
+    q_zero_point: int = 0,
+    k_scale: float = 1.0,
+    k_zero_point: int = 0,
+    v_scale: float = 1.0,
+    v_zero_point: int = 0,
+) -> FloatArray:
+    """
+    Perform quantized Flash Attention with INT8 K/V tensors for memory efficiency.
+
+    Args:
+        q: Query tensor [seq_len_q, head_dim] (higher precision)
+        k: Key tensor [seq_len_kv, head_dim] (quantized INT8)
+        v: Value tensor [seq_len_kv, head_dim] (quantized INT8)
+        context: Optional MFA context (created automatically if None)
+        causal: Whether to apply causal (lower triangular) mask
+        softmax_scale: Scaling factor for attention scores (default: 1/√head_dim)
+        query_precision: Precision for Query tensor (bf16/fp16/fp32)
+        kv_precision: Quantization precision for K/V tensors (int8/int4)
+        output_precision: Precision for output tensor
+        q_scale: Quantization scale for Query tensor
+        q_zero_point: Zero point for Query tensor quantization
+        k_scale: Quantization scale for Key tensor
+        k_zero_point: Zero point for Key tensor quantization
+        v_scale: Quantization scale for Value tensor
+        v_zero_point: Zero point for Value tensor quantization
+
+    Returns:
+        Attention output tensor with same shape as query
+
+    Example:
+        >>> # Quantize K/V to INT8 for memory efficiency
+        >>> q = np.random.randn(512, 64).astype(np.float16)  # High precision
+        >>> k = (np.random.randn(512, 64) * 127).astype(np.int8)  # Quantized
+        >>> v = (np.random.randn(512, 64) * 127).astype(np.int8)  # Quantized
+        >>> out = quantized_attention(q, k, v, kv_precision="int8")
+    """
+    if context is not None:
+        return _quantized_attention_forward(
+            context,
+            q,
+            k,
+            v,
+            causal=causal,
+            softmax_scale=softmax_scale,
+            query_precision=query_precision,
+            kv_precision=kv_precision,
+            output_precision=output_precision,
+            q_scale=q_scale,
+            q_zero_point=q_zero_point,
+            k_scale=k_scale,
+            k_zero_point=k_zero_point,
+            v_scale=v_scale,
+            v_zero_point=v_zero_point,
+        )
+    else:
+        with MFAContext() as ctx:
+            return _quantized_attention_forward(
+                ctx,
+                q,
+                k,
+                v,
+                causal=causal,
+                softmax_scale=softmax_scale,
+                query_precision=query_precision,
+                kv_precision=kv_precision,
+                output_precision=output_precision,
+                q_scale=q_scale,
+                q_zero_point=q_zero_point,
+                k_scale=k_scale,
+                k_zero_point=k_zero_point,
+                v_scale=v_scale,
+                v_zero_point=v_zero_point,
+            )
+
+
+def _quantized_attention_forward(
+    context: MFAContext,
+    q: FloatArray,
+    k: FloatArray,
+    v: FloatArray,
+    *,
+    causal: bool = False,
+    softmax_scale: Optional[float] = None,
+    query_precision: Precision = "bf16",
+    kv_precision: Precision = "int8",
+    output_precision: Precision = "bf16",
+    q_scale: float = 1.0,
+    q_zero_point: int = 0,
+    k_scale: float = 1.0,
+    k_zero_point: int = 0,
+    v_scale: float = 1.0,
+    v_zero_point: int = 0,
+) -> FloatArray:
+    """Internal quantized attention implementation."""
+    # Validate inputs
+    if not all(isinstance(x, np.ndarray) for x in [q, k, v]):
+        raise TypeError("q, k, v must be numpy arrays")
+
+    # Handle single-head case only for now
+    if q.ndim == 2:
+        batch_size = 1
+        seq_len_q, head_dim = q.shape
+        seq_len_kv = k.shape[0]
+        num_heads = 1
+
+        # Validate shapes
+        if k.shape != (seq_len_kv, head_dim) or v.shape != (seq_len_kv, head_dim):
+            raise ValueError(f"Shape mismatch: q={q.shape}, k={k.shape}, v={v.shape}")
+    else:
+        raise ValueError("Quantized attention currently only supports 2D tensors")
+
+    # Set default softmax scale
+    if softmax_scale is None:
+        softmax_scale = 1.0 / np.sqrt(head_dim)
+
+    # Parse precisions
+    query_prec = _parse_precision(query_precision)
+    kv_prec = _parse_precision(kv_precision)
+    output_prec = _parse_precision(output_precision)
+
+    # Create output array
+    output = np.zeros_like(q)
+
+    # Create MFA buffers (zero-copy)
+    q_buf = MFABuffer(context, q)
+    k_buf = MFABuffer(context, k)
+    v_buf = MFABuffer(context, v)
+    out_buf = MFABuffer(context, output)
+
+    try:
+        # Call quantized MFA attention
+        _check_error(
+            _lib.mfa_attention_forward_quantized(
+                context.handle,
+                q_buf.handle,
+                k_buf.handle,
+                v_buf.handle,
+                out_buf.handle,
+                batch_size,
+                seq_len_q,
+                seq_len_kv,
+                num_heads,
+                head_dim,
+                softmax_scale,
+                causal,
+                q_scale,
+                q_zero_point,
+                k_scale,
+                k_zero_point,
+                v_scale,
+                v_zero_point,
+                query_prec,
+                kv_prec,
+                kv_prec,  # Same precision for K and V
+                output_prec,
+                False,  # transpose_q
+                False,  # transpose_k
+                False,  # transpose_v
+                False,  # transpose_o
+            )
+        )
+    finally:
+        # Clean up buffers
+        q_buf.close()
+        k_buf.close()
+        v_buf.close()
+        out_buf.close()
+
+    return output
