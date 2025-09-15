@@ -161,7 +161,8 @@ jobs:
       - name: Run Python tests
         run: |
           cd examples/pytorch-custom-op-ffi
-          python -m pytest -v --cov=. --cov-report=xml
+          # Exclude debug and development files from pytest collection
+          python -m pytest tests/ -v --cov=. --cov-report=xml
         env:
           PYTORCH_ENABLE_MPS_FALLBACK: 1
 

@@ -4,10 +4,10 @@ Comprehensive correctness test for Metal SDPA with current compiler flags.
 Author: bghira
 """
 
+import metal_sdpa_extension
 import torch
 import torch.nn.functional as F
-import metal_sdpa_extension
-import numpy as np
+
 
 def test_numerical_correctness():
     """Test numerical correctness across different scenarios"""
@@ -44,7 +44,9 @@ def test_numerical_correctness():
 
         try:
             # Metal implementation
-            metal_output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+            metal_output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                q, k, v
+            )
 
             # PyTorch reference
             torch_output = F.scaled_dot_product_attention(q, k, v)
@@ -77,6 +79,7 @@ def test_numerical_correctness():
     print("-" * 70)
     return all_passed
 
+
 def test_specific_patterns():
     """Test specific mathematical patterns for correctness"""
     print(f"\n{'='*60}")
@@ -103,7 +106,9 @@ def test_specific_patterns():
     k = torch.randn(16, 8, dtype=torch.float32)
     v = torch.randn(16, 8, dtype=torch.float32)
 
-    metal_causal = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v, is_causal=True)
+    metal_causal = metal_sdpa_extension.metal_scaled_dot_product_attention(
+        q, k, v, is_causal=True
+    )
     torch_causal = F.scaled_dot_product_attention(q, k, v, is_causal=True)
 
     causal_diff = torch.abs(metal_causal - torch_causal).max().item()
@@ -119,7 +124,9 @@ def test_specific_patterns():
     v_large = torch.randn(8, 4, dtype=torch.float32)
 
     try:
-        metal_stable = metal_sdpa_extension.metal_scaled_dot_product_attention(q_large, k_large, v_large)
+        metal_stable = metal_sdpa_extension.metal_scaled_dot_product_attention(
+            q_large, k_large, v_large
+        )
         torch_stable = F.scaled_dot_product_attention(q_large, k_large, v_large)
 
         stability_diff = torch.abs(metal_stable - torch_stable).max().item()
@@ -137,6 +144,7 @@ def test_specific_patterns():
 
     return identity_diff < 1e-5 and causal_diff < 1e-5 and stability_diff < 1e-4
 
+
 def test_dtype_consistency():
     """Test consistency across data types"""
     print(f"\n{'='*60}")
@@ -148,7 +156,9 @@ def test_dtype_consistency():
     v_f32 = torch.randn(32, 16, dtype=torch.float32)
 
     # Test float32 as baseline
-    metal_f32 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_f32, k_f32, v_f32)
+    metal_f32 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+        q_f32, k_f32, v_f32
+    )
     torch_f32 = F.scaled_dot_product_attention(q_f32, k_f32, v_f32)
 
     print(f"Float32 baseline diff: {torch.abs(metal_f32 - torch_f32).max().item():.2e}")
@@ -159,7 +169,9 @@ def test_dtype_consistency():
         k_f16 = k_f32.to(torch.float16)
         v_f16 = v_f32.to(torch.float16)
 
-        metal_f16 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_f16, k_f16, v_f16)
+        metal_f16 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+            q_f16, k_f16, v_f16
+        )
         torch_f16 = F.scaled_dot_product_attention(q_f16, k_f16, v_f16)
 
         f16_diff = torch.abs(metal_f16.float() - torch_f16.float()).max().item()
@@ -170,6 +182,7 @@ def test_dtype_consistency():
     except Exception as e:
         print(f"❌ Float16 error: {e}")
         return False
+
 
 def main():
     """Main correctness verification"""
@@ -187,30 +200,34 @@ def main():
     print("FINAL CORRECTNESS ASSESSMENT")
     print(f"{'='*60}")
 
-    print(f"Basic Numerical Correctness: {'✅ PASS' if basic_correctness else '❌ FAIL'}")
-    print(f"Mathematical Patterns:       {'✅ PASS' if pattern_correctness else '❌ FAIL'}")
-    print(f"Data Type Consistency:       {'✅ PASS' if dtype_correctness else '❌ FAIL'}")
+    print(
+        f"Basic Numerical Correctness: {'✅ PASS' if basic_correctness else '❌ FAIL'}"
+    )
+    print(
+        f"Mathematical Patterns:       {'✅ PASS' if pattern_correctness else '❌ FAIL'}"
+    )
+    print(
+        f"Data Type Consistency:       {'✅ PASS' if dtype_correctness else '❌ FAIL'}"
+    )
 
     overall_pass = basic_correctness and pattern_correctness and dtype_correctness
 
     if overall_pass:
-        print(f"\n🎯 OVERALL RESULT: ✅ CURRENT CONFIGURATION IS CORRECT")
+        print("\n🎯 OVERALL RESULT: ✅ CURRENT CONFIGURATION IS CORRECT")
         print("The Swift compiler flags are producing accurate results.")
-        print("Current flags (including -Ounchecked) appear to be necessary for correctness.")
+        print("Current flags (including -Ounchecked) appear to be necessary.")
     else:
-        print(f"\n🚨 OVERALL RESULT: ❌ CORRECTNESS ISSUES DETECTED")
+        print("\n🚨 OVERALL RESULT: ❌ CORRECTNESS ISSUES DETECTED")
         print("The current configuration has numerical accuracy problems.")
         print("This could indicate compiler flag issues or implementation bugs.")
 
-    print(f"\n📊 SUMMARY:")
-    print(f"- Tolerance used: 1e-5 (strict)")
-    print(f"- Test coverage: Multiple sizes, patterns, data types")
-    print(f"- Comparison: Against PyTorch reference implementation")
+    print("\n📊 SUMMARY:")
+    print("- Tolerance used: 1e-5 (strict)")
+    print("- Test coverage: Multiple sizes, patterns, data types")
+    print("- Comparison: Against PyTorch reference implementation")
 
     return overall_pass
 
+
 if __name__ == "__main__":
     main()
-    <function_calls>
-<invoke name="TodoWrite">
-<parameter name="todos">[{"content": "Verify current Swift compiler flags produce correct MFA results", "status": "in_progress", "activeForm": "Verifying current Swift compiler flags produce correct MFA results"}, {"content": "Test numerical correctness across different tensor sizes", "status": "pending", "activeForm": "Testing numerical correctness across different tensor sizes"}, {"content": "Compare MFA results with reference implementations", "status": "pending", "activeForm": "Comparing MFA results with reference implementations"}]

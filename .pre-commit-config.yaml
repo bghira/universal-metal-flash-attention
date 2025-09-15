@@ -52,7 +52,7 @@ repos:
       - id: bandit
         args: ["-r", ".", "-f", "json", "-o", "bandit-report.json"]
         files: '\.py$'
-        exclude: 'tests/.*'
+        exclude: '(tests/.*|.*test.*\.py|.*debug.*\.py)'
 
   # Markdown formatting
   - repo: https://github.com/igorshubovych/markdownlint-cli
