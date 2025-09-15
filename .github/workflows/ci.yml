@@ -45,7 +45,7 @@ jobs:
   # Swift package testing
   swift-tests:
     name: Swift Tests
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       matrix:
         configuration: [debug, release]
@@ -94,7 +94,7 @@ jobs:
   # Python integration tests
   python-tests:
     name: Python Integration Tests
-    runs-on: macos-14
+    runs-on: macos-15
     strategy:
       matrix:
         python-version: ['3.9', '3.10', '3.11', '3.12']
@@ -161,8 +161,9 @@ jobs:
       - name: Run Python tests
         run: |
           cd examples/pytorch-custom-op-ffi
-          # Exclude debug and development files from pytest collection
-          python -m pytest tests/ -v --cov=. --cov-report=xml
+          # Skip GPU tests on CI runners (no proper Metal support)
+          # Only run unit tests and integration tests that don't require GPU
+          python -m pytest tests/ -v --cov=. --cov-report=xml -m "not gpu"
         env:
           PYTORCH_ENABLE_MPS_FALLBACK: 1
 
