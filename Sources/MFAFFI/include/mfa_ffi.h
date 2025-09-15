@@ -31,7 +31,9 @@ typedef enum {
 typedef enum {
     MFA_PRECISION_FP16 = 0,                ///< Half precision (16-bit)
     MFA_PRECISION_BF16 = 1,                ///< Brain float (16-bit)
-    MFA_PRECISION_FP32 = 2                 ///< Single precision (32-bit)
+    MFA_PRECISION_FP32 = 2,                ///< Single precision (32-bit)
+    MFA_PRECISION_INT8 = 3,                ///< 8-bit integer quantized
+    MFA_PRECISION_INT4 = 4                 ///< 4-bit integer quantized
 } mfa_precision_t;
 
 /**
@@ -159,6 +161,63 @@ mfa_error_t mfa_attention_forward(
     bool causal,
     mfa_precision_t input_precision,
     mfa_precision_t intermediate_precision,
+    mfa_precision_t output_precision,
+    bool transpose_q,
+    bool transpose_k,
+    bool transpose_v,
+    bool transpose_o
+);
+
+/**
+ * @brief Perform Quantized Flash Attention forward pass
+ *
+ * Computes scaled dot-product attention with quantized K/V tensors for memory efficiency.
+ * Query remains in higher precision while K/V use INT8 quantization.
+ *
+ * @param context The MFA context
+ * @param q Query tensor buffer (FP16/BF16): [batch_size, seq_len_q, num_heads, head_dim]
+ * @param k Key tensor buffer (quantized): [batch_size, seq_len_kv, num_heads, head_dim]
+ * @param v Value tensor buffer (quantized): [batch_size, seq_len_kv, num_heads, head_dim]
+ * @param out Output tensor buffer: [batch_size, seq_len_q, num_heads, head_dim]
+ * @param k_scale Quantization scale for Key tensor
+ * @param k_zero_point Zero point for Key tensor quantization
+ * @param v_scale Quantization scale for Value tensor
+ * @param v_zero_point Zero point for Value tensor quantization
+ * @param batch_size Number of sequences in the batch
+ * @param seq_len_q Sequence length for queries
+ * @param seq_len_kv Sequence length for keys and values
+ * @param num_heads Number of attention heads (currently limited to 1)
+ * @param head_dim Dimension of each attention head
+ * @param softmax_scale Scaling factor for attention scores (typically 1/√head_dim)
+ * @param causal Whether to apply causal (lower triangular) mask
+ * @param query_precision Precision for Query tensor (FP16/BF16/FP32)
+ * @param kv_precision Quantization precision for K/V tensors (INT8/INT4)
+ * @param output_precision Precision for output tensor
+ *
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_attention_forward_quantized(
+    mfa_context_t context,
+    mfa_buffer_t q,
+    mfa_buffer_t k,
+    mfa_buffer_t v,
+    mfa_buffer_t out,
+    uint32_t batch_size,
+    uint32_t seq_len_q,
+    uint32_t seq_len_kv,
+    uint32_t num_heads,
+    uint16_t head_dim,
+    float softmax_scale,
+    bool causal,
+    float q_scale,
+    int32_t q_zero_point,
+    float k_scale,
+    int32_t k_zero_point,
+    float v_scale,
+    int32_t v_zero_point,
+    mfa_precision_t q_precision,
+    mfa_precision_t k_precision,
+    mfa_precision_t v_precision,
     mfa_precision_t output_precision,
     bool transpose_q,
     bool transpose_k,
