@@ -10,26 +10,32 @@ The MFA library had a **hardcoded scale factor** in the `dotProductScale()` func
 ## Solution Implemented
 
 ### 1. Core MFA Library Changes
+
 - **AttentionDescriptor**: Added `softmaxScale: Float?` field
 - **AttentionKernelDescriptor**: Added `softmaxScale: Float?` field
 - **AttentionKernel**: Added `softmaxScale: Float` field
 - **dotProductScale()**: Modified to use passed scale instead of hardcoded value
 
 ### 2. Backward Compatibility
+
 - When no scale is provided, defaults to `1/√head_dim`
 - Existing code continues to work without changes
 
 ### 3. Caching System Fix
+
 - Added `softmaxScale` to `PipelineCacheKey` to ensure different scales use separate cached kernels
 - Prevents incorrect reuse of cached pipelines with wrong scale factors
 
 ### 4. MFA Bridge Integration
+
 - Updated bridge to pass `softmaxScale` parameter through to `AttentionDescriptor`
 
 ## Validation Results
 
 ### ✅ Scale Factor Tests
+
 All scale factors now work correctly:
+
 - **Scale 0.1**: Max diff `8.94e-08`
 - **Scale 0.25**: Max diff `2.38e-07`
 - **Scale 0.354** (1/√8): Max diff `2.38e-07`
@@ -37,12 +43,14 @@ All scale factors now work correctly:
 - **Scale 1.0**: Max diff `6.56e-07`
 
 ### ✅ Comprehensive Testing
+
 - **All tensor sizes**: 4x4, 8x8, 16x16, 32x32 - all pass
 - **All data types**: FP32, FP16, BFloat16 - all work
 - **All tensor layouts**: Contiguous, non-contiguous, strided - all supported
 - **Edge cases**: Small values, large values, zeros, identity - all handled
 
 ### ✅ Swift Test Compatibility
+
 - All 23 Swift tests continue to pass
 - FFI layer works correctly with custom scales
 - Performance characteristics preserved
@@ -50,6 +58,7 @@ All scale factors now work correctly:
 ## Before vs After
 
 ### Before (Broken)
+
 ```python
 # Only this worked:
 scale = 1.0 / np.sqrt(head_dim)
@@ -60,6 +69,7 @@ output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v, scale=
 ```
 
 ### After (Fixed)
+
 ```python
 # All of these now work correctly:
 output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v, scale=0.1)   # ✅

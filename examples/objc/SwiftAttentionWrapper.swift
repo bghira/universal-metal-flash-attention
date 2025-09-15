@@ -3,32 +3,36 @@ import Foundation
 import Metal
 
 // Objective-C compatible wrapper for Swift FlashAttention structs
-@objc public class SwiftAttentionWrapper: NSObject {
-
+@objc
+public class SwiftAttentionWrapper: NSObject {
   private let device: MTLDevice
   private let commandQueue: MTLCommandQueue
 
-  @objc public init(device: MTLDevice) {
+  @objc
+  public init(device: MTLDevice) {
     self.device = device
-    self.commandQueue = device.makeCommandQueue()!
+    commandQueue = device.makeCommandQueue()!
     super.init()
   }
 
-  @objc public func createBuffer(size: Int) -> MTLBuffer {
-    return device.makeBuffer(length: size, options: .storageModeShared)!
+  @objc
+  public func createBuffer(size: Int) -> MTLBuffer {
+    device.makeBuffer(length: size, options: .storageModeShared)!
   }
 
-  @objc public func runAttention(
+  @objc
+  public func runAttention(
     qBuffer: MTLBuffer,
     kBuffer: MTLBuffer,
     vBuffer: MTLBuffer,
     oBuffer: MTLBuffer,
     seqLength: Int,
     headDim: Int,
-    scale: Float,
-    causal: Bool
-  ) -> Double {
-
+    scale _: Float,
+    causal _: Bool
+  )
+    -> Double
+  {
     // Create AttentionDescriptor (Swift struct)
     var attentionDesc = AttentionDescriptor()
     attentionDesc.lowPrecisionInputs = false
@@ -62,7 +66,8 @@ import Metal
       pipelineDesc.maxTotalThreadsPerThreadgroup = 1024
 
       let pipeline = try device.makeComputePipelineState(
-        descriptor: pipelineDesc, options: [], reflection: nil)
+        descriptor: pipelineDesc, options: [], reflection: nil
+      )
 
       // Execute with timing
       let commandBuffer = commandQueue.makeCommandBuffer()!
@@ -86,7 +91,7 @@ import Metal
       // Calculate dispatch parameters
       let blockCount =
         (seqLength + Int(kernel.blockDimensions.parallelization) - 1)
-        / Int(kernel.blockDimensions.parallelization)
+          / Int(kernel.blockDimensions.parallelization)
       let gridSize = MTLSize(width: blockCount, height: 1, depth: 1)
       let groupSize = MTLSize(width: Int(kernel.threadgroupSize), height: 1, depth: 1)
 
@@ -105,7 +110,8 @@ import Metal
     }
   }
 
-  @objc public func getVersion() -> String {
-    return "1.0.0-swift-wrapper"
+  @objc
+  public func getVersion() -> String {
+    "1.0.0-swift-wrapper"
   }
 }

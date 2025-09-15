@@ -40,12 +40,13 @@ final class MFAContext {
     guard let queue = device.makeCommandQueue() else {
       return nil
     }
-    self.commandQueue = queue
+    commandQueue = queue
   }
 
   func getCachedPipeline(key: PipelineCacheKey) -> (MTLComputePipelineState, AttentionKernel)? {
-    return cacheQueue.sync {
-      guard let pipeline = pipelineCache[key],
+    cacheQueue.sync {
+      guard
+        let pipeline = pipelineCache[key],
         let kernel = kernelCache[key]
       else {
         return nil
@@ -64,7 +65,7 @@ final class MFAContext {
   }
 
   func getCachedLBuffer(seqLen: UInt32) -> MTLBuffer? {
-    return cacheQueue.sync {
+    cacheQueue.sync {
       if let buffer = lBufferCache[seqLen] {
         return buffer
       }
@@ -72,7 +73,8 @@ final class MFAContext {
       let zeros = [Float](repeating: 0.0, count: Int(seqLen))
       guard
         let buffer = device.makeBuffer(
-          bytes: zeros, length: Int(seqLen * 4), options: .storageModeShared)
+          bytes: zeros, length: Int(seqLen * 4), options: .storageModeShared
+        )
       else {
         return nil
       }
@@ -82,7 +84,7 @@ final class MFAContext {
   }
 
   func getCachedDBuffer(seqLen: UInt32) -> MTLBuffer? {
-    return cacheQueue.sync {
+    cacheQueue.sync {
       if let buffer = dBufferCache[seqLen] {
         return buffer
       }
@@ -90,7 +92,8 @@ final class MFAContext {
       let zeros = [Float](repeating: 0.0, count: Int(seqLen))
       guard
         let buffer = device.makeBuffer(
-          bytes: zeros, length: Int(seqLen * 4), options: .storageModeShared)
+          bytes: zeros, length: Int(seqLen * 4), options: .storageModeShared
+        )
       else {
         return nil
       }
@@ -102,7 +105,7 @@ final class MFAContext {
 
 final class MFABuffer {
   let buffer: MTLBuffer
-  let originalDataPtr: UnsafeMutableRawPointer?  // Track original data for copy-back
+  let originalDataPtr: UnsafeMutableRawPointer? // Track original data for copy-back
   let dataSize: Int
 
   init(buffer: MTLBuffer, originalDataPtr: UnsafeMutableRawPointer? = nil, dataSize: Int = 0) {
@@ -121,7 +124,7 @@ private var globalContext: MFAContext?
 @_cdecl("mfa_create_context")
 public func mfa_create_context(_ context: UnsafeMutablePointer<UnsafeMutableRawPointer?>) -> Int32 {
   guard let device = globalDevice else {
-    return 3  // MFA_ERROR_DEVICE_NOT_SUPPORTED
+    return 3 // MFA_ERROR_DEVICE_NOT_SUPPORTED
   }
 
   // Use singleton pattern for global context like native Swift
@@ -130,17 +133,17 @@ public func mfa_create_context(_ context: UnsafeMutablePointer<UnsafeMutableRawP
   }
 
   guard let mfaContext = globalContext else {
-    return 2  // MFA_ERROR_MEMORY_ALLOCATION
+    return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
   let unmanagedContext = Unmanaged.passRetained(mfaContext)
   context.pointee = unmanagedContext.toOpaque()
-  return 0  // MFA_SUCCESS
+  return 0 // MFA_SUCCESS
 }
 
 @_cdecl("mfa_destroy_context")
 public func mfa_destroy_context(_ context: UnsafeMutableRawPointer?) {
-  guard let context = context else { return }
+  guard let context else { return }
   let unmanagedContext = Unmanaged<MFAContext>.fromOpaque(context)
   unmanagedContext.release()
 }
@@ -150,21 +153,23 @@ public func mfa_create_buffer(
   _ context: UnsafeMutableRawPointer?,
   _ sizeBytes: Int,
   _ buffer: UnsafeMutablePointer<UnsafeMutableRawPointer?>
-) -> Int32 {
-  guard let context = context else { return 1 }  // MFA_ERROR_INVALID_ARGS
+)
+  -> Int32
+{
+  guard let context else { return 1 } // MFA_ERROR_INVALID_ARGS
 
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
 
   guard let mtlBuffer = mfaContext.device.makeBuffer(length: sizeBytes, options: .storageModeShared)
   else {
-    return 2  // MFA_ERROR_MEMORY_ALLOCATION
+    return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
   let mfaBuffer = MFABuffer(buffer: mtlBuffer)
   let unmanagedBuffer = Unmanaged.passRetained(mfaBuffer)
   buffer.pointee = unmanagedBuffer.toOpaque()
 
-  return 0  // MFA_SUCCESS
+  return 0 // MFA_SUCCESS
 }
 
 @_cdecl("mfa_buffer_from_ptr")
@@ -173,10 +178,13 @@ public func mfa_buffer_from_ptr(
   _ dataPtr: UnsafeMutableRawPointer?,
   _ sizeBytes: Int,
   _ buffer: UnsafeMutablePointer<UnsafeMutableRawPointer?>
-) -> Int32 {
-  guard let context = context,
-    let dataPtr = dataPtr
-  else { return 1 }  // MFA_ERROR_INVALID_ARGS
+)
+  -> Int32
+{
+  guard
+    let context,
+    let dataPtr
+  else { return 1 } // MFA_ERROR_INVALID_ARGS
 
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
 
@@ -186,22 +194,26 @@ public func mfa_buffer_from_ptr(
       bytesNoCopy: dataPtr,
       length: sizeBytes,
       options: .storageModeShared,
-      deallocator: nil  // Don't deallocate - memory is managed by Python/caller
+      deallocator: nil // Don't deallocate - memory is managed by Python/caller
     )
   else {
-    return 2  // MFA_ERROR_MEMORY_ALLOCATION
+    return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
-  let mfaBuffer = MFABuffer(buffer: mtlBuffer, originalDataPtr: nil, dataSize: 0)  // No copy-back needed
+  let mfaBuffer = MFABuffer(
+    buffer: mtlBuffer,
+    originalDataPtr: nil,
+    dataSize: 0
+  ) // No copy-back needed
   let unmanagedBuffer = Unmanaged.passRetained(mfaBuffer)
   buffer.pointee = unmanagedBuffer.toOpaque()
 
-  return 0  // MFA_SUCCESS
+  return 0 // MFA_SUCCESS
 }
 
 @_cdecl("mfa_buffer_contents")
 public func mfa_buffer_contents(_ buffer: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer? {
-  guard let buffer = buffer else { return nil }
+  guard let buffer else { return nil }
 
   let mfaBuffer = Unmanaged<MFABuffer>.fromOpaque(buffer).takeUnretainedValue()
   return mfaBuffer.buffer.contents()
@@ -209,7 +221,7 @@ public func mfa_buffer_contents(_ buffer: UnsafeMutableRawPointer?) -> UnsafeMut
 
 @_cdecl("mfa_destroy_buffer")
 public func mfa_destroy_buffer(_ buffer: UnsafeMutableRawPointer?) {
-  guard let buffer = buffer else { return }
+  guard let buffer else { return }
   let unmanagedBuffer = Unmanaged<MFABuffer>.fromOpaque(buffer)
   unmanagedBuffer.release()
 }
@@ -223,7 +235,7 @@ public func mfa_attention_forward(
   _ k: UnsafeMutableRawPointer?,
   _ v: UnsafeMutableRawPointer?,
   _ out: UnsafeMutableRawPointer?,
-  _ batchSize: UInt32,
+  _: UInt32,
   _ seqLenQ: UInt32,
   _ seqLenKV: UInt32,
   _ numHeads: UInt32,
@@ -232,16 +244,19 @@ public func mfa_attention_forward(
   _ causal: Bool,
   _ inputPrecision: Int32,
   _ intermediatePrecision: Int32,
-  _ outputPrecision: Int32,
+  _: Int32,
   _ transposeQ: Bool,
   _ transposeK: Bool,
   _ transposeV: Bool,
   _ transposeO: Bool
-) -> Int32 {
-  guard let context = context,
-    let q = q, let k = k, let v = v, let out = out
+)
+  -> Int32
+{
+  guard
+    let context,
+    let q, let k, let v, let out
   else {
-    return 1  // MFA_ERROR_INVALID_ARGS
+    return 1 // MFA_ERROR_INVALID_ARGS
   }
 
   // Extract context and buffers
@@ -254,7 +269,7 @@ public func mfa_attention_forward(
   // For now, handle single-head case (MFA's current limitation)
   // TODO: Add multi-head support by looping over heads
   if numHeads != 1 {
-    return 1  // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
+    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
   }
 
   do {
@@ -287,8 +302,9 @@ public func mfa_attention_forward(
 
       // Set precision based on input parameters
       // Note: MFA uses false = FP32, true = FP16
-      descriptor.lowPrecisionInputs = (inputPrecision == 0)  // FP16 = true, FP32 = false
-      descriptor.lowPrecisionIntermediates = (intermediatePrecision == 0)  // FP16 = true, FP32 = false
+      descriptor.lowPrecisionInputs = (inputPrecision == 0) // FP16 = true, FP32 = false
+      descriptor
+        .lowPrecisionIntermediates = (intermediatePrecision == 0) // FP16 = true, FP32 = false
 
       // Create kernel descriptor
       let kernelDescriptor = descriptor.kernelDescriptor(type: .forward)
@@ -306,10 +322,11 @@ public func mfa_attention_forward(
       // Create pipeline descriptor with proper settings for Apple Silicon
       let pipelineDesc = MTLComputePipelineDescriptor()
       pipelineDesc.computeFunction = function
-      pipelineDesc.maxTotalThreadsPerThreadgroup = 1024  // Critical for M1/M2/M3 performance
+      pipelineDesc.maxTotalThreadsPerThreadgroup = 1024 // Critical for M1/M2/M3 performance
 
       pipeline = try mfaContext.device.makeComputePipelineState(
-        descriptor: pipelineDesc, options: [], reflection: nil)
+        descriptor: pipelineDesc, options: [], reflection: nil
+      )
 
       // Cache the compiled pipeline and kernel
       mfaContext.cachePipeline(pipeline, kernel: kernel, key: cacheKey)
@@ -317,21 +334,22 @@ public func mfa_attention_forward(
 
     // Create command buffer
     guard let commandBuffer = mfaContext.commandQueue.makeCommandBuffer() else {
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Create compute encoder
     guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     encoder.setComputePipelineState(pipeline)
 
     // Get cached L and D buffers (avoid reallocation like native Swift)
-    guard let lBuffer = mfaContext.getCachedLBuffer(seqLen: seqLenQ),
+    guard
+      let lBuffer = mfaContext.getCachedLBuffer(seqLen: seqLenQ),
       let dBuffer = mfaContext.getCachedDBuffer(seqLen: seqLenQ)
     else {
-      return 2  // MFA_ERROR_MEMORY_ALLOCATION
+      return 2 // MFA_ERROR_MEMORY_ALLOCATION
     }
 
     // Note: Debug output removed - buffer copying now verified to work
@@ -341,8 +359,8 @@ public func mfa_attention_forward(
     encoder.setBuffer(kBuffer.buffer, offset: 0, index: 1)
     encoder.setBuffer(vBuffer.buffer, offset: 0, index: 2)
     encoder.setBuffer(outBuffer.buffer, offset: 0, index: 3)
-    encoder.setBuffer(lBuffer, offset: 0, index: 4)  // L buffer (attention statistics)
-    encoder.setBuffer(dBuffer, offset: 0, index: 5)  // D buffer (attention statistics)
+    encoder.setBuffer(lBuffer, offset: 0, index: 4) // L buffer (attention statistics)
+    encoder.setBuffer(dBuffer, offset: 0, index: 5) // D buffer (attention statistics)
 
     // Buffers set: Q, K, V, O, L, D following MFA pattern
 
@@ -355,7 +373,7 @@ public func mfa_attention_forward(
     // Use MFA's ceil divide calculation
     let blockCount =
       (parallelizationDimension + Int(kernel.blockDimensions.parallelization) - 1)
-      / Int(kernel.blockDimensions.parallelization)
+        / Int(kernel.blockDimensions.parallelization)
     let gridSize = MTLSize(width: blockCount, height: 1, depth: 1)
     let groupSize = MTLSize(width: Int(kernel.threadgroupSize), height: 1, depth: 1)
 
@@ -369,7 +387,7 @@ public func mfa_attention_forward(
 
     if let error = commandBuffer.error {
       print("Metal execution error: \(error)")
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Zero-copy: Metal buffer directly wraps the original numpy array memory
@@ -379,11 +397,11 @@ public func mfa_attention_forward(
     let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
     globalContext?.lastGPULatency = gpuLatency
 
-    return 0  // MFA_SUCCESS
+    return 0 // MFA_SUCCESS
 
   } catch {
     print("MFA Error: \(error)")
-    return 4  // MFA_ERROR_KERNEL_COMPILATION
+    return 4 // MFA_ERROR_KERNEL_COMPILATION
   }
 }
 
@@ -391,15 +409,14 @@ public func mfa_attention_forward(
 
 @_cdecl("mfa_error_string")
 public func mfa_error_string(_ error: Int32) -> UnsafePointer<CChar>? {
-  let errorString: String
-  switch error {
-  case 0: errorString = "Success"
-  case 1: errorString = "Invalid arguments"
-  case 2: errorString = "Memory allocation failed"
-  case 3: errorString = "Device not supported"
-  case 4: errorString = "Kernel compilation failed"
-  case 5: errorString = "Execution failed"
-  default: errorString = "Unknown error"
+  let errorString = switch error {
+  case 0: "Success"
+  case 1: "Invalid arguments"
+  case 2: "Memory allocation failed"
+  case 3: "Device not supported"
+  case 4: "Kernel compilation failed"
+  case 5: "Execution failed"
+  default: "Unknown error"
   }
 
   return UnsafePointer<CChar>(strdup(errorString))
@@ -407,7 +424,7 @@ public func mfa_error_string(_ error: Int32) -> UnsafePointer<CChar>? {
 
 @_cdecl("mfa_is_device_supported")
 public func mfa_is_device_supported() -> Bool {
-  return MTLCreateSystemDefaultDevice() != nil
+  MTLCreateSystemDefaultDevice() != nil
 }
 
 @_cdecl("mfa_get_version")
@@ -423,7 +440,7 @@ public func mfa_get_version(
 
 @_cdecl("mfa_get_gpu_latency")
 public func mfa_get_gpu_latency(_ context: UnsafeMutableRawPointer?) -> Double {
-  guard let context = context else { return 0.0 }
+  guard let context else { return 0.0 }
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
   return mfaContext.lastGPULatency
 }
@@ -442,7 +459,7 @@ public func mfa_attention_forward_quantized(
   _ seqLenKV: UInt32,
   _ numHeads: UInt32,
   _ headDim: UInt16,
-  _ softmaxScale: Float,
+  _: Float,
   _ causal: Bool,
   _ qScale: Float,
   _ qZeroPoint: Int32,
@@ -453,16 +470,19 @@ public func mfa_attention_forward_quantized(
   _ qPrecision: Int32,
   _ kPrecision: Int32,
   _ vPrecision: Int32,
-  _ outputPrecision: Int32,
+  _: Int32,
   _ transposeQ: Bool,
   _ transposeK: Bool,
   _ transposeV: Bool,
   _ transposeO: Bool
-) -> Int32 {
-  guard let context = context,
-    let q = q, let k = k, let v = v, let out = out
+)
+  -> Int32
+{
+  guard
+    let context,
+    let q, let k, let v, let out
   else {
-    return 1  // MFA_ERROR_INVALID_ARGS
+    return 1 // MFA_ERROR_INVALID_ARGS
   }
 
   // Extract context and buffers
@@ -474,7 +494,7 @@ public func mfa_attention_forward_quantized(
 
   // For now, handle single-head case (MFA's current limitation)
   if numHeads != 1 {
-    return 1  // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
+    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
   }
 
   do {
@@ -500,24 +520,30 @@ public func mfa_attention_forward_quantized(
 
     // Create quantized tensors from buffers
     let qParams = QuantizationParameters(
-      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision)
+      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
+    )
     let kParams = QuantizationParameters(
-      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision)
+      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
+    )
     let vParams = QuantizationParameters(
-      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision)
+      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
+    )
 
     let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
     let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
 
     let qTensor = QuantizedTensor(
       device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
     let kTensor = QuantizedTensor(
       device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
     let vTensor = QuantizedTensor(
       device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
 
     // Execute quantized forward pass
     guard
@@ -529,7 +555,7 @@ public func mfa_attention_forward_quantized(
         descriptor: quantDescriptor
       )
     else {
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Execute and wait for completion
@@ -538,18 +564,18 @@ public func mfa_attention_forward_quantized(
 
     if let error = commandBuffer.error {
       print("Metal execution error: \(error)")
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Store GPU timing for zero-overhead measurement
     let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
     globalContext?.lastGPULatency = gpuLatency
 
-    return 0  // MFA_SUCCESS
+    return 0 // MFA_SUCCESS
 
   } catch {
     print("MFA Quantized Error: \(error)")
-    return 4  // MFA_ERROR_KERNEL_COMPILATION
+    return 4 // MFA_ERROR_KERNEL_COMPILATION
   }
 }
 
@@ -582,12 +608,15 @@ public func mfa_attention_backward_query_quantized(
   _ transposeK: Bool,
   _ transposeV: Bool,
   _ transposeO: Bool
-) -> Int32 {
-  guard let context = context,
-    let q = q, let k = k, let v = v, let gradOutput = gradOutput,
-    let logsumexp = logsumexp, let gradQuery = gradQuery, let dValues = dValues
+)
+  -> Int32
+{
+  guard
+    let context,
+    let q, let k, let v, let gradOutput,
+    let logsumexp, let gradQuery, let dValues
   else {
-    return 1  // MFA_ERROR_INVALID_ARGS
+    return 1 // MFA_ERROR_INVALID_ARGS
   }
 
   // Extract context and buffers
@@ -602,7 +631,7 @@ public func mfa_attention_backward_query_quantized(
 
   // For now, handle single-head case
   if numHeads != 1 {
-    return 1  // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
+    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
   }
 
   do {
@@ -628,24 +657,30 @@ public func mfa_attention_backward_query_quantized(
 
     // Create quantized tensors from buffers
     let qParams = QuantizationParameters(
-      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision)
+      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
+    )
     let kParams = QuantizationParameters(
-      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision)
+      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
+    )
     let vParams = QuantizationParameters(
-      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision)
+      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
+    )
 
     let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
     let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
 
     let qTensor = QuantizedTensor(
       device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
     let kTensor = QuantizedTensor(
       device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
     let vTensor = QuantizedTensor(
       device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
 
     // Execute quantized backward query pass
     guard
@@ -660,7 +695,7 @@ public func mfa_attention_backward_query_quantized(
         descriptor: quantDescriptor
       )
     else {
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Execute and wait for completion
@@ -669,18 +704,18 @@ public func mfa_attention_backward_query_quantized(
 
     if let error = commandBuffer.error {
       print("Metal execution error: \(error)")
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Store GPU timing
     let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
     globalContext?.lastGPULatency = gpuLatency
 
-    return 0  // MFA_SUCCESS
+    return 0 // MFA_SUCCESS
 
   } catch {
     print("MFA Quantized Backward Query Error: \(error)")
-    return 4  // MFA_ERROR_KERNEL_COMPILATION
+    return 4 // MFA_ERROR_KERNEL_COMPILATION
   }
 }
 
@@ -714,13 +749,16 @@ public func mfa_attention_backward_kv_quantized(
   _ transposeK: Bool,
   _ transposeV: Bool,
   _ transposeO: Bool
-) -> Int32 {
-  guard let context = context,
-    let q = q, let k = k, let v = v, let gradOutput = gradOutput,
-    let logsumexp = logsumexp, let dValues = dValues,
-    let gradKey = gradKey, let gradValue = gradValue
+)
+  -> Int32
+{
+  guard
+    let context,
+    let q, let k, let v, let gradOutput,
+    let logsumexp, let dValues,
+    let gradKey, let gradValue
   else {
-    return 1  // MFA_ERROR_INVALID_ARGS
+    return 1 // MFA_ERROR_INVALID_ARGS
   }
 
   // Extract context and buffers
@@ -736,7 +774,7 @@ public func mfa_attention_backward_kv_quantized(
 
   // For now, handle single-head case
   if numHeads != 1 {
-    return 1  // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
+    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
   }
 
   do {
@@ -762,11 +800,14 @@ public func mfa_attention_backward_kv_quantized(
 
     // Create quantized tensors from buffers
     let qParams = QuantizationParameters(
-      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision)
+      scale: qScale, zeroPoint: qZeroPoint, precision: quantConfig.queryPrecision
+    )
     let kParams = QuantizationParameters(
-      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision)
+      scale: kScale, zeroPoint: kZeroPoint, precision: quantConfig.keyPrecision
+    )
     let vParams = QuantizationParameters(
-      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision)
+      scale: vScale, zeroPoint: vZeroPoint, precision: quantConfig.valuePrecision
+    )
 
     let elementCount = Int(batchSize * seqLenKV * UInt32(headDim))
     let shape = [Int(batchSize), Int(seqLenKV), Int(headDim)]
@@ -774,13 +815,16 @@ public func mfa_attention_backward_kv_quantized(
     let qTensor = QuantizedTensor(
       device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
       elementCount: Int(batchSize * seqLenQ * UInt32(headDim)),
-      shape: [Int(batchSize), Int(seqLenQ), Int(headDim)])
+      shape: [Int(batchSize), Int(seqLenQ), Int(headDim)]
+    )
     let kTensor = QuantizedTensor(
       device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
     let vTensor = QuantizedTensor(
       device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-      elementCount: elementCount, shape: shape)
+      elementCount: elementCount, shape: shape
+    )
 
     // Execute quantized backward key-value pass
     guard
@@ -796,7 +840,7 @@ public func mfa_attention_backward_kv_quantized(
         descriptor: quantDescriptor
       )
     else {
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Execute and wait for completion
@@ -805,17 +849,17 @@ public func mfa_attention_backward_kv_quantized(
 
     if let error = commandBuffer.error {
       print("Metal execution error: \(error)")
-      return 5  // MFA_ERROR_EXECUTION_FAILED
+      return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
     // Store GPU timing
     let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
     globalContext?.lastGPULatency = gpuLatency
 
-    return 0  // MFA_SUCCESS
+    return 0 // MFA_SUCCESS
 
   } catch {
     print("MFA Quantized Backward KV Error: \(error)")
-    return 4  // MFA_ERROR_KERNEL_COMPILATION
+    return 4 // MFA_ERROR_KERNEL_COMPILATION
   }
 }

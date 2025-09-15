@@ -9,7 +9,6 @@ import Metal
 
 /// Example demonstrating quantized int8/int4 AMX-accelerated attention
 public class QuantizedAttentionExample {
-
   let device: MTLDevice
   let quantizedAttention: QuantizedAttention
 
@@ -18,7 +17,7 @@ public class QuantizedAttentionExample {
       fatalError("Metal is not supported on this device")
     }
     self.device = device
-    self.quantizedAttention = QuantizedAttention(device: device)
+    quantizedAttention = QuantizedAttention(device: device)
   }
 
   /// Demonstrate basic quantized attention usage
@@ -92,9 +91,9 @@ public class QuantizedAttentionExample {
     print("=" * 50)
 
     let configurations = [
-      (256, 64),  // Small: 256 seq len, 64 head dim
-      (1024, 64),  // Medium: 1024 seq len, 64 head dim
-      (2048, 128),  // Large: 2048 seq len, 128 head dim
+      (256, 64), // Small: 256 seq len, 64 head dim
+      (1024, 64), // Medium: 1024 seq len, 64 head dim
+      (2048, 128), // Large: 2048 seq len, 128 head dim
     ]
 
     for (seqLen, headDim) in configurations {
@@ -111,7 +110,8 @@ public class QuantizedAttentionExample {
       // Display results in a nice format
       let precisions = ["FP16", "INT8", "INT4"]
       for precision in precisions {
-        if let avgTime = results["\(precision)_avg_ms"],
+        if
+          let avgTime = results["\(precision)_avg_ms"],
           let gops = results["\(precision)_gops"]
         {
           print(
@@ -121,7 +121,8 @@ public class QuantizedAttentionExample {
       }
 
       // Calculate speedup
-      if let fp16Time = results["FP16_avg_ms"],
+      if
+        let fp16Time = results["FP16_avg_ms"],
         let int8Time = results["INT8_avg_ms"],
         let int4Time = results["INT4_avg_ms"]
       {
@@ -141,9 +142,9 @@ public class QuantizedAttentionExample {
 
     // Simulate GPT-style model parameters
     let modelConfigs = [
-      ("Small Model (117M params)", 768, 12, 12),  // GPT-2 Small
-      ("Medium Model (345M params)", 1024, 24, 16),  // GPT-2 Medium
-      ("Large Model (774M params)", 1280, 36, 20),  // GPT-2 Large
+      ("Small Model (117M params)", 768, 12, 12), // GPT-2 Small
+      ("Medium Model (345M params)", 1024, 24, 16), // GPT-2 Medium
+      ("Large Model (774M params)", 1280, 36, 20), // GPT-2 Large
     ]
 
     for (modelName, hiddenSize, numLayers, numHeads) in modelConfigs {
@@ -151,10 +152,10 @@ public class QuantizedAttentionExample {
       print("-" * 30)
 
       let headDim = hiddenSize / numHeads
-      let sequenceLength = 1024  // Context window
+      let sequenceLength = 1024 // Context window
 
       // Calculate memory savings for the entire model
-      let totalAttentionParams = numLayers * 3 * hiddenSize * hiddenSize  // Q, K, V projections
+      let totalAttentionParams = numLayers * 3 * hiddenSize * hiddenSize // Q, K, V projections
 
       let memoryEstimates = [
         ("FP32 Baseline", calculateModelMemory(params: totalAttentionParams, precision: .FP32)),
@@ -181,21 +182,21 @@ public class QuantizedAttentionExample {
         iterations: 10
       )
 
-      if let fp16Time = results["FP16_avg_ms"],
+      if
+        let fp16Time = results["FP16_avg_ms"],
         let int8Time = results["INT8_avg_ms"],
         let int4Time = results["INT4_avg_ms"]
       {
-
         let totalFP16Time = fp16Time * Double(numLayers)
         let totalINT8Time = int8Time * Double(numLayers)
         let totalINT4Time = int4Time * Double(numLayers)
 
         print("  FP16: \(String(format: "%.1f ms", totalFP16Time)) total")
         print(
-          "  INT8: \(String(format: "%.1f ms", totalINT8Time)) total (\(String(format: "%.1fx", totalFP16Time/totalINT8Time)) faster)"
+          "  INT8: \(String(format: "%.1f ms", totalINT8Time)) total (\(String(format: "%.1fx", totalFP16Time / totalINT8Time)) faster)"
         )
         print(
-          "  INT4: \(String(format: "%.1f ms", totalINT4Time)) total (\(String(format: "%.1fx", totalFP16Time/totalINT4Time)) faster)"
+          "  INT4: \(String(format: "%.1f ms", totalINT4Time)) total (\(String(format: "%.1fx", totalFP16Time / totalINT4Time)) faster)"
         )
       }
     }
@@ -204,7 +205,7 @@ public class QuantizedAttentionExample {
   // MARK: - Helper Methods
 
   private func generateNormalizedData(count: Int, scale: Float = 1.0) -> [Float] {
-    return (0..<count).map { _ in
+    (0..<count).map { _ in
       // Box-Muller transform for normal distribution
       let u1 = Float.random(in: 0..<1)
       let u2 = Float.random(in: 0..<1)
@@ -223,7 +224,7 @@ public class QuantizedAttentionExample {
 
   private func createInt8Config() -> QuantizedAttention.Configuration {
     var config = QuantizedAttention.Configuration()
-    config.queryPrecision = .FP16  // Keep query in higher precision
+    config.queryPrecision = .FP16 // Keep query in higher precision
     config.keyPrecision = .INT8
     config.valuePrecision = .INT8
     return config
@@ -240,8 +241,8 @@ public class QuantizedAttentionExample {
   private func createMixedConfig() -> QuantizedAttention.Configuration {
     var config = QuantizedAttention.Configuration()
     config.queryPrecision = .FP16
-    config.keyPrecision = .INT8  // More precision for keys (attention weights)
-    config.valuePrecision = .INT4  // Lower precision for values
+    config.keyPrecision = .INT8 // More precision for keys (attention weights)
+    config.valuePrecision = .INT4 // Lower precision for values
     return config
   }
 
@@ -249,7 +250,9 @@ public class QuantizedAttentionExample {
     query: QuantizedTensor,
     key: QuantizedTensor,
     value: QuantizedTensor
-  ) -> (query: Float, key: Float, value: Float, total: Float) {
+  )
+    -> (query: Float, key: Float, value: Float, total: Float)
+  {
     let queryKB = Float(query.data.length) / 1024.0
     let keyKB = Float(key.data.length) / 1024.0
     let valueKB = Float(value.data.length) / 1024.0
@@ -260,13 +263,13 @@ public class QuantizedAttentionExample {
 
   private func calculateModelMemory(params: Int, precision: GEMMOperandPrecision) -> Float {
     let bytes = params * precision.size
-    return Float(bytes) / (1024 * 1024)  // Convert to MB
+    return Float(bytes) / (1024 * 1024) // Convert to MB
   }
 
   private func testAccuracy(
     tensors: (query: QuantizedTensor, key: QuantizedTensor, value: QuantizedTensor),
-    config: QuantizedAttention.Configuration,
-    name: String
+    config _: QuantizedAttention.Configuration,
+    name _: String
   ) {
     print("🎯 Accuracy Test:")
 
@@ -313,7 +316,8 @@ public class QuantizedAttentionExample {
     transformerInferenceExample()
 
     print(
-      "\n✨ Demo completed! Quantized attention with AMX acceleration is ready for production use.")
+      "\n✨ Demo completed! Quantized attention with AMX acceleration is ready for production use."
+    )
     print("\n📝 Key Benefits Demonstrated:")
     print("   • 2-4x memory reduction with INT8/INT4 quantization")
     print("   • AMX hardware acceleration for matrix operations")
@@ -324,13 +328,15 @@ public class QuantizedAttentionExample {
 }
 
 // MARK: - String Repetition Helper
+
 extension String {
   static func * (lhs: String, rhs: Int) -> String {
-    return String(repeating: lhs, count: rhs)
+    String(repeating: lhs, count: rhs)
   }
 }
 
 // MARK: - Usage Example
+
 /*
  To run this example:
 

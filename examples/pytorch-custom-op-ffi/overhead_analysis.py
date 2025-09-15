@@ -4,10 +4,11 @@ Analyze overhead sources in Metal SDPA backend on Apple Silicon.
 Author: bghira
 """
 
+import time
+
+import metal_sdpa_extension
 import torch
 import torch.nn.functional as F
-import metal_sdpa_extension
-import time
 
 
 def analyze_overhead():

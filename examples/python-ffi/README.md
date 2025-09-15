@@ -23,6 +23,7 @@ High-performance Python bindings for Metal Flash Attention, delivering **1.87x f
 ## Quick Start
 
 ### Prerequisites
+
 ```bash
 # Build the FFI library (from project root)
 cd /path/to/universal-metal-flash-attention
@@ -30,6 +31,7 @@ swift build -c release
 ```
 
 ### Setup Python Environment
+
 ```bash
 cd examples/python-ffi
 python3 -m venv venv
@@ -38,6 +40,7 @@ pip install -r requirements.txt
 ```
 
 ### Basic Usage
+
 ```bash
 # Set library path and run examples
 export DYLD_LIBRARY_PATH=../../.build/release
@@ -52,6 +55,7 @@ python ../../examples/pytorch_sdpa_replacement.py
 ## PyTorch Integration
 
 ### Drop-in Replacement for PyTorch SDPA
+
 ```python
 import torch
 import torch.nn.functional as F
@@ -102,6 +106,7 @@ print(f"Results are equivalent: {torch.allclose(pytorch_output, metal_output, at
 ```
 
 ### Integration in PyTorch Modules
+
 ```python
 import torch.nn as nn
 
@@ -144,6 +149,7 @@ output = layer(x, causal=True)
 ### Core Functions
 
 #### `umfa.MFAContext()`
+
 Creates a Metal Flash Attention context for managing GPU resources.
 
 ```python
@@ -157,9 +163,11 @@ with umfa.MFAContext() as ctx:
 ```
 
 #### `umfa.flash_attention_forward(context, q, k, v, **kwargs)`
+
 Main attention computation function.
 
 **Parameters:**
+
 - `context`: MFA context object
 - `q, k, v`: Input numpy arrays with shape `[seq_len, head_dim]`
 - `causal`: Boolean, enables causal masking (default: False)
@@ -169,9 +177,11 @@ Main attention computation function.
 - `softmax_scale`: Float, scaling factor (default: 1/√head_dim)
 
 **Returns:**
+
 - Output numpy array with same shape as input `q`
 
 #### `umfa.attention(q, k, v, **kwargs)`
+
 Convenience function that manages context automatically.
 
 ```python
@@ -193,6 +203,7 @@ print(f"UMFA version: {major}.{minor}.{patch}")
 ## Performance Tips
 
 ### 1. Use Release Build
+
 ```bash
 # Always use release build for production performance
 swift build -c release
@@ -200,6 +211,7 @@ export DYLD_LIBRARY_PATH=../../.build/release
 ```
 
 ### 2. Proper Warmup
+
 ```python
 # MFA kernels need warmup for optimal performance
 with umfa.MFAContext() as ctx:
@@ -214,6 +226,7 @@ with umfa.MFAContext() as ctx:
 ```
 
 ### 3. Precision Selection
+
 ```python
 # FP16 for maximum performance (recommended)
 output = umfa.attention(q, k, v, input_precision="fp16")
@@ -223,6 +236,7 @@ output = umfa.attention(q, k, v, input_precision="fp32")
 ```
 
 ### 4. Context Reuse
+
 ```python
 # ❌ Don't create new contexts repeatedly
 for batch in batches:
@@ -266,6 +280,7 @@ python ../../examples/pytorch_sdpa_replacement.py
 ### Common Issues
 
 **ImportError: "UMFA not available"**
+
 ```bash
 # Ensure library is built and path is set
 swift build -c release
@@ -273,6 +288,7 @@ export DYLD_LIBRARY_PATH=../../.build/release
 ```
 
 **Performance slower than expected**
+
 ```bash
 # Use release build (not debug)
 swift build -c release  # Not swift build
@@ -282,6 +298,7 @@ swift build -c release  # Not swift build
 ```
 
 **"Metal not available" error**
+
 ```python
 # Check Metal support
 import umfa

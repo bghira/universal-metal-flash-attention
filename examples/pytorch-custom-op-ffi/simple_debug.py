@@ -4,8 +4,8 @@ Simple debug test for investigating hanging.
 Author: bghira
 """
 
-import torch
 import metal_sdpa_extension
+import torch
 
 print("Testing simple 2x2 case...")
 q = torch.randn(2, 2, dtype=torch.float32)

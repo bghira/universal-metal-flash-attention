@@ -4,11 +4,12 @@ Performance benchmark for Metal SDPA backend.
 Author: bghira
 """
 
+import time
+
+import metal_sdpa_extension
+import numpy as np
 import torch
 import torch.nn.functional as F
-import metal_sdpa_extension
-import time
-import numpy as np
 
 
 def benchmark_case(name, q, k, v, num_warmup=5, num_trials=20):

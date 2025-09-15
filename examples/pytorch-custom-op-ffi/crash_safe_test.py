@@ -4,8 +4,8 @@ Crash-safe test for Metal SDPA backend.
 Author: bghira
 """
 
-import torch
 import metal_sdpa_extension
+import torch
 
 
 def safe_test(name, test_func):

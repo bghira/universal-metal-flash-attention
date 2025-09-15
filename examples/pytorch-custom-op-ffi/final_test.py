@@ -4,9 +4,9 @@ Final comprehensive test and summary for Metal SDPA backend.
 Author: bghira
 """
 
+import metal_sdpa_extension
 import torch
 import torch.nn.functional as F
-import metal_sdpa_extension
 
 
 def main():

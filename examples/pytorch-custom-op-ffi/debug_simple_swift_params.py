@@ -4,9 +4,9 @@ Simplified test with Swift parameters to isolate hanging issue.
 Author: bghira
 """
 
-import torch
 import metal_sdpa_extension
 import numpy as np
+import torch
 
 
 def main():

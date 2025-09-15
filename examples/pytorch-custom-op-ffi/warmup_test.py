@@ -4,10 +4,11 @@ Test the effect of warmup on Metal SDPA performance.
 Author: bghira
 """
 
+import time
+
+import metal_sdpa_extension
 import torch
 import torch.nn.functional as F
-import metal_sdpa_extension
-import time
 
 
 def test_warmup_effect():

@@ -3,6 +3,7 @@
 **Author: bghira**
 
 ## Issue
+
 The current Package.swift has unsafe compiler flags that can cause incorrect results:
 
 ```swift
@@ -64,6 +65,7 @@ python examples/pytorch-custom-op-ffi/simple_perf.py
 ## Impact
 
 This fix should:
+
 - ✅ Eliminate potential numerical instability
 - ✅ Ensure consistent results across debug/release
 - ✅ Maintain high performance in release builds

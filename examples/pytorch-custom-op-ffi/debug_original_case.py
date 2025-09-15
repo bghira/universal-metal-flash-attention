@@ -4,8 +4,8 @@ Debug script testing the original case that produced NaNs.
 Author: bghira
 """
 
-import torch
 import metal_sdpa_extension
+import torch
 
 
 def test_original_problematic_case():

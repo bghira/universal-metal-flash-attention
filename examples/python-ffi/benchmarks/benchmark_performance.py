@@ -5,11 +5,12 @@ Performance benchmarks for Universal Metal Flash Attention Python bindings.
 Measures throughput, memory usage, and compares with reference implementations.
 """
 
-import time
 import gc
 import sys
+import time
 from pathlib import Path
 from typing import List, Tuple
+
 import numpy as np
 
 # Add the source directory to path

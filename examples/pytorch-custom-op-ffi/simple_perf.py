@@ -4,10 +4,11 @@ Simple performance test for Metal SDPA backend.
 Author: bghira
 """
 
+import time
+
+import metal_sdpa_extension
 import torch
 import torch.nn.functional as F
-import metal_sdpa_extension
-import time
 
 
 def simple_benchmark():

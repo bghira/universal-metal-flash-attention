@@ -5,6 +5,7 @@ This directory contains **high-performance Rust bindings** for Universal Metal F
 ## Performance Results - Zero-Copy Achieved! 🚀
 
 ### Final Optimized Performance
+
 Identical configuration: N=1024, FP32 precision, 5 dispatches per measurement, GPU timing.
 
 | Head Dim | Swift Submodule | Rust FFI | Performance Gap |
@@ -18,6 +19,7 @@ Identical configuration: N=1024, FP32 precision, 5 dispatches per measurement, G
 ## How Zero-Copy Was Achieved
 
 ### Performance Optimization Journey
+
 - **Initial**: 15 GINSTRS/s (75x slower than native)
 - **Fixed causal masking**: 1042 GINSTRS/s (30x+ improvement)
 - **Added pipeline caching**: Eliminated Metal shader recompilation
@@ -34,6 +36,7 @@ Identical configuration: N=1024, FP32 precision, 5 dispatches per measurement, G
 5. **Zero Memory Copies**: True zero-copy operation with cached Metal buffers
 
 ### Optimized Architecture
+
 ```
 Rust → C FFI → Swift → Metal Kernel (Cached)
  ^                              ^
@@ -45,6 +48,7 @@ The FFI overhead was **measurement artifact**, not fundamental limitation!
 ## Features & Capabilities
 
 ### ✅ Production Ready
+
 - ✅ **Zero-Copy Performance**: Matches native Swift (1135 vs 1134 GINSTRS/s)
 - ✅ **Correct Results**: Mathematically identical to native Swift implementation
 - ✅ **Causal Masking**: Both causal and non-causal attention modes
@@ -55,6 +59,7 @@ The FFI overhead was **measurement artifact**, not fundamental limitation!
 ## Usage
 
 ### Building
+
 ```bash
 swift build
 cd examples/rust-ffi
@@ -62,11 +67,13 @@ cargo run
 ```
 
 ### Benchmarking
+
 ```bash
 cargo run benchmark
 ```
 
 ### Integration Example
+
 ```rust
 use mfa_rust_example::*;
 
@@ -84,18 +91,22 @@ let result = unsafe { mfa_attention_forward(/*...*/) };
 ## Technical Implementation
 
 ### GINSTRS Calculation
+
 Uses identical formula to native Swift: `(2*D + 5) * N² * 5 / gpu_latency_seconds / 1e9`
 
 ### Caching System
+
 - **Pipeline Cache**: Compiled Metal shaders cached by configuration
 - **Buffer Cache**: L/D buffers cached by sequence length
 - **Kernel Cache**: AttentionKernel objects cached alongside pipelines
 - **Global Context**: Singleton Metal device/command queue
 
 ### GPU Timing
+
 Uses `commandBuffer.gpuStartTime` and `gpuEndTime` for zero-overhead measurement, identical to native Swift benchmarks.
 
 ### Memory Management
+
 - RAII wrappers (`MfaContext`, `MfaBuffer`) ensure proper cleanup
 - Zero-copy Metal buffer operations
 - Cached auxiliary buffers eliminate allocations

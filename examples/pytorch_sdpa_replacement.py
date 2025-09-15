@@ -6,12 +6,13 @@ This example demonstrates how to replace torch.nn.functional.scaled_dot_product_
 with our high-performance Metal implementation for 4400+ GINSTRS/sec performance.
 """
 
-import torch
-import torch.nn.functional as F
-import numpy as np
 import sys
 import time
 from pathlib import Path
+
+import numpy as np
+import torch
+import torch.nn.functional as F
 
 # Add UMFA to path (adjust path as needed)
 umfa_path = Path(__file__).parent / "python-ffi/src"

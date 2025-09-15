@@ -4,10 +4,10 @@ Debug random data handling to find the root cause of correctness issues.
 Author: bghira
 """
 
-import torch
-import torch.nn.functional as F
 import metal_sdpa_extension
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 
 def test_random_data_sizes():

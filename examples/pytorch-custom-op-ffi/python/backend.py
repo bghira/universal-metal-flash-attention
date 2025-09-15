@@ -2,11 +2,12 @@
 Metal SDPA Backend Registration and Context Management
 """
 
-import torch
+import threading
 import warnings
 from contextlib import contextmanager
 from typing import Optional, Tuple
-import threading
+
+import torch
 
 # Global state
 _backend_registered = False

@@ -3,23 +3,24 @@
 Test suite for Metal SDPA backend integration.
 """
 
-import torch
-import torch.nn.functional as F
-import numpy as np
-import pytest
 import sys
 from pathlib import Path
+
+import numpy as np
+import pytest
+import torch
+import torch.nn.functional as F
 
 # Add the python package to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
 
 try:
     from pytorch_custom_op_ffi import (
+        MetalSDPAContext,
+        is_metal_sdpa_available,
         register_metal_sdpa_backend,
         unregister_metal_sdpa_backend,
         use_metal_sdpa,
-        is_metal_sdpa_available,
-        MetalSDPAContext,
     )
 
     BACKEND_AVAILABLE = True
@@ -174,8 +175,8 @@ def test_import():
 
     # Basic import test
     from pytorch_custom_op_ffi import (
-        register_metal_sdpa_backend,
         is_metal_sdpa_available,
+        register_metal_sdpa_backend,
     )
 
     print(f"Metal available: {is_metal_sdpa_available()}")

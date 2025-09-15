@@ -7,18 +7,19 @@ zero-copy numpy integration, and Flash Attention 3 compatible API.
 
 import ctypes
 import weakref
-from typing import Optional, Tuple, Union, Any
+from typing import Any, Optional, Tuple, Union
+
 import numpy as np
 
 from ._ffi import (
-    _lib,
-    _check_error,
-    MFAError,
-    MFA_PRECISION_FP16,
     MFA_PRECISION_BF16,
+    MFA_PRECISION_FP16,
     MFA_PRECISION_FP32,
-    mfa_context_t,
+    MFAError,
+    _check_error,
+    _lib,
     mfa_buffer_t,
+    mfa_context_t,
 )
 
 # Type aliases for clarity

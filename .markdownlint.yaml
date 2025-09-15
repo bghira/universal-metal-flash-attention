@@ -1,40 +1,17 @@
 # Markdownlint configuration
-# See https://github.com/DavidAnson/markdownlint for rule documentation
+# See https://github.com/DavidAnson/markdownlint/blob/main/doc/Rules.md
 
-# Disable problematic rules for technical documentation
-MD013:
-  # Line length - allow longer lines for code examples and URLs
-  line_length: 120
-  # Allow long lines in code blocks and tables
-  code_blocks: false
-  tables: false
-  headers: false
+# Disable line length enforcement for documentation-heavy files
+MD013: false  # Disable line length checks entirely for technical docs
 
-MD033:
-  # Allow inline HTML for better formatting in technical docs
-  allowed_elements: ['br', 'sub', 'sup', 'b', 'i', 'details', 'summary']
+# Allow emphasis as headings for documentation
+MD036: false
 
-MD041:
-  # First line in file should be a top-level header
-  # Disable for files that start with front matter or code
-  front_matter_title: ""
+# Allow missing language specification in code blocks for simple examples
+MD040: false
 
-# Customize other rules
-MD024:
-  # Multiple headers with the same content
-  # Allow duplicate headers in different sections
-  siblings_only: true
+# Allow mixed ordered list prefixes for documentation
+MD029: false
 
-MD029:
-  # Ordered list item prefix
-  style: "ordered"
-
-MD040:
-  # Fenced code blocks should have a language specified
-  # Allow empty language for plain text examples
-  allowed_languages: []
-  language_only: false
-
-# Rules to disable entirely
-MD007: false  # Unordered list indentation - too strict for nested lists
-MD012: false  # Multiple consecutive blank lines - allow for readability
+# Allow duplicate headings (common in technical docs with repeated sections)
+MD024: false

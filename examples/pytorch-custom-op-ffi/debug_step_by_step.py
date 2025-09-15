@@ -4,11 +4,12 @@ Step-by-step test to identify which function hangs.
 Author: bghira
 """
 
-import torch
-import torch.nn.functional as F
+import sys
+
 import metal_sdpa_extension
 import numpy as np
-import sys
+import torch
+import torch.nn.functional as F
 
 
 def test_exact_swift_params():

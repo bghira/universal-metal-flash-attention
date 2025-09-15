@@ -122,11 +122,13 @@ bindgen = "0.70"
 ```
 
 **Key Types:**
+
 - `MfaContext` - RAII wrapper for device context
 - `MfaBuffer` - Memory-managed Metal buffers
 - Auto-generated bindings via `bindgen`
 
 **Usage Pattern:**
+
 ```rust
 let context = MfaContext::new()?;
 let buffers = create_buffers(&context, seq_len, head_dim)?;
@@ -144,6 +146,7 @@ import umfa
 ```
 
 **PyTorch SDPA Drop-in Replacement:**
+
 ```python
 # examples/pytorch_sdpa_replacement.py
 import umfa
@@ -159,12 +162,14 @@ metal_out = metal_sdpa(q, k, v, is_causal=True)
 ```
 
 **Low-level API:**
+
 ```python
 with umfa.MFAContext() as ctx:
     output = umfa.flash_attention_forward(ctx, q, k, v, causal=True)
 ```
 
 **Key Features:**
+
 - Zero-copy PyTorch/NumPy integration
 - Automatic resource management via context managers
 - FP16/FP32 precision support
@@ -189,6 +194,7 @@ with umfa.MFAContext() as ctx:
 ```
 
 **Usage:**
+
 ```objc
 MFABridge *bridge = [[MFABridge alloc] initWithDevice:device];
 double executionTime = [bridge runAttentionWithQ:qBuf K:kBuf V:vBuf O:oBuf
@@ -197,6 +203,7 @@ double executionTime = [bridge runAttentionWithQ:qBuf K:kBuf V:vBuf O:oBuf
 ```
 
 **Integration Notes:**
+
 - Direct Metal buffer management
 - Swift FlashAttention backend
 - Returns execution timing for performance monitoring
@@ -226,7 +233,6 @@ double executionTime = [bridge runAttentionWithQ:qBuf K:kBuf V:vBuf O:oBuf
 - INT4 quantization: ~2% RMSE error
 - Symmetric quantization with zero point = 0
 - FP32 gradient precision maintains training stability
-
 
 ## Technical Notes
 

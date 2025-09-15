@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 
 import os
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
-from pybind11.setup_helpers import build_ext
-from pybind11 import get_cmake_dir
 import pybind11
-from setuptools import setup
 import torch
+from pybind11 import get_cmake_dir
+from pybind11.setup_helpers import build_ext
+from setuptools import setup
 from torch.utils import cpp_extension
 
 # Get the directory containing this setup.py

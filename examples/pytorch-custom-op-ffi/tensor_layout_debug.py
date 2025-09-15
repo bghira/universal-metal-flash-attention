@@ -4,9 +4,9 @@ Debug tensor layout differences between PyTorch integration and Swift test.
 Author: bghira
 """
 
-import torch
 import metal_sdpa_extension
 import numpy as np
+import torch
 
 
 def debug_tensor_layouts():

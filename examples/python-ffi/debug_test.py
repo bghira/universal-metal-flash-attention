@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 
-import numpy as np
 import sys
 from pathlib import Path
+
+import numpy as np
 
 # Add the source directory to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))

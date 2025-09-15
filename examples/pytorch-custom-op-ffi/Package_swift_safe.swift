@@ -15,25 +15,25 @@ let package = Package(
       name: "MFAFFI",
       type: .dynamic,
       targets: ["MFAFFI"]
-    )
+    ),
   ],
   dependencies: [
-    .package(path: "./metal-flash-attention")
+    .package(path: "./metal-flash-attention"),
   ],
   targets: [
     .target(
       name: "MFABridge",
       dependencies: [
-        .product(name: "FlashAttention", package: "metal-flash-attention")
+        .product(name: "FlashAttention", package: "metal-flash-attention"),
       ],
       publicHeadersPath: "include",
       swiftSettings: [
         // SAFE CONFIGURATION - Prioritize correctness over performance
-        .unsafeFlags(["-O"], .when(configuration: .release)),  // Safe optimization
+        .unsafeFlags(["-O"], .when(configuration: .release)), // Safe optimization
         .unsafeFlags(["-whole-module-optimization"], .when(configuration: .release)),
-        .unsafeFlags(["-enable-testing"], .when(configuration: .debug)),  // Enable testing in debug
-        .unsafeFlags(["-g"], .when(configuration: .debug)),  // Debug symbols
-        .unsafeFlags(["-Onone"], .when(configuration: .debug)),  // No optimization in debug
+        .unsafeFlags(["-enable-testing"], .when(configuration: .debug)), // Enable testing in debug
+        .unsafeFlags(["-g"], .when(configuration: .debug)), // Debug symbols
+        .unsafeFlags(["-Onone"], .when(configuration: .debug)), // No optimization in debug
 
         // Metal-specific safe optimizations
         .define("METAL_SAFE_MATH"),
@@ -45,9 +45,9 @@ let package = Package(
       dependencies: ["MFABridge"],
       publicHeadersPath: "include",
       cSettings: [
-        .unsafeFlags(["-O2"]),  // Safe C optimization (not -O3)
-        .unsafeFlags(["-fno-fast-math"]),  // DISABLE fast math for correctness
-        .unsafeFlags(["-fno-unsafe-math-optimizations"]),  // DISABLE unsafe math
+        .unsafeFlags(["-O2"]), // Safe C optimization (not -O3)
+        .unsafeFlags(["-fno-fast-math"]), // DISABLE fast math for correctness
+        .unsafeFlags(["-fno-unsafe-math-optimizations"]), // DISABLE unsafe math
         .define("NDEBUG", .when(configuration: .release)),
       ]
     ),

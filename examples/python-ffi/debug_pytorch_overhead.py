@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-import time
-import sys
-from pathlib import Path
 
 # Add UMFA to path
 sys.path.insert(0, str(Path(__file__).parent / "examples/python-ffi/src"))

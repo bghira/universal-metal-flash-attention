@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 
-import time
-import numpy as np
 import sys
+import time
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent / "examples/python-ffi/src"))
 

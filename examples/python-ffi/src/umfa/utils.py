@@ -6,7 +6,8 @@ Provides convenience functions for common operations and compatibility checks.
 
 import ctypes
 from typing import Tuple
-from ._ffi import _lib, _check_error
+
+from ._ffi import _check_error, _lib
 from .core import MFAContext
 
 

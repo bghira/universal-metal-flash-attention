@@ -4,9 +4,10 @@ Test GPU latency measurement for Metal SDPA backend.
 Author: bghira
 """
 
-import torch
-import metal_sdpa_extension
 import ctypes
+
+import metal_sdpa_extension
+import torch
 
 
 def test_gpu_latency():

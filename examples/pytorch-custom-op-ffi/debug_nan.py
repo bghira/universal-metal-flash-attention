@@ -4,9 +4,9 @@ Debug script for investigating NaN outputs in Metal SDPA backend.
 Author: bghira
 """
 
-import torch
-import numpy as np
 import metal_sdpa_extension
+import numpy as np
+import torch
 
 
 def print_tensor_stats(tensor, name):

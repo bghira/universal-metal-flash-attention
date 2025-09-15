@@ -4,8 +4,8 @@ Test bfloat16 specifically to see if it causes hanging.
 Author: bghira
 """
 
-import torch
 import metal_sdpa_extension
+import torch
 
 
 def test_bfloat16():

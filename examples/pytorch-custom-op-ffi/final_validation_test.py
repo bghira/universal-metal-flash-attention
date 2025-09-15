@@ -4,10 +4,10 @@ Final validation test confirming the scale factor fix.
 Author: bghira
 """
 
-import torch
-import torch.nn.functional as F
 import metal_sdpa_extension
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 
 def test_scale_factor_fix():

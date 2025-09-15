@@ -4,13 +4,14 @@ Test different Swift compiler configurations for correctness vs performance.
 Author: bghira
 """
 
-import torch
-import torch.nn.functional as F
+import os
 import subprocess
 import sys
-import os
 import time
 from pathlib import Path
+
+import torch
+import torch.nn.functional as F
 
 ROOT_DIR = Path(__file__).parent.parent.parent
 

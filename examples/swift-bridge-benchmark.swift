@@ -1,7 +1,7 @@
 import FlashAttention
 import Foundation
-import MFABridge
 import Metal
+import MFABridge
 
 // Direct benchmark of the MFABridge Swift logic (without C FFI layer)
 class MFABridgeBenchmark {
@@ -11,18 +11,20 @@ class MFABridgeBenchmark {
   init() throws {
     guard let device = MTLCreateSystemDefaultDevice() else {
       throw NSError(
-        domain: "Metal", code: 1, userInfo: [NSLocalizedDescriptionKey: "No Metal device"])
+        domain: "Metal", code: 1, userInfo: [NSLocalizedDescriptionKey: "No Metal device"]
+      )
     }
     self.device = device
     guard let queue = device.makeCommandQueue() else {
       throw NSError(
-        domain: "Metal", code: 2, userInfo: [NSLocalizedDescriptionKey: "No command queue"])
+        domain: "Metal", code: 2, userInfo: [NSLocalizedDescriptionKey: "No command queue"]
+      )
     }
-    self.commandQueue = queue
+    commandQueue = queue
   }
 
   func createBuffer(sizeBytes: Int) -> MTLBuffer? {
-    return device.makeBuffer(length: sizeBytes, options: .storageModeShared)
+    device.makeBuffer(length: sizeBytes, options: .storageModeShared)
   }
 
   // Direct implementation of MFABridge attention logic (without C layer)
@@ -31,33 +33,35 @@ class MFABridgeBenchmark {
     k: MTLBuffer,
     v: MTLBuffer,
     out: MTLBuffer,
-    batchSize: UInt32,
+    batchSize _: UInt32,
     seqLenQ: UInt32,
     seqLenKV: UInt32,
     numHeads: UInt32,
     headDim: UInt16,
-    softmaxScale: Float,
+    softmaxScale _: Float,
     causal: Bool,
     inputPrecision: Int32,
     intermediatePrecision: Int32,
-    outputPrecision: Int32,
+    outputPrecision _: Int32,
     transposeQ: Bool = false,
     transposeK: Bool = false,
     transposeV: Bool = false,
     transposeO: Bool = false
-  ) throws -> Double {
-
+  ) throws
+    -> Double
+  {
     // This matches the exact MFABridge.swift logic
     guard numHeads == 1 else {
       throw NSError(
-        domain: "MFA", code: 1, userInfo: [NSLocalizedDescriptionKey: "Multi-head not supported"])
+        domain: "MFA", code: 1, userInfo: [NSLocalizedDescriptionKey: "Multi-head not supported"]
+      )
     }
 
     // Create attention descriptor (matches MFABridge lines 159-166)
     var descriptor = AttentionDescriptor()
     descriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
     descriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
-    descriptor.lowPrecisionInputs = (inputPrecision == 0)  // FP16 = true, FP32 = false
+    descriptor.lowPrecisionInputs = (inputPrecision == 0) // FP16 = true, FP32 = false
     descriptor.lowPrecisionIntermediates = (intermediatePrecision == 0)
 
     // Create kernel (matches MFABridge lines 173-174)
@@ -68,7 +72,8 @@ class MFABridgeBenchmark {
     guard let commandBuffer = commandQueue.makeCommandBuffer() else {
       throw NSError(
         domain: "Metal", code: 3,
-        userInfo: [NSLocalizedDescriptionKey: "Command buffer creation failed"])
+        userInfo: [NSLocalizedDescriptionKey: "Command buffer creation failed"]
+      )
     }
 
     // Set up function constants (matches MFABridge lines 182-187)
@@ -85,29 +90,33 @@ class MFABridgeBenchmark {
 
     let pipelineDesc = MTLComputePipelineDescriptor()
     pipelineDesc.computeFunction = function
-    pipelineDesc.maxTotalThreadsPerThreadgroup = 1024  // Critical for Apple Silicon
+    pipelineDesc.maxTotalThreadsPerThreadgroup = 1024 // Critical for Apple Silicon
 
     let pipeline = try device.makeComputePipelineState(
-      descriptor: pipelineDesc, options: [], reflection: nil)
+      descriptor: pipelineDesc, options: [], reflection: nil
+    )
 
     // Create encoder
     guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
       throw NSError(
-        domain: "Metal", code: 4, userInfo: [NSLocalizedDescriptionKey: "Encoder creation failed"])
+        domain: "Metal", code: 4, userInfo: [NSLocalizedDescriptionKey: "Encoder creation failed"]
+      )
     }
 
     encoder.setComputePipelineState(pipeline)
 
     // Create L and D buffers (matches MFABridge lines 210-216)
-    let lBufferSize = Int(seqLenQ * 4)  // Float32 = 4 bytes
+    let lBufferSize = Int(seqLenQ * 4) // Float32 = 4 bytes
     let dBufferSize = Int(seqLenQ * 4)
 
-    guard let lBuffer = device.makeBuffer(length: lBufferSize, options: .storageModeShared),
+    guard
+      let lBuffer = device.makeBuffer(length: lBufferSize, options: .storageModeShared),
       let dBuffer = device.makeBuffer(length: dBufferSize, options: .storageModeShared)
     else {
       throw NSError(
         domain: "Metal", code: 5,
-        userInfo: [NSLocalizedDescriptionKey: "L/D buffer allocation failed"])
+        userInfo: [NSLocalizedDescriptionKey: "L/D buffer allocation failed"]
+      )
     }
 
     // Set buffers (matches MFABridge lines 219-226)
@@ -125,7 +134,7 @@ class MFABridgeBenchmark {
     let parallelizationDimension = Int(seqLenQ)
     let blockCount =
       (parallelizationDimension + Int(kernel.blockDimensions.parallelization) - 1)
-      / Int(kernel.blockDimensions.parallelization)
+        / Int(kernel.blockDimensions.parallelization)
     let gridSize = MTLSize(width: blockCount, height: 1, depth: 1)
     let groupSize = MTLSize(width: Int(kernel.threadgroupSize), height: 1, depth: 1)
 
@@ -139,7 +148,8 @@ class MFABridgeBenchmark {
     if let error = commandBuffer.error {
       throw NSError(
         domain: "Metal", code: 6,
-        userInfo: [NSLocalizedDescriptionKey: "Execution failed: \(error)"])
+        userInfo: [NSLocalizedDescriptionKey: "Execution failed: \(error)"]
+      )
     }
 
     // Return execution time
@@ -156,7 +166,7 @@ struct BenchmarkConfig {
   init(_ seqLen: Int, _ headDim: Int) {
     self.seqLen = seqLen
     self.headDim = headDim
-    self.name = "\(seqLen)x\(headDim)"
+    name = "\(seqLen)x\(headDim)"
   }
 }
 
@@ -183,11 +193,12 @@ func main() {
     print("--------------------------------------------------")
 
     for config in configs {
-      let elementSize = 2  // FP16
+      let elementSize = 2 // FP16
       let bufferSize = config.seqLen * config.headDim * elementSize
 
       // Create buffers
-      guard let qBuffer = benchmark.createBuffer(sizeBytes: bufferSize),
+      guard
+        let qBuffer = benchmark.createBuffer(sizeBytes: bufferSize),
         let kBuffer = benchmark.createBuffer(sizeBytes: bufferSize),
         let vBuffer = benchmark.createBuffer(sizeBytes: bufferSize),
         let oBuffer = benchmark.createBuffer(sizeBytes: bufferSize)

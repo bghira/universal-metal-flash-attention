@@ -12,14 +12,17 @@ The PyTorch PrivateUse1 backend for Swift Metal Flash Attention was experiencing
 Through systematic debugging, we identified several issues:
 
 ### 1. **Python Crashes (macOS "Python has crashed" dialogs)**
+
 - **Cause**: Multi-head attention tensors (`num_heads > 1`) were being passed to Swift MFA implementation that only supports single-head attention
 - **Solution**: Added validation to detect multi-head tensors and throw clear error messages instead of crashing
 
 ### 2. **NaN Output Issues**
+
 - **Cause**: The original NaN problem was resolved during the debugging process - likely related to build/linking issues that were fixed
 - **Solution**: Current implementation produces correct outputs matching PyTorch reference
 
 ### 3. **Insufficient Error Handling**
+
 - **Cause**: Swift FFI errors were not being properly handled, leading to undefined behavior
 - **Solution**: Added comprehensive error checking with descriptive messages for all MFA error codes
 
@@ -28,6 +31,7 @@ Through systematic debugging, we identified several issues:
 ### C++ Backend (`src/metal_sdpa_backend.cpp`)
 
 1. **Multi-head Detection**:
+
 ```cpp
 // Note: Current MFA implementation is limited to num_heads=1
 if (num_heads > 1) {
@@ -36,6 +40,7 @@ if (num_heads > 1) {
 ```
 
 2. **Parameter Validation**:
+
 ```cpp
 // Additional validation to prevent crashes
 if (seq_len_q > 65535 || seq_len_kv > 65535) {
@@ -50,6 +55,7 @@ if (batch_size > 1024) {
 ```
 
 3. **Enhanced Error Messages**:
+
 ```cpp
 if (result != MFA_SUCCESS) {
     std::string error_msg = "Metal Flash Attention forward pass failed with code " + std::to_string(result);
@@ -63,6 +69,7 @@ if (result != MFA_SUCCESS) {
 ```
 
 4. **Exception Safety**:
+
 ```cpp
 try {
     // Main SDPA implementation
@@ -76,7 +83,7 @@ try {
 
 ## Test Results
 
-### ✅ Working Configurations:
+### ✅ Working Configurations
 
 1. **2D Tensors**: `(seq_len, head_dim)` - Full support with accurate results
 2. **4D Single-Head**: `(batch, seq_len, 1, head_dim)` - Working correctly
@@ -84,13 +91,13 @@ try {
 4. **Causal Masking**: Properly implemented and functional
 5. **Large Tensors**: Up to limits work without crashes
 
-### ❌ Correctly Rejected Configurations:
+### ❌ Correctly Rejected Configurations
 
 1. **Multi-Head**: `num_heads > 1` - Clear error message instead of crash
 2. **Oversized Tensors**: Beyond limits - Clear error messages
 3. **Invalid Parameters**: Proper validation and error reporting
 
-### 🎯 Accuracy Validation:
+### 🎯 Accuracy Validation
 
 - Results match PyTorch reference implementation within tolerance
 - No NaN outputs detected in valid configurations
@@ -99,6 +106,7 @@ try {
 ## Performance Impact
 
 The additional validation adds minimal overhead while preventing crashes:
+
 - Parameter validation: ~microsecond overhead
 - Error handling: Only triggered on actual errors
 - No impact on successful operations
@@ -106,6 +114,7 @@ The additional validation adds minimal overhead while preventing crashes:
 ## Updated Documentation
 
 The README.md has been updated to include:
+
 - Crash troubleshooting section
 - Updated limitations reflecting actual capabilities
 - Safe usage examples
@@ -115,14 +124,16 @@ The README.md has been updated to include:
 
 ✅ **RESOLVED**: The Metal Flash Attention PyTorch backend is now stable and functional
 
-### Supported Use Cases:
+### Supported Use Cases
+
 - Single-head attention workloads
 - Both 2D and 4D tensor formats (with single head)
 - Multiple data types (float32/16, bfloat16)
 - Causal and non-causal attention
 - Batch processing (with single head per tensor)
 
-### Protection Against:
+### Protection Against
+
 - Python crashes from invalid parameters
 - NaN outputs from configuration errors
 - Silent failures with unclear error messages

@@ -43,11 +43,13 @@ This implementation uses PyTorch's PrivateUse1 backend extension mechanism to re
 ## Prerequisites
 
 ### System Requirements
+
 - **macOS**: Required for Metal support
 - **Apple Silicon**: Recommended (M1/M2/M3 processors)
 - **Xcode**: For Swift compiler and Metal framework
 
 ### Software Dependencies
+
 ```bash
 # Python packages
 pip install torch>=2.0.0 numpy pybind11
@@ -112,6 +114,7 @@ pytest tests/test_backend.py -v
 ```
 
 Expected output:
+
 ```
 ✅ Metal SDPA backend registered (MFA v1.0.0)
 Metal available: True
@@ -227,6 +230,7 @@ The Metal SDPA backend is automatically selected when:
 4. **Metal**: Metal is available on the system
 
 Fallback to standard PyTorch SDPA occurs when:
+
 - Tensors are on unsupported devices (CUDA, MPS without conversion)
 - Unsupported dtypes or tensor shapes
 - Metal is unavailable
@@ -324,7 +328,7 @@ for batch in dataloader:
 
 ### When to Use Metal SDPA
 
-#### ✅ **Recommended Use Cases**:
+#### ✅ **Recommended Use Cases**
 
 1. **Production Inference**: Where warmup cost is amortized across many calls
 2. **Training Loops**: Repeated operations benefit from warm pipelines
@@ -345,7 +349,7 @@ class LLMWithMetalAttention:
             # ... rest of generation logic
 ```
 
-#### ⚠️ **Consider PyTorch SDPA for**:
+#### ⚠️ **Consider PyTorch SDPA for**
 
 1. **Single Operations**: One-off computations where warmup dominates
 2. **Interactive Development**: Debugging and experimentation
@@ -394,6 +398,7 @@ def multi_head_attention(q, k, v, num_heads):
 ### Common Issues
 
 **1. Import Error: Extension not found**
+
 ```bash
 # Rebuild the extension
 cd examples/pytorch-custom-op-ffi
@@ -402,6 +407,7 @@ python setup.py install
 ```
 
 **2. Swift Library Not Found**
+
 ```bash
 # Ensure Swift package is built
 swift build --product MFAFFI --configuration release
@@ -411,6 +417,7 @@ ls .build/arm64-apple-macosx/release/libMFAFFI.a
 ```
 
 **3. Metal Not Available**
+
 ```python
 # Check Metal availability
 from pytorch_custom_op_ffi import is_metal_sdpa_available
@@ -421,6 +428,7 @@ print(f"Metal available: {is_metal_sdpa_available()}")
 ```
 
 **4. Backend Registration Failed**
+
 ```python
 try:
     from pytorch_custom_op_ffi import register_metal_sdpa_backend
@@ -432,6 +440,7 @@ except RuntimeError as e:
 
 **5. Python Crashes (macOS)**
 If you experience Python crashes or "Python has crashed" dialogs, this is typically due to:
+
 - Multi-head attention tensors (num_heads > 1) - now properly handled with error messages
 - Invalid tensor dimensions or parameters
 - The latest version includes robust error checking to prevent crashes
@@ -639,7 +648,7 @@ def train_with_global_metal(model, dataloader, optimizer):
 
 This PyTorch PrivateUse1 backend for Metal Flash Attention is **fully functional and optimized** for production use cases.
 
-#### ✅ **What Works Excellently**:
+#### ✅ **What Works Excellently**
 
 1. **Performance**: **1.5-1.9x faster** than PyTorch SDPA across all tensor sizes (when warmed up)
 2. **Accuracy**: Perfect numerical accuracy (< 1e-6 difference from PyTorch reference)
@@ -647,27 +656,27 @@ This PyTorch PrivateUse1 backend for Metal Flash Attention is **fully functional
 4. **Compatibility**: Supports float32, float16, bfloat16 data types
 5. **Features**: Causal masking, batch processing, tensor validation
 
-#### 📊 **Performance Highlights**:
+#### 📊 **Performance Highlights**
 
 - **Small Tensors (64×16)**: 1.88x faster than PyTorch after warmup
 - **Large Tensors (512×64)**: 1.49x faster than PyTorch
 - **Apple Silicon Optimized**: Leverages unified memory architecture
 - **Pipeline Caching**: Automatic Metal kernel caching after first use
 
-#### 🎯 **Ideal Use Cases**:
+#### 🎯 **Ideal Use Cases**
 
 1. **LLM Inference/Training**: Where warmup cost is amortized
 2. **Production Model Serving**: Persistent contexts with warm pipelines
 3. **Long Sequence Processing**: Any sequence length benefits after warmup
 4. **Batch Processing**: Multiple sequential attention operations
 
-#### ⚠️ **Current Limitations**:
+#### ⚠️ **Current Limitations**
 
 1. **Multi-Head Attention**: Only `num_heads = 1` supported (Swift MFA limitation)
 2. **Custom Attention Masks**: Only causal masking supported
 3. **Cold Start**: ~1-9ms overhead on first call (normal for GPU operations)
 
-#### 🚀 **Key Insights from Development**:
+#### 🚀 **Key Insights from Development**
 
 - **Not a Memory Transfer Issue**: Apple Silicon unified memory eliminates CPU↔GPU overhead
 - **Metal Pipeline Overhead**: Cold start includes kernel compilation, warm performance is excellent

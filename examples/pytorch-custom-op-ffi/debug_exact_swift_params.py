@@ -4,10 +4,10 @@ Test PyTorch integration with EXACT Swift test parameters.
 Author: bghira
 """
 
-import torch
-import torch.nn.functional as F
 import metal_sdpa_extension
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 
 def test_exact_swift_params():

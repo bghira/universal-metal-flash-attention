@@ -20,12 +20,12 @@ Usage:
 """
 
 from .backend import (
+    MetalSDPAContext,
+    is_metal_sdpa_available,
+    metal_sdpa_version,
     register_metal_sdpa_backend,
     unregister_metal_sdpa_backend,
     use_metal_sdpa,
-    is_metal_sdpa_available,
-    metal_sdpa_version,
-    MetalSDPAContext,
 )
 
 __version__ = "0.1.0"

@@ -10,7 +10,7 @@ final class MFAFFITests: XCTestCase {
     XCTAssertEqual(result, MFA_SUCCESS, "Context creation should succeed")
     XCTAssertNotNil(context, "Context should not be nil")
 
-    if let context = context {
+    if let context {
       mfa_destroy_context(context)
     }
   }
@@ -39,13 +39,13 @@ final class MFAFFITests: XCTestCase {
     XCTAssertNotNil(successStr)
     XCTAssertNotNil(invalidArgsStr)
 
-    if let successStr = successStr {
+    if let successStr {
       let swiftStr = String(cString: successStr)
       XCTAssertEqual(swiftStr, "Success")
       free(UnsafeMutableRawPointer(mutating: successStr))
     }
 
-    if let invalidArgsStr = invalidArgsStr {
+    if let invalidArgsStr {
       let swiftStr = String(cString: invalidArgsStr)
       XCTAssertEqual(swiftStr, "Invalid arguments")
       free(UnsafeMutableRawPointer(mutating: invalidArgsStr))
@@ -58,12 +58,12 @@ final class MFAFFITests: XCTestCase {
     XCTAssertEqual(contextResult, MFA_SUCCESS)
 
     defer {
-      if let context = context {
+      if let context {
         mfa_destroy_context(context)
       }
     }
 
-    guard let context = context else {
+    guard let context else {
       XCTFail("Context creation failed")
       return
     }
@@ -75,7 +75,7 @@ final class MFAFFITests: XCTestCase {
     XCTAssertNotNil(buffer, "Buffer should not be nil")
 
     // Test buffer contents access
-    if let buffer = buffer {
+    if let buffer {
       let contents = mfa_buffer_contents(buffer)
       XCTAssertNotNil(contents, "Buffer contents should be accessible")
       mfa_destroy_buffer(buffer)
@@ -88,12 +88,12 @@ final class MFAFFITests: XCTestCase {
     XCTAssertEqual(contextResult, MFA_SUCCESS)
 
     defer {
-      if let context = context {
+      if let context {
         mfa_destroy_context(context)
       }
     }
 
-    guard let context = context else {
+    guard let context else {
       XCTFail("Context creation failed")
       return
     }
@@ -101,7 +101,7 @@ final class MFAFFITests: XCTestCase {
     // Simple test: 4x4 tensors using FP32 like MFA tests
     let seqLen: UInt32 = 4
     let headDim: UInt16 = 4
-    let tensorSize = Int(seqLen * UInt32(headDim) * 4)  // FP32, 4 bytes per element
+    let tensorSize = Int(seqLen * UInt32(headDim) * 4) // FP32, 4 bytes per element
 
     // Create test data using Float (FP32) like MFA tests
     var qData: [Float] = Array(repeating: 1.0, count: Int(seqLen * UInt32(headDim)))
@@ -126,27 +126,27 @@ final class MFAFFITests: XCTestCase {
     XCTAssertEqual(outResult, MFA_SUCCESS)
 
     defer {
-      if let qBuffer = qBuffer { mfa_destroy_buffer(qBuffer) }
-      if let kBuffer = kBuffer { mfa_destroy_buffer(kBuffer) }
-      if let vBuffer = vBuffer { mfa_destroy_buffer(vBuffer) }
-      if let outBuffer = outBuffer { mfa_destroy_buffer(outBuffer) }
+      if let qBuffer { mfa_destroy_buffer(qBuffer) }
+      if let kBuffer { mfa_destroy_buffer(kBuffer) }
+      if let vBuffer { mfa_destroy_buffer(vBuffer) }
+      if let outBuffer { mfa_destroy_buffer(outBuffer) }
     }
 
     // Run attention
     let attentionResult = mfa_attention_forward(
       context,
       qBuffer, kBuffer, vBuffer, outBuffer,
-      1,  // batch_size
-      seqLen,  // seq_len_q
-      seqLen,  // seq_len_kv
-      1,  // num_heads
-      headDim,  // head_dim
-      1.0 / sqrt(Float(headDim)),  // softmax_scale
-      false,  // causal - test non-causal first
-      mfa_precision_t(rawValue: 2),  // input_precision (FP32)
-      mfa_precision_t(rawValue: 2),  // intermediate_precision (FP32)
-      mfa_precision_t(rawValue: 2),  // output_precision (FP32)
-      false, false, false, false  // no transposes
+      1, // batch_size
+      seqLen, // seq_len_q
+      seqLen, // seq_len_kv
+      1, // num_heads
+      headDim, // head_dim
+      1.0 / sqrt(Float(headDim)), // softmax_scale
+      false, // causal - test non-causal first
+      mfa_precision_t(rawValue: 2), // input_precision (FP32)
+      mfa_precision_t(rawValue: 2), // intermediate_precision (FP32)
+      mfa_precision_t(rawValue: 2), // output_precision (FP32)
+      false, false, false, false // no transposes
     )
 
     XCTAssertEqual(attentionResult, MFA_SUCCESS, "Attention computation should succeed")
