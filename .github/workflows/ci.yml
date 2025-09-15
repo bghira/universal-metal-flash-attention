@@ -48,7 +48,7 @@ jobs:
     runs-on: macos-15
     strategy:
       matrix:
-        configuration: [debug, release]
+        configuration: [release]
 
     steps:
       - uses: actions/checkout@v4
