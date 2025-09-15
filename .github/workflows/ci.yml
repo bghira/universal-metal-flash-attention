@@ -231,7 +231,7 @@ jobs:
   # Documentation checks
   docs:
     name: Documentation Check
-    runs-on: macos-15
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
