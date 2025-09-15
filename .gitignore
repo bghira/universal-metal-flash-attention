@@ -45,3 +45,4 @@ examples/rust/target/release/build/*/out/
 */target/*
 **/target/*
 .venv
+**/*.py
