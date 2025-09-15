@@ -49,15 +49,20 @@ jobs:
     strategy:
       matrix:
         configuration: [debug, release]
-        xcode: ['15.4']
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Select Xcode version
-        run: sudo xcode-select -s /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
+      - name: List available Xcode versions
+        run: |
+          echo "Available Xcode versions:"
+          ls /Applications/ | grep Xcode || echo "No Xcode apps found"
+          echo "Current Xcode version:"
+          xcodebuild -version || echo "xcodebuild not found"
+          echo "Current developer directory:"
+          xcode-select -p || echo "xcode-select not working"
 
       - name: Cache Swift Package Manager
         uses: actions/cache@v4
