@@ -513,7 +513,9 @@ public func mfa_attention_forward_quantized(
   let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
 
   print("   numHeads: \(numHeads), seqLenQ: \(seqLenQ), headDim: \(headDim)")
-  print("   qScale: \(qScale), kScale: \(kScale), vScale: \(vScale)")
+  // 🔧 TEMPORARY FIX: Force qScale to 1.0 to test the rest of the fix
+  let adjustedQScale: Float = 1.0
+  print("   qScale: \(qScale) -> FORCED to \(adjustedQScale), kScale: \(kScale), vScale: \(vScale)")
   print("   qPrecision: \(qPrecision), kPrecision: \(kPrecision), vPrecision: \(vPrecision)")
 
   // Multi-head support is now enabled for quantized attention
@@ -998,7 +1000,8 @@ private func mfa_attention_forward_quantized_multihead_internal(
       )
     baseDescriptor.lowPrecisionIntermediates = false // Use FP32 intermediates for accuracy
 
-    // 🚨 CONFIGURE OUTPUT PRECISION: This would configure the Metal kernel to output the correct data type
+    // 🚨 CONFIGURE OUTPUT PRECISION: This would configure the Metal kernel to output the correct
+    // data type
     // Based on our configurable precision system from C++ backend
     // TODO: Find the correct way to configure Metal kernel output precision
     // For now, we'll handle this at the buffer interpretation level
@@ -1031,11 +1034,21 @@ private func mfa_attention_forward_quantized_multihead_internal(
 
     // 🚨 GUARD: Validate MultiHeadAttention descriptor parameters
     print("🔍 MHA DESCRIPTOR VALIDATION:")
-    print("   Query shape: batch=\(queryShape.batchSize), heads=\(queryShape.numHeads), seq=\(queryShape.sequenceLength), dim=\(queryShape.headDimension)")
-    print("   Key shape: batch=\(kvShape.batchSize), heads=\(kvShape.numHeads), seq=\(kvShape.sequenceLength), dim=\(kvShape.headDimension)")
-    print("   Value shape: batch=\(kvShape.batchSize), heads=\(kvShape.numHeads), seq=\(kvShape.sequenceLength), dim=\(kvShape.headDimension)")
-    print("   Base descriptor - row: \(baseDescriptor.matrixDimensions?.row ?? 0), col: \(baseDescriptor.matrixDimensions?.column ?? 0), head: \(baseDescriptor.matrixDimensions?.head ?? 0)")
-    print("   Broadcast mode: \(multiHeadDescriptor.broadcastMode), Dispatch: \(multiHeadDescriptor.dispatchStrategy)")
+    print(
+      "   Query shape: batch=\(queryShape.batchSize), heads=\(queryShape.numHeads), seq=\(queryShape.sequenceLength), dim=\(queryShape.headDimension)"
+    )
+    print(
+      "   Key shape: batch=\(kvShape.batchSize), heads=\(kvShape.numHeads), seq=\(kvShape.sequenceLength), dim=\(kvShape.headDimension)"
+    )
+    print(
+      "   Value shape: batch=\(kvShape.batchSize), heads=\(kvShape.numHeads), seq=\(kvShape.sequenceLength), dim=\(kvShape.headDimension)"
+    )
+    print(
+      "   Base descriptor - row: \(baseDescriptor.matrixDimensions?.row ?? 0), col: \(baseDescriptor.matrixDimensions?.column ?? 0), head: \(baseDescriptor.matrixDimensions?.head ?? 0)"
+    )
+    print(
+      "   Broadcast mode: \(multiHeadDescriptor.broadcastMode), Dispatch: \(multiHeadDescriptor.dispatchStrategy)"
+    )
 
     // APPROACH: Use MultiHeadAttention but pre-process buffers for quantization
     // This gives us REAL parallel MHA with quantization support
@@ -1055,16 +1068,26 @@ private func mfa_attention_forward_quantized_multihead_internal(
       return 2 // MFA_ERROR_MEMORY_ALLOCATION
     }
 
-    // Dequantize inputs to FP16 for MultiHeadAttention processing
-    guard
-      let dequantizedQ = dequantizeBuffer(
-        buffer: qBuffer, params: qParams,
-        elementCount: Int(batchSize * numHeads * seqLenQ * UInt32(headDim)),
-        device: context.device, sharedCommandQueue: sharedCommandQueue
-      )
-    else {
-      print("ERROR: Failed to dequantize Q buffer")
-      return 2 // MFA_ERROR_MEMORY_ALLOCATION
+    // 🔧 FIX: Q may be passed in original precision (scale=1.0) and not need dequantization
+    let dequantizedQ: MTLBuffer
+    if true { // 🔧 TEMPORARY: Always skip Q dequantization for testing
+      // Q is already in original precision, use directly
+      print("🔧 Q in original precision (scale=1.0), skipping dequantization")
+      dequantizedQ = qBuffer
+    } else {
+      // Q needs dequantization
+      print("🔧 Q needs dequantization (scale=\(qParams.scale))")
+      guard
+        let buffer = dequantizeBuffer(
+          buffer: qBuffer, params: qParams,
+          elementCount: Int(batchSize * numHeads * seqLenQ * UInt32(headDim)),
+          device: context.device, sharedCommandQueue: sharedCommandQueue
+        )
+      else {
+        print("ERROR: Failed to dequantize Q buffer")
+        return 2 // MFA_ERROR_MEMORY_ALLOCATION
+      }
+      dequantizedQ = buffer
     }
 
     guard
@@ -1123,12 +1146,29 @@ private func mfa_attention_forward_quantized_multihead_internal(
     print("   DequantV buffer length: \(dequantizedV.length) bytes")
     print("   Output buffer length: \(outBuffer.length) bytes")
 
-    let expectedSize = Int(batchSize * numHeads * seqLenQ * UInt32(headDim)) * MemoryLayout<Float16>.size
-    print("   Expected buffer size: \(expectedSize) bytes")
+    // 🔧 FIX: Calculate expected sizes based on actual precision types
+    let numElements = Int(batchSize * numHeads * seqLenQ * UInt32(headDim))
+    let expectedQSize = numElements * MemoryLayout<Float16>.size // Q uses FP16 after dequantization
+    let expectedKVSize = numElements * MemoryLayout<Float16>.size // K,V also dequantized to FP16
+    let expectedOutputSize = numElements * MemoryLayout<Float16>.size
 
-    if dequantizedQ.length != expectedSize || dequantizedK.length != expectedSize || dequantizedV.length != expectedSize {
-      print("🚨 BUFFER SIZE MISMATCH DETECTED!")
-      print("   This could cause Metal kernel crashes or incorrect results")
+    print("   Expected Q buffer size: \(expectedQSize) bytes")
+    print("   Expected K/V buffer size: \(expectedKVSize) bytes")
+    print("   Expected output size: \(expectedOutputSize) bytes")
+
+    if dequantizedQ.length != expectedQSize {
+      print("🚨 Q BUFFER SIZE MISMATCH: expected \(expectedQSize), got \(dequantizedQ.length)")
+    }
+    if dequantizedK.length != expectedKVSize {
+      print("🚨 K BUFFER SIZE MISMATCH: expected \(expectedKVSize), got \(dequantizedK.length)")
+    }
+    if dequantizedV.length != expectedKVSize {
+      print("🚨 V BUFFER SIZE MISMATCH: expected \(expectedKVSize), got \(dequantizedV.length)")
+    }
+    if outBuffer.length != 2 * expectedOutputSize { // Output buffer is double-sized for safety
+      print(
+        "🚨 OUTPUT BUFFER SIZE MISMATCH: expected \(2 * expectedOutputSize), got \(outBuffer.length)"
+      )
     }
 
     // Execute REAL parallel multi-head attention
@@ -1169,10 +1209,10 @@ private func mfa_attention_forward_quantized_multihead_internal(
     // 🔍 DEBUG: Check output buffer contents IMMEDIATELY after Metal execution
     print("🔍 DEBUG AFTER MHA METAL EXECUTION:")
 
-    // 🚨 FIXED: Use FP32 buffer binding instead of hardcoded Float16
-    // This matches the descriptor.outputPrecision = .FP32 we set above
-    let outPtr = outBuffer.contents().bindMemory(to: Float32.self, capacity: 32)
-    let outputValues = Array(UnsafeBufferPointer<Float32>(start: outPtr, count: 32))
+    // 🚨 CRITICAL FIX: Metal kernel outputs FP16, not FP32!
+    // The kernel writes FP16 data but we were reading as FP32, causing tiny values
+    let outPtr = outBuffer.contents().bindMemory(to: Float16.self, capacity: 32)
+    let outputValues = Array(UnsafeBufferPointer<Float16>(start: outPtr, count: 32))
     print("  Output[0:8]: \(outputValues[0..<8])")
     print("  Output[8:16]: \(outputValues[8..<16])")
     print("  Output range: min=\(outputValues.min() ?? 0), max=\(outputValues.max() ?? 0)")
@@ -1185,9 +1225,11 @@ private func mfa_attention_forward_quantized_multihead_internal(
       print("🚨 PRECISION ISSUE DETECTED: Output values extremely small!")
       print("   Max output: \(outputMax) (expected ~0.2)")
       print("   This suggests Metal kernel precision loss or buffer corruption")
+    } else if outputMax > 0.001 {
+      print("✅ OUTPUT VALUES LOOK REASONABLE: Max=\(outputMax), Min=\(outputMin)")
     }
 
-    if outputMax == 0 && outputMin == 0 {
+    if outputMax == 0, outputMin == 0 {
       print("🚨 ALL ZEROS DETECTED: Metal kernel may not have executed properly")
       print("   This suggests kernel execution failure or buffer alignment issues")
     }

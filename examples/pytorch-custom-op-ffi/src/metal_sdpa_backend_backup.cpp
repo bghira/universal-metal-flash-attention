@@ -287,8 +287,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
     bool is_causal,
     std::optional<double> scale
 ) {
-    printf("🚨 ENTERING C++ quantized_scaled_dot_product_attention function!\n");
-    fflush(stdout);
     ensure_initialized();
 
     // Convert all tensors to CPU and contiguous
@@ -310,8 +308,8 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
         throw std::runtime_error("Quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
     }
 
-    // Create output tensor with FP16 precision to match Metal kernel output
-    auto output = torch::empty_like(q_cpu, torch::kFloat16);  // 🚨 FIXED: Match Metal kernel FP16 output
+    // Create output tensor with FP32 precision by default (fixing Float16/Float32 mismatch)
+    auto output = torch::empty_like(q_cpu, torch::kFloat32);  // 🚨 FIXED: Force FP32 output
 
     // Convert precision string to enum
     mfa_precision_t k_precision, v_precision;
@@ -331,47 +329,70 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
     // Calculate softmax scale
     float softmax_scale = scale ? static_cast<float>(*scale) : (1.0f / std::sqrt(static_cast<float>(head_dim)));
 
-    // PER-BLOCK QUANTIZATION: Calculate scales per block for better precision
-    // Following SageAttention approach with block sizes
-    int q_block_size = 128;  // BLKQ=128 for query
-    int kv_block_size = 64;  // BLKK=64 for key/value
+    // 🔧 FIX: Don't pre-scale Q - let the kernel handle all scaling
+    // The Metal kernel applies softmax_scale * log2(e) internally
+    torch::Tensor q_prescaled = q_cpu;  // No pre-scaling
 
-    // For now, use per-tensor as fallback (per-block implementation next)
-    float k_scale, v_scale;
-    int32_t k_zero_point = 0, v_zero_point = 0;  // Symmetric quantization
+    // 🔧 FIX: Calculate quantization scales with FP16 overflow protection
+    // Problem: Previous implementation used max_val/127 which causes FP16 overflow
+    // for realistic input scales (e.g., input scale 1.0 -> scale=0.008 -> overflow)
+
+    float k_scale, v_scale, q_scale;
+    int32_t k_zero_point = 0, v_zero_point = 0, q_zero_point = 0;  // Symmetric quantization
+
+    // Get max absolute values for dynamic range calculation
+    // Note: Use pre-scaled Q for max calculation
+    float q_max = q_prescaled.abs().max().item<float>();
+    float k_max = k_cpu.abs().max().item<float>();
+    float v_max = v_cpu.abs().max().item<float>();
 
     if (precision == "int8") {
-        k_scale = k_cpu.abs().max().item<float>() / 127.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 127.0f;
+        // Use a minimum scale to prevent FP16 overflow during dequantization
+        // FP16 max ≈ 65504, so ensure dequantized values stay well below this
+        const float MIN_SCALE = 1e-4f;  // Minimum scale to prevent overflow
+        const float MAX_DEQUANT_VAL = 32000.0f;  // Conservative FP16 limit
+
+        q_scale = std::max(q_max / 127.0f, MIN_SCALE);
+        k_scale = std::max(k_max / 127.0f, MIN_SCALE);
+        v_scale = std::max(v_max / 127.0f, MIN_SCALE);
+
+        // Ensure dequantized values won't overflow FP16
+        q_scale = std::max(q_scale, 127.0f * q_scale / MAX_DEQUANT_VAL);
+        k_scale = std::max(k_scale, 127.0f * k_scale / MAX_DEQUANT_VAL);
+        v_scale = std::max(v_scale, 127.0f * v_scale / MAX_DEQUANT_VAL);
+
     } else { // int4
-        k_scale = k_cpu.abs().max().item<float>() / 7.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 7.0f;
+        const float MIN_SCALE = 1e-4f;
+        const float MAX_DEQUANT_VAL = 32000.0f;
+
+        q_scale = std::max(q_max / 7.0f, MIN_SCALE);
+        k_scale = std::max(k_max / 7.0f, MIN_SCALE);
+        v_scale = std::max(v_max / 7.0f, MIN_SCALE);
+
+        // Ensure dequantized values won't overflow FP16
+        q_scale = std::max(q_scale, 7.0f * q_scale / MAX_DEQUANT_VAL);
+        k_scale = std::max(k_scale, 7.0f * k_scale / MAX_DEQUANT_VAL);
+        v_scale = std::max(v_scale, 7.0f * v_scale / MAX_DEQUANT_VAL);
     }
 
-    // TODO: Implement per-block scales
-    // std::vector<float> k_scales_per_block = calculate_per_block_scales(k_cpu, kv_block_size, precision);
-    // std::vector<float> v_scales_per_block = calculate_per_block_scales(v_cpu, kv_block_size, precision);
+    // 🔍 DEBUG: Log scale calculations for debugging
+    std::cout << "🔍 QUANTIZATION SCALES: q=" << q_scale << ", k=" << k_scale << ", v=" << v_scale << std::endl;
+    std::cout << "   Input ranges: q_max=" << q_max << ", k_max=" << k_max << ", v_max=" << v_max << std::endl;
 
     // 🔧 FIX: Actually quantize Q, K and V tensors to INT8
     // Swift expects quantized data, not FP32 data + scales
 
-    // 🔧 FIX: Only quantize K and V, keep Q in original precision
-    // This is the standard approach for quantized attention to maintain accuracy
-    torch::Tensor q_original, k_quantized, v_quantized;
-
-    // Q stays in original precision (no quantization)
-    q_original = q_cpu; // Keep Q in FP32/BF16
-    float q_scale = 1.0f; // No scaling needed for Q
-
-    printf("🔧 DEBUG: Set q_scale = %f (should be 1.0)\n", q_scale);
-    fflush(stdout);
+    torch::Tensor q_quantized, k_quantized, v_quantized;
 
     if (precision == "int8") {
-        // Quantize K: FP32 -> INT8
+        // Quantize Q: Use pre-scaled Q (already includes softmax_scale * log2(e))
+        q_quantized = torch::round(q_prescaled / q_scale).clamp(-127, 127).to(torch::kInt8);
+        // Quantize K: FP32 -> INT8 (no pre-scaling for K)
         k_quantized = torch::round(k_cpu / k_scale).clamp(-127, 127).to(torch::kInt8);
         // Quantize V: FP32 -> INT8
         v_quantized = torch::round(v_cpu / v_scale).clamp(-127, 127).to(torch::kInt8);
     } else { // int4 - clamp to 4-bit range
+        q_quantized = torch::round(q_prescaled / q_scale).clamp(-7, 7).to(torch::kInt8);
         k_quantized = torch::round(k_cpu / k_scale).clamp(-7, 7).to(torch::kInt8); // Store as INT8 but use 4-bit range
         v_quantized = torch::round(v_cpu / v_scale).clamp(-7, 7).to(torch::kInt8);
     }
@@ -383,9 +404,9 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
 
     mfa_error_t result;
 
-    // 🔧 FIX: Use original Q tensor (not quantized) - keep Q in original precision
-    size_t q_original_bytes = q_original.numel() * q_original.element_size();
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_original.data_ptr(), q_original_bytes, &q_buffer);
+    // 🔧 FIX: Use quantized Q tensor data too
+    size_t q_quantized_bytes = q_quantized.numel() * q_quantized.element_size();
+    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_quantized.data_ptr(), q_quantized_bytes, &q_buffer);
     if (result != MFA_SUCCESS) {
         throw std::runtime_error("Failed to create query buffer for quantized attention");
     }
@@ -420,20 +441,19 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
 
     try {
         // Call quantized attention function
-        printf("🚀 CALLING Swift with q_scale = %f (expect 1.0)\n", q_scale);
-        fflush(stdout);
+        // 🔧 Pass the original softmax_scale - kernel handles log2(e) multiplication
         result = mfa_attention_forward_quantized(
             MetalSDPABackend::swift_context_,
             q_buffer, k_buffer, v_buffer, out_buffer,
             batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
-            softmax_scale, is_causal,
-            q_scale, 0,  // 🔧 FIX: Pass q_scale=1.0 since Q is not quantized
+            softmax_scale, is_causal,  // Pass original scale
+            q_scale, 0,  // 🔧 FIX: Use calculated Q scale, not 1.0
             k_scale, k_zero_point,
             v_scale, v_zero_point,
             q_precision,
             k_precision,
             v_precision,
-            MFA_PRECISION_FP16,  // 🚨 FIXED: Match FP16 output tensor precision
+            MFA_PRECISION_FP32,  // 🚨 FIXED: Force FP32 output precision
             false, false, false, false  // No transpose for standard layout
         );
 
@@ -451,8 +471,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
         // if (out_buffer) mfa_destroy_buffer(out_buffer);
 
         // Move output back to original device
-        printf("🎯 EXITING C++ function - returning tensor to device\n");
-        fflush(stdout);
         return output.to(query.device());
 
     } catch (...) {
@@ -546,35 +564,67 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_conf
     // Calculate softmax scale
     float softmax_scale = config.scale ? static_cast<float>(*config.scale) : (1.0f / std::sqrt(static_cast<float>(head_dim)));
 
-    // Calculate quantization scales for K and V tensors
-    float k_scale, v_scale;
-    int32_t k_zero_point = 0, v_zero_point = 0;  // Symmetric quantization
+    // 🔧 FIX: Don't pre-scale Q - let the kernel handle all scaling
+    // The Metal kernel applies softmax_scale * log2(e) internally
+    torch::Tensor q_prescaled = q_cpu;  // No pre-scaling
+
+    // 🔧 FIX: Calculate quantization scales with FP16 overflow protection
+    // Problem: Previous implementation used max_val/127 which causes FP16 overflow
+    // for realistic input scales (e.g., input scale 1.0 -> scale=0.008 -> overflow)
+
+    float k_scale, v_scale, q_scale;
+    int32_t k_zero_point = 0, v_zero_point = 0, q_zero_point = 0;  // Symmetric quantization
+
+    // Get max absolute values for dynamic range calculation
+    // Note: Use pre-scaled Q for max calculation
+    float q_max = q_prescaled.abs().max().item<float>();
+    float k_max = k_cpu.abs().max().item<float>();
+    float v_max = v_cpu.abs().max().item<float>();
 
     if (config.precision == "int8") {
-        k_scale = k_cpu.abs().max().item<float>() / 127.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 127.0f;
+        // Use a minimum scale to prevent FP16 overflow during dequantization
+        // FP16 max ≈ 65504, so ensure dequantized values stay well below this
+        const float MIN_SCALE = 1e-4f;  // Minimum scale to prevent overflow
+        const float MAX_DEQUANT_VAL = 32000.0f;  // Conservative FP16 limit
+
+        q_scale = std::max(q_max / 127.0f, MIN_SCALE);
+        k_scale = std::max(k_max / 127.0f, MIN_SCALE);
+        v_scale = std::max(v_max / 127.0f, MIN_SCALE);
+
+        // Ensure dequantized values won't overflow FP16
+        q_scale = std::max(q_scale, 127.0f * q_scale / MAX_DEQUANT_VAL);
+        k_scale = std::max(k_scale, 127.0f * k_scale / MAX_DEQUANT_VAL);
+        v_scale = std::max(v_scale, 127.0f * v_scale / MAX_DEQUANT_VAL);
+
     } else { // int4
-        k_scale = k_cpu.abs().max().item<float>() / 7.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 7.0f;
+        const float MIN_SCALE = 1e-4f;
+        const float MAX_DEQUANT_VAL = 32000.0f;
+
+        q_scale = std::max(q_max / 7.0f, MIN_SCALE);
+        k_scale = std::max(k_max / 7.0f, MIN_SCALE);
+        v_scale = std::max(v_max / 7.0f, MIN_SCALE);
+
+        // Ensure dequantized values won't overflow FP16
+        q_scale = std::max(q_scale, 7.0f * q_scale / MAX_DEQUANT_VAL);
+        k_scale = std::max(k_scale, 7.0f * k_scale / MAX_DEQUANT_VAL);
+        v_scale = std::max(v_scale, 7.0f * v_scale / MAX_DEQUANT_VAL);
     }
 
-    // 🔧 FIX: Only quantize K and V, keep Q in original precision
-    // This is the standard approach for quantized attention to maintain accuracy
-    torch::Tensor q_original, k_quantized, v_quantized;
+    // 🔍 DEBUG: Log scale calculations for debugging
+    std::cout << "🔍 QUANTIZATION SCALES: q=" << q_scale << ", k=" << k_scale << ", v=" << v_scale << std::endl;
+    std::cout << "   Input ranges: q_max=" << q_max << ", k_max=" << k_max << ", v_max=" << v_max << std::endl;
 
-    // Q stays in original precision (no quantization)
-    q_original = q_cpu; // Keep Q in FP32/BF16
-    float q_scale = 1.0f; // No scaling needed for Q
-
-    printf("🔧 DEBUG: Set q_scale = %f (should be 1.0)\n", q_scale);
-    fflush(stdout);
+    torch::Tensor q_quantized, k_quantized, v_quantized;
 
     if (config.precision == "int8") {
-        // Quantize K: FP32 -> INT8
+        // Quantize Q: Use pre-scaled Q (already includes softmax_scale * log2(e))
+        q_quantized = torch::round(q_prescaled / q_scale).clamp(-127, 127).to(torch::kInt8);
+        // Quantize K: FP32 -> INT8 (no pre-scaling for K)
         k_quantized = torch::round(k_cpu / k_scale).clamp(-127, 127).to(torch::kInt8);
         // Quantize V: FP32 -> INT8
         v_quantized = torch::round(v_cpu / v_scale).clamp(-127, 127).to(torch::kInt8);
     } else { // int4 - clamp to 4-bit range
+        q_quantized = torch::round(q_prescaled / q_scale).clamp(-7, 7).to(torch::kInt8);
         k_quantized = torch::round(k_cpu / k_scale).clamp(-7, 7).to(torch::kInt8);
         v_quantized = torch::round(v_cpu / v_scale).clamp(-7, 7).to(torch::kInt8);
     }
@@ -582,14 +632,14 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_conf
     // Create MFA buffers
     mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
 
-    size_t q_original_bytes = q_original.numel() * q_original.element_size();
+    size_t q_quantized_bytes = q_quantized.numel() * q_quantized.element_size();
     size_t k_quantized_bytes = k_quantized.numel() * k_quantized.element_size();
     size_t v_quantized_bytes = v_quantized.numel() * v_quantized.element_size();
     size_t out_bytes = output.numel() * output.element_size();
 
     mfa_error_t result;
 
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_original.data_ptr(), q_original_bytes, &q_buffer);
+    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_quantized.data_ptr(), q_quantized_bytes, &q_buffer);
     if (result != MFA_SUCCESS) {
         throw std::runtime_error("Failed to create query buffer for configurable quantized attention");
     }
@@ -611,12 +661,13 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_conf
 
     try {
         // Call quantized attention function with configurable output precision
+        // 🔧 Pass the original softmax_scale - kernel handles log2(e) multiplication
         result = mfa_attention_forward_quantized(
             MetalSDPABackend::swift_context_,
             q_buffer, k_buffer, v_buffer, out_buffer,
             batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
-            softmax_scale, config.is_causal,
-            q_scale, 0,  // 🔧 FIX: Pass q_scale=1.0 since Q is not quantized
+            softmax_scale, config.is_causal,  // Pass original scale
+            q_scale, 0,  // Q scale and zero point
             k_scale, k_zero_point,
             v_scale, v_zero_point,
             q_precision,
@@ -631,8 +682,252 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_conf
         }
 
         // Move output back to original device
-        printf("🎯 EXITING C++ function - returning tensor to device\n");
-        fflush(stdout);
+        return output.to(query.device());
+
+    } catch (...) {
+        throw;
+    }
+}
+
+BlockQuantizationParams MetalSDPABackend::quantize_tensor_per_block(
+    const torch::Tensor& tensor,
+    int block_rows,
+    const std::string& precision
+) {
+    auto tensor_cpu = ensure_contiguous_cpu(tensor);
+
+    // Get tensor dimensions
+    auto sizes = tensor_cpu.sizes();
+    int total_rows = 1;
+    for (int i = 0; i < sizes.size() - 1; ++i) {
+        total_rows *= sizes[i];
+    }
+    int cols = sizes[sizes.size() - 1];
+
+    // Calculate number of blocks
+    int num_blocks = (total_rows + block_rows - 1) / block_rows;
+
+    BlockQuantizationParams params(block_rows, cols);
+    params.num_blocks = num_blocks;
+    params.scales.reserve(num_blocks);
+    params.zero_points.reserve(num_blocks);
+
+    // Flatten tensor for block processing
+    auto flat_tensor = tensor_cpu.view({total_rows, cols});
+
+    // Calculate quantization range
+    float quant_max = (precision == "int8") ? 127.0f : 7.0f; // INT8: [-127, 127], INT4: [-7, 7]
+
+    // Process each block
+    for (int block_idx = 0; block_idx < num_blocks; ++block_idx) {
+        int start_row = block_idx * block_rows;
+        int end_row = std::min(start_row + block_rows, total_rows);
+
+        // Extract block
+        auto block = flat_tensor.slice(0, start_row, end_row);
+
+        // Calculate per-block scale using min-max range
+        auto block_max = block.abs().max().item<float>();
+
+        // Prevent division by zero and ensure minimum scale for numerical stability
+        const float MIN_SCALE = 1e-6f;
+        float scale = std::max(block_max / quant_max, MIN_SCALE);
+
+        // Apply additional numerical stability constraints
+        const float MAX_DEQUANT_VAL = 32000.0f;  // Conservative FP16 limit
+        scale = std::max(scale, quant_max * scale / MAX_DEQUANT_VAL);
+
+        params.scales.push_back(scale);
+        params.zero_points.push_back(0);  // Symmetric quantization
+    }
+
+    return params;
+}
+
+torch::Tensor MetalSDPABackend::apply_per_block_quantization(
+    const torch::Tensor& tensor,
+    const BlockQuantizationParams& params,
+    const std::string& precision
+) {
+    auto tensor_cpu = ensure_contiguous_cpu(tensor);
+
+    // Get tensor dimensions
+    auto sizes = tensor_cpu.sizes();
+    int total_rows = 1;
+    for (int i = 0; i < sizes.size() - 1; ++i) {
+        total_rows *= sizes[i];
+    }
+    int cols = sizes[sizes.size() - 1];
+
+    // Create quantized output tensor
+    auto quantized = torch::empty_like(tensor_cpu, torch::kInt8);
+
+    // Flatten tensors for block processing
+    auto flat_input = tensor_cpu.view({total_rows, cols});
+    auto flat_output = quantized.view({total_rows, cols});
+
+    // Calculate quantization range
+    float quant_min = (precision == "int8") ? -127.0f : -7.0f;
+    float quant_max = (precision == "int8") ? 127.0f : 7.0f;
+
+    // Quantize each block
+    for (int block_idx = 0; block_idx < params.num_blocks; ++block_idx) {
+        int start_row = block_idx * params.block_size_rows;
+        int end_row = std::min(start_row + params.block_size_rows, total_rows);
+
+        // Extract input and output blocks
+        auto input_block = flat_input.slice(0, start_row, end_row);
+        auto output_block = flat_output.slice(0, start_row, end_row);
+
+        // Apply quantization with block-specific scale
+        float scale = params.scales[block_idx];
+        auto quantized_block = torch::round(input_block / scale).clamp(quant_min, quant_max);
+
+        // Copy to output
+        output_block.copy_(quantized_block);
+    }
+
+    return quantized.view(sizes);  // Restore original shape
+}
+
+torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_per_block(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    int q_block_size,
+    int k_block_size,
+    int v_block_size,
+    const std::string& precision,
+    bool is_causal,
+    c10::optional<double> scale
+) {
+    ensure_initialized();
+
+    // Convert all tensors to CPU and contiguous
+    auto q_cpu = ensure_contiguous_cpu(query);
+    auto k_cpu = ensure_contiguous_cpu(key);
+    auto v_cpu = ensure_contiguous_cpu(value);
+
+    // Get tensor dimensions
+    uint32_t batch_size, seq_len_q, seq_len_kv, num_heads, head_dim;
+
+    if (q_cpu.dim() == 4) {
+        auto q_sizes = q_cpu.sizes();
+        batch_size = static_cast<uint32_t>(q_sizes[0]);
+        seq_len_q = static_cast<uint32_t>(q_sizes[1]);
+        seq_len_kv = static_cast<uint32_t>(k_cpu.sizes()[1]);
+        num_heads = static_cast<uint32_t>(q_sizes[2]);
+        head_dim = static_cast<uint16_t>(q_sizes[3]);
+    } else {
+        throw std::runtime_error("Per-block quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
+    }
+
+    // Calculate softmax scale
+    float softmax_scale = scale ? static_cast<float>(*scale) : (1.0f / std::sqrt(static_cast<float>(head_dim)));
+
+    // Create output tensor with FP32 precision
+    auto output = torch::empty_like(q_cpu, torch::kFloat32);
+
+    // Convert precision string to enum
+    mfa_precision_t precision_enum;
+    if (precision == "int8") {
+        precision_enum = MFA_PRECISION_INT8;
+    } else if (precision == "int4") {
+        precision_enum = MFA_PRECISION_INT4;
+    } else {
+        throw std::runtime_error("Unsupported quantization precision: " + precision + ". Use 'int8' or 'int4'.");
+    }
+
+    // Get query precision from tensor dtype
+    mfa_precision_t q_precision = torch_dtype_to_mfa_dtype(q_cpu.scalar_type());
+
+    // Perform per-block quantization
+    auto q_params = quantize_tensor_per_block(q_cpu, q_block_size, precision);
+    auto k_params = quantize_tensor_per_block(k_cpu, k_block_size, precision);
+    auto v_params = quantize_tensor_per_block(v_cpu, v_block_size, precision);
+
+    // Apply quantization
+    auto q_quantized = apply_per_block_quantization(q_cpu, q_params, precision);
+    auto k_quantized = apply_per_block_quantization(k_cpu, k_params, precision);
+    auto v_quantized = apply_per_block_quantization(v_cpu, v_params, precision);
+
+    // Create scale tensors for Swift
+    auto q_scales_tensor = torch::from_blob(q_params.scales.data(), {static_cast<long>(q_params.scales.size())}, torch::kFloat32);
+    auto k_scales_tensor = torch::from_blob(k_params.scales.data(), {static_cast<long>(k_params.scales.size())}, torch::kFloat32);
+    auto v_scales_tensor = torch::from_blob(v_params.scales.data(), {static_cast<long>(v_params.scales.size())}, torch::kFloat32);
+
+    // Create MFA buffers
+    mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
+    mfa_buffer_t q_scales_buffer, k_scales_buffer, v_scales_buffer;
+
+    size_t q_quantized_bytes = q_quantized.numel() * q_quantized.element_size();
+    size_t k_quantized_bytes = k_quantized.numel() * k_quantized.element_size();
+    size_t v_quantized_bytes = v_quantized.numel() * v_quantized.element_size();
+    size_t out_bytes = output.numel() * output.element_size();
+    size_t q_scales_bytes = q_scales_tensor.numel() * q_scales_tensor.element_size();
+    size_t k_scales_bytes = k_scales_tensor.numel() * k_scales_tensor.element_size();
+    size_t v_scales_bytes = v_scales_tensor.numel() * v_scales_tensor.element_size();
+
+    mfa_error_t result;
+
+    // Create buffers for quantized data
+    result = mfa_buffer_from_ptr(swift_context_, q_quantized.data_ptr(), q_quantized_bytes, &q_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create query buffer for per-block quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, k_quantized.data_ptr(), k_quantized_bytes, &k_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create key buffer for per-block quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, v_quantized.data_ptr(), v_quantized_bytes, &v_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create value buffer for per-block quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, output.data_ptr(), out_bytes, &out_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create output buffer for per-block quantized attention");
+    }
+
+    // Create buffers for scales
+    result = mfa_buffer_from_ptr(swift_context_, q_scales_tensor.data_ptr(), q_scales_bytes, &q_scales_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create query scales buffer for per-block quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, k_scales_tensor.data_ptr(), k_scales_bytes, &k_scales_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create key scales buffer for per-block quantized attention");
+    }
+
+    result = mfa_buffer_from_ptr(swift_context_, v_scales_tensor.data_ptr(), v_scales_bytes, &v_scales_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create value scales buffer for per-block quantized attention");
+    }
+
+    try {
+        // Call per-block quantized attention function
+        result = mfa_attention_forward_quantized_per_block(
+            swift_context_,
+            q_buffer, k_buffer, v_buffer, out_buffer,
+            q_scales_buffer, k_scales_buffer, v_scales_buffer,
+            batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
+            softmax_scale, is_causal,
+            static_cast<uint32_t>(q_block_size),
+            static_cast<uint32_t>(k_block_size),
+            static_cast<uint32_t>(v_block_size),
+            q_precision, precision_enum, precision_enum,
+            MFA_PRECISION_FP32,  // Force FP32 output precision
+            false, false, false, false  // No transpose for standard layout
+        );
+
+        if (result != MFA_SUCCESS) {
+            throw std::runtime_error("Per-block quantized attention forward pass failed with error code: " + std::to_string(result));
+        }
+
+        // Move output back to original device
         return output.to(query.device());
 
     } catch (...) {
