@@ -110,7 +110,8 @@ torch::Tensor convert_flux_to_metal_layout(const torch::Tensor& flux_tensor) {
 
     // FLUX [B,H,S,D] -> Metal [B,S,H,D]
     // This is equivalent to: permute(0, 2, 1, 3)
-    auto metal_tensor = flux_tensor.permute({0, 2, 1, 3}).contiguous();
+    // MFA handles non-contiguous strides efficiently, no need for contiguous()
+    auto metal_tensor = flux_tensor.permute({0, 2, 1, 3});
 
     printf("🔄 Converted FLUX->Metal: %s -> %s\n",
            ("[" + std::to_string(flux_tensor.size(0)) + "," + std::to_string(flux_tensor.size(1)) + "," + std::to_string(flux_tensor.size(2)) + "," + std::to_string(flux_tensor.size(3)) + "]").c_str(),
@@ -127,7 +128,8 @@ torch::Tensor convert_metal_to_flux_layout(const torch::Tensor& metal_tensor) {
 
     // Metal [B,S,H,D] -> FLUX [B,H,S,D]
     // This is equivalent to: permute(0, 2, 1, 3)
-    auto flux_tensor = metal_tensor.permute({0, 2, 1, 3}).contiguous();
+    // MFA handles non-contiguous strides efficiently, no need for contiguous()
+    auto flux_tensor = metal_tensor.permute({0, 2, 1, 3});
 
     printf("🔄 Converted Metal->FLUX: %s -> %s\n",
            ("[" + std::to_string(metal_tensor.size(0)) + "," + std::to_string(metal_tensor.size(1)) + "," + std::to_string(metal_tensor.size(2)) + "," + std::to_string(metal_tensor.size(3)) + "]").c_str(),
@@ -846,11 +848,13 @@ mfa_precision_t MetalSDPABackend::torch_dtype_to_mfa_dtype(torch::ScalarType dty
 }
 
 torch::Tensor MetalSDPABackend::ensure_contiguous_cpu(const torch::Tensor& tensor) {
-    if (tensor.device().is_cpu() && tensor.is_contiguous()) {
+    // MFA handles non-contiguous strides efficiently
+    // Only move to CPU if needed, don't force contiguous
+    if (tensor.device().is_cpu()) {
         return tensor;
     }
 
-    return tensor.to(torch::kCPU).contiguous();
+    return tensor.to(torch::kCPU);
 }
 
 torch::Tensor MetalSDPABackend::call_swift_flash_attention(
