@@ -47,3 +47,4 @@ examples/rust/target/release/build/*/out/
 .venv
 **/*.png
 */*.png
+*.backup
