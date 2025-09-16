@@ -5,8 +5,799 @@
 #include <mutex>
 #include <stdexcept>
 #include <iostream>
+#include <cinttypes>  // For PRId64, PRIu32, etc.
+#include <cmath>      // For std::isfinite, std::clamp
+#include <algorithm>  // For std::clamp
 
 namespace metal_sdpa {
+
+// Tensor layout conversion utilities for FLUX compatibility
+// FLUX uses [batch, heads, sequence, dim] while Metal expects [batch, sequence, heads, dim]
+struct TensorLayoutInfo {
+    bool is_flux_layout = false;
+    int64_t batch_size = 0;
+    int64_t seq_len = 0;
+    int64_t num_heads = 0;
+    int64_t head_dim = 0;
+
+    std::string to_string() const {
+        return is_flux_layout ?
+            "FLUX [" + std::to_string(batch_size) + ", " + std::to_string(num_heads) + ", " + std::to_string(seq_len) + ", " + std::to_string(head_dim) + "]" :
+            "Metal [" + std::to_string(batch_size) + ", " + std::to_string(seq_len) + ", " + std::to_string(num_heads) + ", " + std::to_string(head_dim) + "]";
+    }
+};
+
+// Detect tensor layout and extract dimensions
+TensorLayoutInfo detect_tensor_layout(const torch::Tensor& tensor) {
+    TensorLayoutInfo info;
+
+    if (tensor.dim() != 4) {
+        throw std::runtime_error("Only 4D tensors are supported for layout detection");
+    }
+
+    auto sizes = tensor.sizes();
+    int64_t d0 = sizes[0], d1 = sizes[1], d2 = sizes[2], d3 = sizes[3];
+
+    printf("🔍 Detecting layout for tensor shape: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n", d0, d1, d2, d3);
+
+    // Heuristic detection:
+    // - FLUX layout: [batch, heads, sequence, dim] where heads is typically 24, sequence is larger (256-4096)
+    // - Metal layout: [batch, sequence, heads, dim] where sequence is larger than heads
+
+    // Check if this looks like FLUX layout [B, H, S, D]
+    // FLUX typically has: batch=1-4, heads=12-96, sequence=256-4096, dim=64-192
+    bool looks_like_flux = false;
+
+    // Strong indicators of FLUX layout:
+    // 1. d2 > d1 (sequence > heads) AND d1 is a reasonable head count (8-96)
+    // 2. d3 is a reasonable head dimension (32-256)
+    // 3. d2 (sequence) should be at least 64 for FLUX (typical min is 256)
+    if (d2 > d1 && d1 >= 8 && d1 <= 96 && d3 >= 32 && d3 <= 256 && d2 >= 64) {
+        looks_like_flux = true;
+        printf("🎯 Detected FLUX layout: heads=%" PRId64 " < sequence=%" PRId64 "\n", d1, d2);
+    }
+
+    // Additional check: if d1 looks like a very large head count (>100), probably sequence dimension
+    if (d1 > 100) {
+        looks_like_flux = false;
+        printf("🎯 Detected Metal layout: large sequence dimension=%" PRId64 "\n", d1);
+    }
+
+    if (looks_like_flux) {
+        // FLUX layout: [batch, heads, sequence, dim]
+        info.is_flux_layout = true;
+        info.batch_size = d0;
+        info.num_heads = d1;
+        info.seq_len = d2;
+        info.head_dim = d3;
+    } else {
+        // Metal layout: [batch, sequence, heads, dim]
+        info.is_flux_layout = false;
+        info.batch_size = d0;
+        info.seq_len = d1;
+        info.num_heads = d2;
+        info.head_dim = d3;
+    }
+
+    printf("📊 Layout detection result: %s\n", info.to_string().c_str());
+
+    // Validation: ensure head count is reasonable
+    if (info.num_heads < 1 || info.num_heads > 256) {
+        printf("⚠️  Warning: Unusual head count detected: %" PRId64 "\n", info.num_heads);
+    }
+
+    // Specific FLUX validation
+    if (info.is_flux_layout && info.num_heads > 100) {
+        printf("❌ Error: FLUX layout with %" PRId64 " heads detected - this is likely incorrect!\n", info.num_heads);
+        printf("   Expected FLUX heads: 12-96, got: %" PRId64 "\n", info.num_heads);
+        printf("   This suggests the tensor might actually be Metal layout\n");
+
+        // Auto-correct: re-interpret as Metal layout
+        info.is_flux_layout = false;
+        info.seq_len = d1;
+        info.num_heads = d2;
+        printf("🔄 Auto-corrected to Metal layout: %s\n", info.to_string().c_str());
+    }
+
+    return info;
+}
+
+// Convert FLUX layout [B,H,S,D] to Metal layout [B,S,H,D]
+torch::Tensor convert_flux_to_metal_layout(const torch::Tensor& flux_tensor) {
+    if (flux_tensor.dim() != 4) {
+        throw std::runtime_error("convert_flux_to_metal_layout: Input must be 4D tensor");
+    }
+
+    // FLUX [B,H,S,D] -> Metal [B,S,H,D]
+    // This is equivalent to: permute(0, 2, 1, 3)
+    auto metal_tensor = flux_tensor.permute({0, 2, 1, 3}).contiguous();
+
+    printf("🔄 Converted FLUX->Metal: %s -> %s\n",
+           ("[" + std::to_string(flux_tensor.size(0)) + "," + std::to_string(flux_tensor.size(1)) + "," + std::to_string(flux_tensor.size(2)) + "," + std::to_string(flux_tensor.size(3)) + "]").c_str(),
+           ("[" + std::to_string(metal_tensor.size(0)) + "," + std::to_string(metal_tensor.size(1)) + "," + std::to_string(metal_tensor.size(2)) + "," + std::to_string(metal_tensor.size(3)) + "]").c_str());
+
+    return metal_tensor;
+}
+
+// Convert Metal layout [B,S,H,D] back to FLUX layout [B,H,S,D]
+torch::Tensor convert_metal_to_flux_layout(const torch::Tensor& metal_tensor) {
+    if (metal_tensor.dim() != 4) {
+        throw std::runtime_error("convert_metal_to_flux_layout: Input must be 4D tensor");
+    }
+
+    // Metal [B,S,H,D] -> FLUX [B,H,S,D]
+    // This is equivalent to: permute(0, 2, 1, 3)
+    auto flux_tensor = metal_tensor.permute({0, 2, 1, 3}).contiguous();
+
+    printf("🔄 Converted Metal->FLUX: %s -> %s\n",
+           ("[" + std::to_string(metal_tensor.size(0)) + "," + std::to_string(metal_tensor.size(1)) + "," + std::to_string(metal_tensor.size(2)) + "," + std::to_string(metal_tensor.size(3)) + "]").c_str(),
+           ("[" + std::to_string(flux_tensor.size(0)) + "," + std::to_string(flux_tensor.size(1)) + "," + std::to_string(flux_tensor.size(2)) + "," + std::to_string(flux_tensor.size(3)) + "]").c_str());
+
+    return flux_tensor;
+}
+
+// Helper function to convert ScalarType to string
+// ASSUMPTION: This function covers all commonly used PyTorch scalar types
+std::string scalar_type_to_string(torch::ScalarType type) {
+    switch(type) {
+        case torch::ScalarType::Byte: return "Byte";
+        case torch::ScalarType::Char: return "Char";
+        case torch::ScalarType::Short: return "Short";
+        case torch::ScalarType::Int: return "Int";
+        case torch::ScalarType::Long: return "Long";
+        case torch::ScalarType::Half: return "Half";
+        case torch::ScalarType::Float: return "Float";
+        case torch::ScalarType::Double: return "Double";
+        case torch::ScalarType::ComplexFloat: return "ComplexFloat";
+        case torch::ScalarType::ComplexDouble: return "ComplexDouble";
+        case torch::ScalarType::Bool: return "Bool";
+        case torch::ScalarType::BFloat16: return "BFloat16";
+        case torch::ScalarType::QInt8: return "QInt8";
+        case torch::ScalarType::QUInt8: return "QUInt8";
+        case torch::ScalarType::QInt32: return "QInt32";
+        default: return "Unknown";
+    }
+}
+
+// Helper functions for row-wise and block-wise quantization
+std::vector<float> calculate_row_scales(const torch::Tensor& tensor, QuantizationPrecision precision) {
+    printf("🔧 Calculating row-wise scales for tensor with shape: [");
+    for (int i = 0; i < tensor.dim(); i++) {
+        printf("%" PRId64, tensor.size(i));
+        if (i < tensor.dim() - 1) printf(", ");
+    }
+    printf("]\n");
+
+    // For 4D tensor [batch, seq_len, num_heads, head_dim], calculate scales per row
+    // Row is defined as the innermost dimension (head_dim)
+    auto tensor_shape = tensor.sizes();
+    int64_t batch_size = tensor_shape[0];
+    int64_t seq_len = tensor_shape[1];
+    int64_t num_heads = tensor_shape[2];
+    int64_t head_dim = tensor_shape[3];
+
+    // Total number of rows = batch_size * seq_len * num_heads
+    int64_t num_rows = batch_size * seq_len * num_heads;
+
+    std::vector<float> row_scales;
+    row_scales.reserve(num_rows);
+
+    // Get the quantization range based on precision
+    float max_quant_val = (precision == QuantizationPrecision::INT8) ? 127.0f : 7.0f;
+
+    // Reshape tensor to [num_rows, head_dim] for easier row-wise processing
+    auto reshaped = tensor.view({num_rows, head_dim});
+
+    for (int64_t row = 0; row < num_rows; row++) {
+        // Get the maximum absolute value in this row
+        auto row_tensor = reshaped[row];
+        float row_max = row_tensor.abs().max().item<float>();
+
+        // Calculate scale for this row with robust epsilon protection
+        // Use a larger epsilon to prevent numerical instability
+        const float epsilon = 1e-6f;  // Increased from 1e-8f for better stability
+        float scale = std::max(epsilon, row_max / max_quant_val);
+
+        // Additional safety: clamp scale to reasonable range
+        const float min_scale = epsilon;
+        const float max_scale = 1000.0f;  // Prevent extremely large scales
+        scale = std::clamp(scale, min_scale, max_scale);
+
+        // Validate scale is not NaN or Inf
+        if (!std::isfinite(scale)) {
+            printf("⚠️  Warning: Invalid scale detected (%.6f) for row %" PRId64 ", using epsilon\n", scale, row);
+            scale = epsilon;
+        }
+        row_scales.push_back(scale);
+    }
+
+    printf("✅ Calculated %zu row-wise scales (first few: %.6f, %.6f, %.6f)\n",
+           row_scales.size(),
+           row_scales.size() > 0 ? row_scales[0] : 0.0f,
+           row_scales.size() > 1 ? row_scales[1] : 0.0f,
+           row_scales.size() > 2 ? row_scales[2] : 0.0f);
+
+    return row_scales;
+}
+
+// Block-wise quantization implementation
+std::vector<float> calculate_block_scales(const torch::Tensor& tensor, const BlockSizeConfig& block_config, QuantizationPrecision precision) {
+    printf("🔧 Calculating block-wise scales for tensor with shape: [");
+    for (int i = 0; i < tensor.dim(); i++) {
+        printf("%" PRId64, tensor.size(i));
+        if (i < tensor.dim() - 1) printf(", ");
+    }
+    printf("] with block sizes: seq=%d, head=%d, dim=%d\n",
+           block_config.query_block_size, block_config.head_block_size, block_config.value_block_size);
+
+    // For 4D tensor [batch, seq_len, num_heads, head_dim], calculate scales per block
+    auto tensor_shape = tensor.sizes();
+    int64_t batch_size = tensor_shape[0];
+    int64_t seq_len = tensor_shape[1];
+    int64_t num_heads = tensor_shape[2];
+    int64_t head_dim = tensor_shape[3];
+
+    // Use appropriate block size based on tensor role (query, key, value)
+    // For now, use seq_block_size as the primary block dimension
+    int64_t seq_block_size = static_cast<int64_t>(block_config.query_block_size);
+    int64_t head_block_size = static_cast<int64_t>(block_config.head_block_size);
+    int64_t dim_block_size = static_cast<int64_t>(block_config.value_block_size);
+
+    // Calculate number of blocks in each dimension
+    int64_t num_seq_blocks = (seq_len + seq_block_size - 1) / seq_block_size;
+    int64_t num_head_blocks = (num_heads + head_block_size - 1) / head_block_size;
+    int64_t num_dim_blocks = (head_dim + dim_block_size - 1) / dim_block_size;
+
+    // Total number of blocks = batch_size * num_seq_blocks * num_head_blocks * num_dim_blocks
+    int64_t total_blocks = batch_size * num_seq_blocks * num_head_blocks * num_dim_blocks;
+
+    std::vector<float> block_scales;
+    block_scales.reserve(total_blocks);
+
+    // Get the quantization range based on precision
+    float max_quant_val = (precision == QuantizationPrecision::INT8) ? 127.0f : 7.0f;
+
+    printf("🔧 Block configuration: %" PRId64 " seq_blocks x %" PRId64 " head_blocks x %" PRId64 " dim_blocks = %" PRId64 " total blocks\n",
+           num_seq_blocks, num_head_blocks, num_dim_blocks, total_blocks);
+
+    // Optimize memory access pattern by processing in cache-friendly order
+    // Process blocks in memory layout order: batch -> sequence -> head -> dimension
+    // This aligns with PyTorch's default memory layout for better cache performance
+
+    printf("🔧 Processing blocks in optimized memory order...\n");
+
+    // Pre-allocate vector for better performance
+    block_scales.clear();
+    block_scales.resize(total_blocks);
+
+    // Optimized block processing with better memory access patterns
+    size_t scale_idx = 0;
+    for (int64_t b = 0; b < batch_size; b++) {
+        // Process each batch separately for better cache locality
+        auto batch_tensor = tensor.slice(0, b, b + 1);
+
+        for (int64_t seq_block = 0; seq_block < num_seq_blocks; seq_block++) {
+            int64_t seq_start = seq_block * seq_block_size;
+            int64_t seq_end = std::min(seq_start + seq_block_size, seq_len);
+
+            // Extract sequence block once for all heads
+            auto seq_slice = batch_tensor.slice(1, seq_start, seq_end);
+
+            for (int64_t head_block = 0; head_block < num_head_blocks; head_block++) {
+                int64_t head_start = head_block * head_block_size;
+                int64_t head_end = std::min(head_start + head_block_size, num_heads);
+
+                // Extract head block for current sequence slice
+                auto head_slice = seq_slice.slice(2, head_start, head_end);
+
+                for (int64_t dim_block = 0; dim_block < num_dim_blocks; dim_block++) {
+                    int64_t dim_start = dim_block * dim_block_size;
+                    int64_t dim_end = std::min(dim_start + dim_block_size, head_dim);
+
+                    // Final block extraction - now contiguous in memory
+                    auto block_tensor = head_slice.slice(3, dim_start, dim_end);
+
+                    // Use contiguous() to ensure optimal memory layout for max() operation
+                    auto contiguous_block = block_tensor.contiguous();
+
+                    // Calculate maximum absolute value in this block efficiently
+                    float block_max = contiguous_block.abs().max().item<float>();
+
+                    // Calculate scale for this block with robust epsilon protection
+                    const float epsilon = 1e-6f;  // Increased from 1e-8f for better stability
+                    float scale = std::max(epsilon, block_max / max_quant_val);
+
+                    // Additional safety: clamp scale to reasonable range
+                    const float min_scale = epsilon;
+                    const float max_scale = 1000.0f;  // Prevent extremely large scales
+                    scale = std::clamp(scale, min_scale, max_scale);
+
+                    // Validate scale is not NaN or Inf
+                    if (!std::isfinite(scale)) {
+                        printf("⚠️  Warning: Invalid block scale detected (%.6f), using epsilon\n", scale);
+                        scale = epsilon;
+                    }
+
+                    // Store scale at the correct index
+                    block_scales[scale_idx++] = scale;
+                }
+            }
+        }
+    }
+
+    printf("✅ Processed %zu blocks with optimized memory access\n", scale_idx);
+
+    printf("✅ Calculated %zu block-wise scales (first few: %.6f, %.6f, %.6f)\n",
+           block_scales.size(),
+           block_scales.size() > 0 ? block_scales[0] : 0.0f,
+           block_scales.size() > 1 ? block_scales[1] : 0.0f,
+           block_scales.size() > 2 ? block_scales[2] : 0.0f);
+
+    return block_scales;
+}
+
+// (Moved select_optimal_block_sizes to nested namespace below)
+
+// Tensor analysis functions for hybrid quantization
+TensorAnalysisMetrics analyze_tensor_characteristics(const torch::Tensor& tensor, QuantizationPrecision precision) {
+    printf("🔍 Analyzing tensor characteristics for hybrid selection...\n");
+
+    TensorAnalysisMetrics metrics;
+
+    // Basic tensor properties
+    metrics.tensor_size = tensor.numel();
+    metrics.memory_footprint = tensor.numel() * tensor.element_size();
+
+    // Convert tensor to contiguous for efficient analysis
+    auto contiguous_tensor = tensor.contiguous();
+
+    // Calculate statistical properties
+    auto tensor_flat = contiguous_tensor.flatten();
+
+    // Min and max values for dynamic range
+    auto min_max = torch::aminmax(tensor_flat);
+    float min_val = std::get<0>(min_max).item<float>();
+    float max_val = std::get<1>(min_max).item<float>();
+    metrics.dynamic_range = max_val - min_val;
+
+    // Mean absolute value
+    metrics.mean_abs_value = tensor_flat.abs().mean().item<float>();
+
+    // Variance
+    metrics.variance = tensor_flat.var().item<float>();
+
+    // Sparsity ratio (near-zero values)
+    float sparsity_threshold = 1e-6f;
+    auto near_zero_mask = tensor_flat.abs() < sparsity_threshold;
+    metrics.sparsity_ratio = near_zero_mask.to(torch::kFloat32).mean().item<float>();
+
+    // Outlier detection using IQR method
+    auto sorted_tensor = std::get<0>(torch::sort(tensor_flat.abs()));
+    int64_t q1_idx = static_cast<int64_t>(metrics.tensor_size * 0.25);
+    int64_t q3_idx = static_cast<int64_t>(metrics.tensor_size * 0.75);
+    float q1 = sorted_tensor[q1_idx].item<float>();
+    float q3 = sorted_tensor[q3_idx].item<float>();
+    float iqr = q3 - q1;
+    float outlier_threshold = q3 + 1.5f * iqr;
+
+    auto outliers = tensor_flat.abs() > outlier_threshold;
+    float outlier_ratio = outliers.to(torch::kFloat32).mean().item<float>();
+    metrics.has_outliers = outlier_ratio > 0.01f; // More than 1% outliers
+
+    // Estimate quantization error for different granularities
+    float max_quant_val = (precision == QuantizationPrecision::INT8) ? 127.0f : 7.0f;
+    float tensor_scale = metrics.mean_abs_value / max_quant_val;
+
+    // Simple quantization error estimate: variance of (original - quantized)
+    auto quantized_tensor = torch::round(tensor_flat / tensor_scale).clamp(-max_quant_val, max_quant_val) * tensor_scale;
+    auto error_tensor = tensor_flat - quantized_tensor;
+    metrics.quantization_error_estimate = error_tensor.pow(2).mean().item<float>();
+
+    printf("📊 Tensor Analysis Results:\n");
+    printf("   - Size: %" PRId64 " elements (%.2f MB)\n", metrics.tensor_size, metrics.memory_footprint / (1024.0f * 1024.0f));
+    printf("   - Dynamic Range: %.6f (min=%.6f, max=%.6f)\n", metrics.dynamic_range, min_val, max_val);
+    printf("   - Mean Abs Value: %.6f, Variance: %.6f\n", metrics.mean_abs_value, metrics.variance);
+    printf("   - Sparsity: %.2f%%, Outliers: %s (%.2f%%)\n",
+           metrics.sparsity_ratio * 100.0f,
+           metrics.has_outliers ? "detected" : "none",
+           outlier_ratio * 100.0f);
+    printf("   - Quantization Error Estimate: %.6f\n", metrics.quantization_error_estimate);
+
+    return metrics;
+}
+
+// Estimate computational overhead for different granularities
+float estimate_quantization_overhead(QuantizationGranularity granularity,
+                                   const TensorAnalysisMetrics& metrics,
+                                   QuantizationPrecision precision) {
+    // Overhead factors (relative to tensor-wise quantization)
+    switch (granularity) {
+        case QuantizationGranularity::TENSOR_WISE:
+            return 1.0f; // Baseline
+
+        case QuantizationGranularity::ROW_WISE: {
+            // Row-wise overhead: scales with number of rows
+            // For 4D tensor [B, S, H, D], number of rows = B * S * H
+            float row_factor = std::min(10.0f, std::sqrt(static_cast<float>(metrics.tensor_size) / 128.0f));
+            return 1.5f + row_factor * 0.1f;
+        }
+
+        case QuantizationGranularity::BLOCK_WISE: {
+            // Block-wise overhead: scales with number of blocks
+            float block_factor = std::min(20.0f, std::sqrt(static_cast<float>(metrics.tensor_size) / 64.0f));
+            return 2.0f + block_factor * 0.2f;
+        }
+
+        case QuantizationGranularity::HYBRID:
+            // Hybrid overhead: between row and block-wise
+            return (estimate_quantization_overhead(QuantizationGranularity::ROW_WISE, metrics, precision) +
+                    estimate_quantization_overhead(QuantizationGranularity::BLOCK_WISE, metrics, precision)) * 0.7f;
+
+        default:
+            return 1.0f;
+    }
+}
+
+// Tensor-based overload that analyzes tensor first
+// ASSUMPTION: This overload provides convenience by analyzing the tensor internally
+float estimate_quantization_overhead(QuantizationGranularity granularity,
+                                   const torch::Tensor& tensor,
+                                   QuantizationPrecision precision) {
+    // ASSUMPTION: Analyze tensor characteristics first, then estimate overhead
+    TensorAnalysisMetrics metrics = analyze_tensor_characteristics(tensor, precision);
+
+    printf("🔧 Tensor-based overhead estimation for granularity: %s\n",
+           QuantizationConfig::granularity_to_string(granularity).c_str());
+
+    // Delegate to metrics-based implementation
+    return estimate_quantization_overhead(granularity, metrics, precision);
+}
+
+// (Moved estimate_accuracy_loss to nested namespace below)
+
+// Intelligent granularity selection based on tensor characteristics
+QuantizationGranularity select_optimal_granularity(const TensorAnalysisMetrics& metrics,
+                                                   QuantizationPrecision precision,
+                                                   HybridStrategy strategy) {
+    printf("🧠 Selecting optimal granularity using %s strategy...\n",
+           strategy == HybridStrategy::PERFORMANCE_FIRST ? "Performance-First" :
+           strategy == HybridStrategy::ACCURACY_FIRST ? "Accuracy-First" : "Balanced");
+
+    // Calculate scores for each granularity option
+    std::vector<std::pair<QuantizationGranularity, float>> granularity_scores;
+
+    auto granularities = {QuantizationGranularity::TENSOR_WISE,
+                         QuantizationGranularity::ROW_WISE,
+                         QuantizationGranularity::BLOCK_WISE};
+
+    for (auto granularity : granularities) {
+        float overhead = estimate_quantization_overhead(granularity, metrics, precision);
+        float accuracy_loss = metal_sdpa::estimate_accuracy_loss(granularity, metrics, precision);
+
+        float score = 0.0f;
+        switch (strategy) {
+            case HybridStrategy::PERFORMANCE_FIRST:
+                // Prioritize low overhead (inverted), weight accuracy less
+                score = (5.0f / overhead) + (2.0f / accuracy_loss);
+                break;
+
+            case HybridStrategy::ACCURACY_FIRST:
+                // Prioritize low accuracy loss (inverted), weight overhead less
+                score = (1.0f / overhead) + (5.0f / accuracy_loss);
+                break;
+
+            case HybridStrategy::BALANCED:
+            default:
+                // Equal weight to overhead and accuracy
+                score = (2.0f / overhead) + (2.0f / accuracy_loss);
+
+                // Bonus for specific tensor characteristics
+                if (metrics.tensor_size < 1024) {
+                    // Small tensors: prefer tensor-wise for simplicity
+                    if (granularity == QuantizationGranularity::TENSOR_WISE) score *= 1.2f;
+                } else if (metrics.variance > metrics.mean_abs_value * metrics.mean_abs_value) {
+                    // High variance: prefer block-wise
+                    if (granularity == QuantizationGranularity::BLOCK_WISE) score *= 1.3f;
+                } else if (metrics.has_outliers) {
+                    // Outliers present: prefer row-wise as compromise
+                    if (granularity == QuantizationGranularity::ROW_WISE) score *= 1.15f;
+                }
+                break;
+        }
+
+        granularity_scores.emplace_back(granularity, score);
+
+        printf("   - %s: overhead=%.2f, accuracy_loss=%.4f, score=%.3f\n",
+               QuantizationConfig::granularity_to_string(granularity).c_str(),
+               overhead, accuracy_loss, score);
+    }
+
+    // Select granularity with highest score
+    auto best = std::max_element(granularity_scores.begin(), granularity_scores.end(),
+                                [](const auto& a, const auto& b) { return a.second < b.second; });
+
+    QuantizationGranularity selected = best->first;
+    printf("✅ Selected granularity: %s (score: %.3f)\n",
+           QuantizationConfig::granularity_to_string(selected).c_str(), best->second);
+
+    return selected;
+}
+
+// Per-tensor hybrid granularity selection for Q, K, V tensors
+HybridGranularityConfig select_hybrid_granularities(const torch::Tensor& query,
+                                                    const torch::Tensor& key,
+                                                    const torch::Tensor& value,
+                                                    const QuantizationConfig& config) {
+    printf("🎯 Selecting hybrid granularities for Q, K, V tensors...\n");
+
+    HybridGranularityConfig hybrid_config;
+    std::string reasoning;
+
+    // Analyze each tensor individually if per-tensor granularity is enabled
+    if (config.enable_per_tensor_granularity) {
+        printf("🔍 Analyzing Query tensor:\n");
+        auto q_metrics = analyze_tensor_characteristics(query, config.query_precision);
+        hybrid_config.query_granularity = select_optimal_granularity(q_metrics, config.query_precision, config.hybrid_strategy);
+        reasoning += "Query: " + QuantizationConfig::granularity_to_string(hybrid_config.query_granularity) + " (size=" + std::to_string(q_metrics.tensor_size) + ", variance=" + std::to_string(q_metrics.variance) + "); ";
+
+        printf("🔍 Analyzing Key tensor:\n");
+        auto k_metrics = analyze_tensor_characteristics(key, config.key_precision);
+        hybrid_config.key_granularity = select_optimal_granularity(k_metrics, config.key_precision, config.hybrid_strategy);
+        reasoning += "Key: " + QuantizationConfig::granularity_to_string(hybrid_config.key_granularity) + " (size=" + std::to_string(k_metrics.tensor_size) + ", variance=" + std::to_string(k_metrics.variance) + "); ";
+
+        printf("🔍 Analyzing Value tensor:\n");
+        auto v_metrics = analyze_tensor_characteristics(value, config.value_precision);
+        hybrid_config.value_granularity = select_optimal_granularity(v_metrics, config.value_precision, config.hybrid_strategy);
+        reasoning += "Value: " + QuantizationConfig::granularity_to_string(hybrid_config.value_granularity) + " (size=" + std::to_string(v_metrics.tensor_size) + ", variance=" + std::to_string(v_metrics.variance) + ");";
+
+        // Adaptive block sizes for each tensor if enabled
+        if (config.enable_adaptive_block_sizes) {
+            if (hybrid_config.query_granularity == QuantizationGranularity::BLOCK_WISE) {
+                hybrid_config.query_blocks = metal_sdpa::select_optimal_block_sizes(query, config.query_precision);
+            }
+            if (hybrid_config.key_granularity == QuantizationGranularity::BLOCK_WISE) {
+                hybrid_config.key_blocks = metal_sdpa::select_optimal_block_sizes(key, config.key_precision);
+            }
+            if (hybrid_config.value_granularity == QuantizationGranularity::BLOCK_WISE) {
+                hybrid_config.value_blocks = metal_sdpa::select_optimal_block_sizes(value, config.value_precision);
+            }
+        } else {
+            // Use provided block sizes
+            hybrid_config.query_blocks = config.block_sizes;
+            hybrid_config.key_blocks = config.block_sizes;
+            hybrid_config.value_blocks = config.block_sizes;
+        }
+    } else {
+        // Unified granularity selection based on combined tensor characteristics
+        printf("🔍 Analyzing combined tensor characteristics for unified granularity selection...\n");
+
+        // Use the largest tensor (typically value) as the primary guide
+        TensorAnalysisMetrics primary_metrics;
+        QuantizationPrecision primary_precision;
+        std::string primary_tensor_name;
+
+        if (value.numel() >= query.numel() && value.numel() >= key.numel()) {
+            primary_metrics = analyze_tensor_characteristics(value, config.value_precision);
+            primary_precision = config.value_precision;
+            primary_tensor_name = "Value";
+        } else if (key.numel() >= query.numel()) {
+            primary_metrics = analyze_tensor_characteristics(key, config.key_precision);
+            primary_precision = config.key_precision;
+            primary_tensor_name = "Key";
+        } else {
+            primary_metrics = analyze_tensor_characteristics(query, config.query_precision);
+            primary_precision = config.query_precision;
+            primary_tensor_name = "Query";
+        }
+
+        // Select unified granularity
+        QuantizationGranularity unified_granularity = select_optimal_granularity(primary_metrics, primary_precision, config.hybrid_strategy);
+
+        hybrid_config.query_granularity = unified_granularity;
+        hybrid_config.key_granularity = unified_granularity;
+        hybrid_config.value_granularity = unified_granularity;
+
+        reasoning = "Unified granularity (" + QuantizationConfig::granularity_to_string(unified_granularity) +
+                   ") based on " + primary_tensor_name + " tensor characteristics (size=" +
+                   std::to_string(primary_metrics.tensor_size) + ", variance=" +
+                   std::to_string(primary_metrics.variance) + ")";
+
+        // Adaptive block sizes
+        if (config.enable_adaptive_block_sizes && unified_granularity == QuantizationGranularity::BLOCK_WISE) {
+            hybrid_config.query_blocks = metal_sdpa::select_optimal_block_sizes(query, config.query_precision);
+            hybrid_config.key_blocks = metal_sdpa::select_optimal_block_sizes(key, config.key_precision);
+            hybrid_config.value_blocks = metal_sdpa::select_optimal_block_sizes(value, config.value_precision);
+        } else {
+            hybrid_config.query_blocks = config.block_sizes;
+            hybrid_config.key_blocks = config.block_sizes;
+            hybrid_config.value_blocks = config.block_sizes;
+        }
+    }
+
+    hybrid_config.selection_reasoning = reasoning;
+
+    printf("🎯 Hybrid Granularity Selection Results:\n");
+    printf("   - Query: %s\n", QuantizationConfig::granularity_to_string(hybrid_config.query_granularity).c_str());
+    printf("   - Key: %s\n", QuantizationConfig::granularity_to_string(hybrid_config.key_granularity).c_str());
+    printf("   - Value: %s\n", QuantizationConfig::granularity_to_string(hybrid_config.value_granularity).c_str());
+    printf("   - Reasoning: %s\n", reasoning.c_str());
+
+    return hybrid_config;
+}
+
+torch::Tensor quantize_per_block(const torch::Tensor& tensor, const std::vector<float>& block_scales, const BlockSizeConfig& block_config, QuantizationPrecision precision) {
+    printf("🔧 Quantizing tensor per-block using %zu scales\n", block_scales.size());
+
+    auto tensor_shape = tensor.sizes();
+    int64_t batch_size = tensor_shape[0];
+    int64_t seq_len = tensor_shape[1];
+    int64_t num_heads = tensor_shape[2];
+    int64_t head_dim = tensor_shape[3];
+
+    // Block dimensions
+    int64_t seq_block_size = static_cast<int64_t>(block_config.query_block_size);
+    int64_t head_block_size = static_cast<int64_t>(block_config.head_block_size);
+    int64_t dim_block_size = static_cast<int64_t>(block_config.value_block_size);
+
+    // Calculate number of blocks in each dimension
+    int64_t num_seq_blocks = (seq_len + seq_block_size - 1) / seq_block_size;
+    int64_t num_head_blocks = (num_heads + head_block_size - 1) / head_block_size;
+    int64_t num_dim_blocks = (head_dim + dim_block_size - 1) / dim_block_size;
+
+    // Validate block scales count
+    int64_t expected_blocks = batch_size * num_seq_blocks * num_head_blocks * num_dim_blocks;
+    if (block_scales.size() != static_cast<size_t>(expected_blocks)) {
+        throw std::runtime_error("Block scales count mismatch: expected " + std::to_string(expected_blocks) +
+                                ", got " + std::to_string(block_scales.size()));
+    }
+
+    // Create output tensor
+    auto quantized = torch::empty_like(tensor, torch::kInt8);
+
+    // Get quantization bounds
+    int32_t min_val = (precision == QuantizationPrecision::INT8) ? -127 : -7;
+    int32_t max_val = (precision == QuantizationPrecision::INT8) ? 127 : 7;
+
+    printf("🔧 Quantizing blocks with optimized memory access patterns...\n");
+
+    // Optimized block quantization with better memory access patterns
+    // Use the same memory-friendly iteration order as scale calculation
+    size_t scale_idx = 0;
+    for (int64_t b = 0; b < batch_size; b++) {
+        for (int64_t seq_block = 0; seq_block < num_seq_blocks; seq_block++) {
+            int64_t seq_start = seq_block * seq_block_size;
+            int64_t seq_end = std::min(seq_start + seq_block_size, seq_len);
+
+            for (int64_t head_block = 0; head_block < num_head_blocks; head_block++) {
+                int64_t head_start = head_block * head_block_size;
+                int64_t head_end = std::min(head_start + head_block_size, num_heads);
+
+                for (int64_t dim_block = 0; dim_block < num_dim_blocks; dim_block++) {
+                    int64_t dim_start = dim_block * dim_block_size;
+                    int64_t dim_end = std::min(dim_start + dim_block_size, head_dim);
+
+                    // Extract block tensor from original using optimized slicing
+                    auto block_tensor = tensor.slice(0, b, b + 1)
+                                             .slice(1, seq_start, seq_end)
+                                             .slice(2, head_start, head_end)
+                                             .slice(3, dim_start, dim_end);
+
+                    // Ensure block is contiguous for optimal performance
+                    auto contiguous_block = block_tensor.contiguous();
+
+                    // Get scale for this block
+                    float scale = block_scales[scale_idx++];
+
+                    // Validate scale
+                    if (!std::isfinite(scale) || scale <= 0) {
+                        printf("⚠️  Warning: Invalid block scale %.6f at index %zu, using fallback\n", scale, scale_idx-1);
+                        scale = 1e-6f;
+                    }
+
+                    // Check for NaN/Inf in input block
+                    if (!torch::isfinite(contiguous_block).all().item<bool>()) {
+                        printf("⚠️  Warning: Block contains NaN/Inf, cleaning\n");
+                        contiguous_block = torch::where(torch::isfinite(contiguous_block), contiguous_block, torch::zeros_like(contiguous_block));
+                    }
+
+                    // Quantize this block with overflow protection
+                    auto quantized_float = contiguous_block / scale;
+
+                    // Check for overflow after division
+                    if (!torch::isfinite(quantized_float).all().item<bool>()) {
+                        printf("⚠️  Warning: Block quantization overflow, clamping\n");
+                        quantized_float = torch::where(torch::isfinite(quantized_float), quantized_float, torch::zeros_like(quantized_float));
+                    }
+
+                    // Use safer clamping range (leave margin)
+                    int32_t safe_min = std::max(min_val + 1, static_cast<int32_t>(-126));
+                    int32_t safe_max = std::min(max_val - 1, static_cast<int32_t>(126));
+
+                    auto quantized_block = torch::round(quantized_float)
+                                               .clamp_(safe_min, safe_max)  // In-place clamp with safer range
+                                               .to(torch::kInt8);
+
+                    // Copy quantized block back to output tensor using optimized copy
+                    // Get target slice once and copy in one operation
+                    auto target_slice = quantized.slice(0, b, b + 1)
+                                                 .slice(1, seq_start, seq_end)
+                                                 .slice(2, head_start, head_end)
+                                                 .slice(3, dim_start, dim_end);
+
+                    // Use copy_ for optimal memory transfer
+                    target_slice.copy_(quantized_block);
+                }
+            }
+        }
+    }
+
+    printf("✅ Per-block quantization completed with %zu blocks\n", block_scales.size());
+    return quantized;
+}
+
+torch::Tensor quantize_per_row(const torch::Tensor& tensor, const std::vector<float>& row_scales, QuantizationPrecision precision) {
+    printf("🔧 Quantizing tensor per-row using %zu scales\n", row_scales.size());
+
+    auto tensor_shape = tensor.sizes();
+    int64_t batch_size = tensor_shape[0];
+    int64_t seq_len = tensor_shape[1];
+    int64_t num_heads = tensor_shape[2];
+    int64_t head_dim = tensor_shape[3];
+
+    int64_t num_rows = batch_size * seq_len * num_heads;
+
+    if (row_scales.size() != static_cast<size_t>(num_rows)) {
+        throw std::runtime_error("Row scales count mismatch: expected " + std::to_string(num_rows) +
+                                ", got " + std::to_string(row_scales.size()));
+    }
+
+    // Reshape tensor to [num_rows, head_dim] for easier processing
+    auto reshaped = tensor.view({num_rows, head_dim});
+    auto quantized = torch::empty_like(reshaped, torch::kInt8);
+
+    // Get quantization bounds
+    int32_t min_val = (precision == QuantizationPrecision::INT8) ? -127 : -7;
+    int32_t max_val = (precision == QuantizationPrecision::INT8) ? 127 : 7;
+
+    for (int64_t row = 0; row < num_rows; row++) {
+        auto row_tensor = reshaped[row];
+        float scale = row_scales[row];
+
+        // Validate scale
+        if (!std::isfinite(scale) || scale <= 0) {
+            printf("⚠️  Warning: Invalid row scale %.6f at row %" PRId64 ", using fallback\n", scale, row);
+            scale = 1e-6f;
+        }
+
+        // Check for NaN/Inf in input row
+        if (!torch::isfinite(row_tensor).all().item<bool>()) {
+            printf("⚠️  Warning: Row %" PRId64 " contains NaN/Inf, cleaning\n", row);
+            row_tensor = torch::where(torch::isfinite(row_tensor), row_tensor, torch::zeros_like(row_tensor));
+        }
+
+        // Quantize this row with overflow protection
+        auto quantized_float = row_tensor / scale;
+
+        // Check for overflow after division
+        if (!torch::isfinite(quantized_float).all().item<bool>()) {
+            printf("⚠️  Warning: Row %" PRId64 " quantization overflow, clamping\n", row);
+            quantized_float = torch::where(torch::isfinite(quantized_float), quantized_float, torch::zeros_like(quantized_float));
+        }
+
+        // Use safer clamping range (leave margin)
+        int32_t safe_min = std::max(min_val + 1, static_cast<int32_t>(-126));
+        int32_t safe_max = std::min(max_val - 1, static_cast<int32_t>(126));
+
+        auto quantized_row = torch::round(quantized_float).clamp(safe_min, safe_max).to(torch::kInt8);
+        quantized[row] = quantized_row;
+    }
+
+    // Reshape back to original shape
+    auto result = quantized.view(tensor_shape);
+
+    printf("✅ Per-row quantization completed\n");
+    return result;
+}
 
 // Static member initialization
 mfa_context_t MetalSDPABackend::swift_context_ = nullptr;
@@ -79,6 +870,9 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
     auto k_sizes = k_cpu.sizes();
     auto v_sizes = v_cpu.sizes();
 
+    // Store original shapes for layout detection later (currently unused but preserved for future)
+    // const auto original_q_sizes = q_sizes;
+
     // Validate tensor shapes
     if (q_sizes.size() != k_sizes.size() || k_sizes.size() != v_sizes.size()) {
         throw std::runtime_error("Query, key, and value tensors must have the same number of dimensions");
@@ -87,6 +881,7 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
     // Support both 2D (seq_len, head_dim) and 4D (batch, seq_len, num_heads, head_dim)
     uint32_t batch_size, seq_len_q, seq_len_kv, num_heads;
     uint16_t head_dim;
+    bool input_was_flux = false;  // Track if input was FLUX layout for output conversion
 
     if (q_sizes.size() == 2) {
         // 2D: (seq_len, head_dim) - treat as single batch, single head
@@ -95,23 +890,49 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
         num_heads = 1;
         head_dim = static_cast<uint16_t>(q_sizes[1]);
     } else if (q_sizes.size() == 4) {
-        // 4D: (batch, seq_len, num_heads, head_dim)
-        batch_size = static_cast<uint32_t>(q_sizes[0]);
-        seq_len_q = static_cast<uint32_t>(q_sizes[1]);
-        seq_len_kv = static_cast<uint32_t>(k_sizes[1]);
-        num_heads = static_cast<uint32_t>(q_sizes[2]);
-        head_dim = static_cast<uint16_t>(q_sizes[3]);
+        // PyTorch ALWAYS uses [B, H, S, D] format (batch, heads, seq_len, head_dim)
+        // Metal kernel expects [B, S, H, D] format (batch, seq_len, heads, head_dim)
+        // So we ALWAYS need to convert from PyTorch to Metal layout
+
+        printf("📋 Converting PyTorch layout [B,H,S,D] to Metal layout [B,S,H,D]\n");
+
+        // Always convert from PyTorch format to Metal format
+        q_cpu = convert_flux_to_metal_layout(q_cpu);  // [B,H,S,D] -> [B,S,H,D]
+        k_cpu = convert_flux_to_metal_layout(k_cpu);
+        v_cpu = convert_flux_to_metal_layout(v_cpu);
+
+        // Always need to convert output back to PyTorch format
+        input_was_flux = true;
+
+        // Now get dimensions in Metal layout: (batch, seq_len, num_heads, head_dim)
+        auto q_metal_sizes = q_cpu.sizes();
+        batch_size = static_cast<uint32_t>(q_metal_sizes[0]);
+        seq_len_q = static_cast<uint32_t>(q_metal_sizes[1]);
+        seq_len_kv = static_cast<uint32_t>(k_cpu.sizes()[1]);
+        num_heads = static_cast<uint32_t>(q_metal_sizes[2]);
+        head_dim = static_cast<uint16_t>(q_metal_sizes[3]);
+
+        printf("📊 Regular attention dimensions: batch=%u, seq_q=%u, seq_kv=%u, heads=%u, dim=%u\n",
+               batch_size, seq_len_q, seq_len_kv, num_heads, head_dim);
 
         // Multi-head attention is now supported!
     } else {
         throw std::runtime_error("Unsupported tensor dimensions. Expected 2D (seq_len, head_dim) or 4D (batch, seq_len, num_heads, head_dim)");
     }
 
-    // Create output tensor with same shape as query
+    // Create output tensor with same shape as query (after layout conversion)
+    // Note: This is created after the layout conversion above
     auto output = torch::empty_like(q_cpu);
 
-    // Get precision
-    mfa_precision_t precision = MetalSDPABackend::torch_dtype_to_mfa_dtype(q_cpu.scalar_type());
+    // Get precision as string for safer FFI handling
+    std::string precision_str;
+    switch (q_cpu.scalar_type()) {
+        case torch::kFloat16: precision_str = "fp16"; break;
+        case torch::kFloat32: precision_str = "fp32"; break;
+        case torch::kBFloat16: precision_str = "bf16"; break;
+        default:
+            throw std::runtime_error("Unsupported dtype for Metal Flash Attention");
+    }
 
     // Additional validation to prevent crashes
     if (seq_len_q > 65535 || seq_len_kv > 65535) {
@@ -163,13 +984,13 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
         throw std::runtime_error("Failed to create output buffer");
     }
 
-    // Call MFA attention forward
-    result = mfa_attention_forward(
+    // Call MFA attention forward with string-based precision (safer FFI)
+    result = mfa_attention_forward_str(
         MetalSDPABackend::swift_context_,
         q_buffer, k_buffer, v_buffer, out_buffer,
         batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
         softmax_scale, is_causal,
-        precision, precision, precision,  // input, intermediate, output precision
+        precision_str.c_str(), precision_str.c_str(), precision_str.c_str(),  // input, intermediate, output precision
         false, false, false, false       // transpose flags
     );
 
@@ -205,6 +1026,13 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
                 break;
         }
         throw std::runtime_error(error_msg);
+    }
+
+    // Convert output from Metal layout [B,S,H,D] back to PyTorch layout [B,H,S,D]
+    // Since PyTorch always expects [B,H,S,D] format
+    if (input_was_flux) {
+        printf("🔄 Converting output from Metal layout [B,S,H,D] back to PyTorch layout [B,H,S,D]\n");
+        output = convert_metal_to_flux_layout(output);
     }
 
     return output;
@@ -251,8 +1079,12 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     auto orig_device = query.device();
     auto orig_dtype = query.scalar_type();
 
-    // Call Swift Flash Attention
+    // Call Swift Flash Attention (using processed tensors from call_swift_flash_attention)
     auto result = call_swift_flash_attention(query, key, value, is_causal, softmax_scale);
+
+    // Convert result back to original layout if input was FLUX
+    // Note: The layout conversion is now handled within call_swift_flash_attention
+    // This just preserves the original logic structure for future reference
 
     // Move result back to original device if needed
     if (result.device() != orig_device) {
@@ -279,258 +1111,402 @@ void MetalSDPABackend::register_backend() {
     std::cout << "Metal SDPA backend registered successfully" << std::endl;
 }
 
-torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
-    const torch::Tensor& query,
-    const torch::Tensor& key,
-    const torch::Tensor& value,
-    const std::string& precision,
-    bool is_causal,
-    std::optional<double> scale
-) {
-    printf("🚨 ENTERING C++ quantized_scaled_dot_product_attention function!\n");
-    fflush(stdout);
-    ensure_initialized();
+// REMOVED: First implementation of quantized_scaled_dot_product_attention
+// This function is now implemented as a compatibility wrapper that routes to the unified implementation
 
-    // Convert all tensors to CPU and contiguous
-    auto q_cpu = ensure_contiguous_cpu(query);
-    auto k_cpu = ensure_contiguous_cpu(key);
-    auto v_cpu = ensure_contiguous_cpu(value);
 
-    // Get tensor dimensions (same logic as regular SDPA)
-    uint32_t batch_size, seq_len_q, seq_len_kv, num_heads, head_dim;
 
-    if (q_cpu.dim() == 4) {
-        auto q_sizes = q_cpu.sizes();
-        batch_size = static_cast<uint32_t>(q_sizes[0]);
-        seq_len_q = static_cast<uint32_t>(q_sizes[1]);
-        seq_len_kv = static_cast<uint32_t>(k_cpu.sizes()[1]);
-        num_heads = static_cast<uint32_t>(q_sizes[2]);
-        head_dim = static_cast<uint16_t>(q_sizes[3]);
-    } else {
-        throw std::runtime_error("Quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
-    }
+void MetalSDPABackend::unregister_backend() {
+    cleanup();
+    std::cout << "Metal SDPA backend unregistered" << std::endl;
+}
 
-    // Create output tensor with FP16 precision to match Metal kernel output
-    auto output = torch::empty_like(q_cpu, torch::kFloat16);  // 🚨 FIXED: Match Metal kernel FP16 output
+// Nested namespace for helper functions that need to be in metal_sdpa::metal_sdpa
+namespace metal_sdpa {
 
-    // Convert precision string to enum
-    mfa_precision_t k_precision, v_precision;
-    if (precision == "int8") {
-        k_precision = MFA_PRECISION_INT8;
-        v_precision = MFA_PRECISION_INT8;
-    } else if (precision == "int4") {
-        k_precision = MFA_PRECISION_INT4;
-        v_precision = MFA_PRECISION_INT4;
-    } else {
-        throw std::runtime_error("Unsupported quantization precision: " + precision + ". Use 'int8' or 'int4'.");
-    }
+// Forward declarations for buffer type management
+size_t calculate_expected_buffer_size(const torch::Tensor& reference_tensor, OutputPrecision precision);
 
-    // Get query precision from tensor dtype
-    mfa_precision_t q_precision = MetalSDPABackend::torch_dtype_to_mfa_dtype(q_cpu.scalar_type());
+// Estimate accuracy loss for different granularities
+float estimate_accuracy_loss(QuantizationGranularity granularity,
+                           const TensorAnalysisMetrics& metrics,
+                           QuantizationPrecision precision) {
+    // Base accuracy loss from quantization precision
+    float base_loss = (precision == QuantizationPrecision::INT8) ? 0.01f : 0.05f; // INT4 has higher base loss
 
-    // Calculate softmax scale
-    float softmax_scale = scale ? static_cast<float>(*scale) : (1.0f / std::sqrt(static_cast<float>(head_dim)));
+    // Variance penalty: higher variance benefits from finer granularity
+    float variance_penalty = metrics.variance / (metrics.mean_abs_value * metrics.mean_abs_value + 1e-8f);
 
-    // PER-BLOCK QUANTIZATION: Calculate scales per block for better precision
-    // Following SageAttention approach with block sizes
-    int q_block_size = 128;  // BLKQ=128 for query
-    int kv_block_size = 64;  // BLKK=64 for key/value
+    // Dynamic range penalty: larger dynamic range benefits from finer granularity
+    float range_penalty = std::min(2.0f, metrics.dynamic_range / (metrics.mean_abs_value * 8.0f + 1e-8f));
 
-    // For now, use per-tensor as fallback (per-block implementation next)
-    float k_scale, v_scale;
-    int32_t k_zero_point = 0, v_zero_point = 0;  // Symmetric quantization
+    // Outlier penalty: outliers benefit from finer granularity
+    float outlier_penalty = metrics.has_outliers ? 1.5f : 1.0f;
 
-    if (precision == "int8") {
-        k_scale = k_cpu.abs().max().item<float>() / 127.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 127.0f;
-    } else { // int4
-        k_scale = k_cpu.abs().max().item<float>() / 7.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 7.0f;
-    }
+    switch (granularity) {
+        case QuantizationGranularity::TENSOR_WISE:
+            // Tensor-wise has highest accuracy loss for non-uniform data
+            return base_loss * (1.0f + variance_penalty + range_penalty) * outlier_penalty;
 
-    // TODO: Implement per-block scales
-    // std::vector<float> k_scales_per_block = calculate_per_block_scales(k_cpu, kv_block_size, precision);
-    // std::vector<float> v_scales_per_block = calculate_per_block_scales(v_cpu, kv_block_size, precision);
+        case QuantizationGranularity::ROW_WISE:
+            // Row-wise reduces variance penalty significantly
+            return base_loss * (1.0f + variance_penalty * 0.3f + range_penalty * 0.5f) * outlier_penalty;
 
-    // 🔧 FIX: Actually quantize Q, K and V tensors to INT8
-    // Swift expects quantized data, not FP32 data + scales
+        case QuantizationGranularity::BLOCK_WISE:
+            // Block-wise has lowest accuracy loss for most cases
+            return base_loss * (1.0f + variance_penalty * 0.1f + range_penalty * 0.2f) * outlier_penalty;
 
-    // 🔧 FIX: Only quantize K and V, keep Q in original precision
-    // This is the standard approach for quantized attention to maintain accuracy
-    torch::Tensor q_original, k_quantized, v_quantized;
+        case QuantizationGranularity::HYBRID:
+            // Hybrid can achieve near block-wise accuracy with better performance
+            return base_loss * (1.0f + variance_penalty * 0.15f + range_penalty * 0.25f) * outlier_penalty;
 
-    // Q stays in original precision (no quantization)
-    q_original = q_cpu; // Keep Q in FP32/BF16
-    float q_scale = 1.0f; // No scaling needed for Q
-
-    printf("🔧 DEBUG: Set q_scale = %f (should be 1.0)\n", q_scale);
-    fflush(stdout);
-
-    if (precision == "int8") {
-        // Quantize K: FP32 -> INT8
-        k_quantized = torch::round(k_cpu / k_scale).clamp(-127, 127).to(torch::kInt8);
-        // Quantize V: FP32 -> INT8
-        v_quantized = torch::round(v_cpu / v_scale).clamp(-127, 127).to(torch::kInt8);
-    } else { // int4 - clamp to 4-bit range
-        k_quantized = torch::round(k_cpu / k_scale).clamp(-7, 7).to(torch::kInt8); // Store as INT8 but use 4-bit range
-        v_quantized = torch::round(v_cpu / v_scale).clamp(-7, 7).to(torch::kInt8);
-    }
-
-    // Create MFA buffers
-    mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
-
-    size_t out_bytes = output.numel() * output.element_size();
-
-    mfa_error_t result;
-
-    // 🔧 FIX: Use original Q tensor (not quantized) - keep Q in original precision
-    size_t q_original_bytes = q_original.numel() * q_original.element_size();
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_original.data_ptr(), q_original_bytes, &q_buffer);
-    if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create query buffer for quantized attention");
-    }
-
-    // 🔧 FIX: Use quantized tensor data and update buffer size for INT8
-    size_t k_quantized_bytes = k_quantized.numel() * k_quantized.element_size();
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, k_quantized.data_ptr(), k_quantized_bytes, &k_buffer);
-    if (result != MFA_SUCCESS) {
-        // Note: Don't destroy external memory buffers
-        // mfa_destroy_buffer(q_buffer);
-        throw std::runtime_error("Failed to create key buffer for quantized attention");
-    }
-
-    // 🔧 FIX: Use quantized tensor data and update buffer size for INT8
-    size_t v_quantized_bytes = v_quantized.numel() * v_quantized.element_size();
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, v_quantized.data_ptr(), v_quantized_bytes, &v_buffer);
-    if (result != MFA_SUCCESS) {
-        // Note: Don't destroy external memory buffers
-        // mfa_destroy_buffer(q_buffer);
-        // mfa_destroy_buffer(k_buffer);
-        throw std::runtime_error("Failed to create value buffer for quantized attention");
-    }
-
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, output.data_ptr(), out_bytes, &out_buffer);
-    if (result != MFA_SUCCESS) {
-        // Note: Don't destroy external memory buffers
-        // mfa_destroy_buffer(q_buffer);
-        // mfa_destroy_buffer(k_buffer);
-        // mfa_destroy_buffer(v_buffer);
-        throw std::runtime_error("Failed to create output buffer for quantized attention");
-    }
-
-    try {
-        // Call quantized attention function
-        printf("🚀 CALLING Swift with q_scale = %f (expect 1.0)\n", q_scale);
-        fflush(stdout);
-        result = mfa_attention_forward_quantized(
-            MetalSDPABackend::swift_context_,
-            q_buffer, k_buffer, v_buffer, out_buffer,
-            batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
-            softmax_scale, is_causal,
-            q_scale, 0,  // 🔧 FIX: Pass q_scale=1.0 since Q is not quantized
-            k_scale, k_zero_point,
-            v_scale, v_zero_point,
-            q_precision,
-            k_precision,
-            v_precision,
-            MFA_PRECISION_FP16,  // 🚨 FIXED: Match FP16 output tensor precision
-            false, false, false, false  // No transpose for standard layout
-        );
-
-        if (result != MFA_SUCCESS) {
-            throw std::runtime_error("Quantized attention forward pass failed with error code: " + std::to_string(result));
-        }
-
-        // Cleanup buffers
-        // Note: For external memory buffers (created with mfa_buffer_from_ptr),
-        // we should NOT call mfa_destroy_buffer as it can cause crashes.
-        // The underlying PyTorch tensors manage their own memory.
-        // if (q_buffer) mfa_destroy_buffer(q_buffer);
-        // if (k_buffer) mfa_destroy_buffer(k_buffer);
-        // if (v_buffer) mfa_destroy_buffer(v_buffer);
-        // if (out_buffer) mfa_destroy_buffer(out_buffer);
-
-        // Move output back to original device
-        printf("🎯 EXITING C++ function - returning tensor to device\n");
-        fflush(stdout);
-        return output.to(query.device());
-
-    } catch (...) {
-        // Cleanup on exception
-        // Note: For external memory buffers (created with mfa_buffer_from_ptr),
-        // we should NOT call mfa_destroy_buffer as it can cause crashes.
-        // The underlying PyTorch tensors manage their own memory.
-        // if (q_buffer) mfa_destroy_buffer(q_buffer);
-        // if (k_buffer) mfa_destroy_buffer(k_buffer);
-        // if (v_buffer) mfa_destroy_buffer(v_buffer);
-        // if (out_buffer) mfa_destroy_buffer(out_buffer);
-        throw;
+        default:
+            return base_loss;
     }
 }
 
+// Adaptive block size selection algorithm
+BlockSizeConfig select_optimal_block_sizes(const torch::Tensor& tensor, QuantizationPrecision precision) {
+    auto tensor_shape = tensor.sizes();
+    int64_t batch_size = tensor_shape[0];
+    int64_t seq_len = tensor_shape[1];
+    int64_t num_heads = tensor_shape[2];
+    int64_t head_dim = tensor_shape[3];
 
-torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_config(
+    printf("🧠 Selecting optimal block sizes for tensor: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "]\n",
+           batch_size, seq_len, num_heads, head_dim);
+
+    BlockSizeConfig config;
+
+    // Adaptive sequence block size based on sequence length
+    if (seq_len <= 64) {
+        config.query_block_size = static_cast<uint32_t>(seq_len);  // Use full sequence as one block for small sequences
+    } else if (seq_len <= 512) {
+        config.query_block_size = 64;  // Medium block size for medium sequences
+    } else if (seq_len <= 2048) {
+        config.query_block_size = 128; // Standard block size for long sequences
+    } else {
+        config.query_block_size = 256; // Large block size for very long sequences
+    }
+
+    // Adaptive head block size based on number of heads
+    if (num_heads <= 8) {
+        config.head_block_size = static_cast<uint32_t>(num_heads);  // Use all heads as one block for small head counts
+    } else if (num_heads <= 32) {
+        config.head_block_size = 8;   // Medium block size for medium head counts
+    } else {
+        config.head_block_size = 16;  // Large block size for many heads
+    }
+
+    // Adaptive dimension block size based on head dimension
+    if (head_dim <= 64) {
+        config.value_block_size = static_cast<uint32_t>(head_dim);  // Use full dimension as one block for small dimensions
+    } else if (head_dim <= 128) {
+        config.value_block_size = 64;  // Medium block size for medium dimensions
+    } else {
+        config.value_block_size = 128; // Large block size for large dimensions
+    }
+
+    // Key and value tensors can use the same block sizes as query for simplicity
+    config.key_block_size = config.query_block_size;
+
+    // Performance-based adjustments for INT4 vs INT8
+    if (precision == QuantizationPrecision::INT4) {
+        // INT4 benefits from smaller blocks for better accuracy
+        config.query_block_size = std::max(32u, config.query_block_size / 2);
+        config.key_block_size = config.query_block_size;
+        config.value_block_size = std::max(32u, config.value_block_size / 2);
+        config.head_block_size = std::max(1u, config.head_block_size / 2);
+    }
+
+    printf("✅ Selected block sizes: seq=%d, head=%d, dim=%d (key=%d)\n",
+           config.query_block_size, config.head_block_size, config.value_block_size, config.key_block_size);
+
+    return config;
+}
+
+// Return buffer type management implementations
+OutputPrecision determine_output_precision(const QuantizationConfig& config,
+                                          const torch::Tensor& query,
+                                          const torch::Tensor& key,
+                                          const torch::Tensor& value) {
+    printf("🔍 Determining optimal output precision...\n");
+
+    // If explicitly specified in config, use that
+    if (config.output_precision != OutputPrecision::FP32) {
+        printf("   Using explicitly configured output precision: %s\n",
+               QuantizationConfig::precision_to_string(config.output_precision).c_str());
+        return config.output_precision;
+    }
+
+    // Intelligent precision selection based on input characteristics
+    auto input_dtype = query.scalar_type();
+
+    // Rule 1: If input is already high precision (FP32), maintain it unless quantized
+    if (input_dtype == torch::kFloat32) {
+        // Check if any tensors are quantized (INT4/INT8)
+        bool has_quantized_inputs = (config.key_precision == QuantizationPrecision::INT4 ||
+                                   config.key_precision == QuantizationPrecision::INT8 ||
+                                   config.value_precision == QuantizationPrecision::INT4 ||
+                                   config.value_precision == QuantizationPrecision::INT8);
+
+        if (has_quantized_inputs) {
+            printf("   FP32 input with quantized K/V → using FP16 output for efficiency\n");
+            return OutputPrecision::FP16;
+        } else {
+            printf("   FP32 input, no quantization → maintaining FP32 output\n");
+            return OutputPrecision::FP32;
+        }
+    }
+
+    // Rule 2: If input is FP16, generally maintain FP16 for efficiency
+    if (input_dtype == torch::kFloat16) {
+        printf("   FP16 input → maintaining FP16 output for efficiency\n");
+        return OutputPrecision::FP16;
+    }
+
+    // Rule 3: If input is BF16, maintain BF16
+    if (input_dtype == torch::kBFloat16) {
+        printf("   BF16 input → maintaining BF16 output\n");
+        return OutputPrecision::BF16;
+    }
+
+    // Rule 4: For quantized-only scenarios, use FP16 as efficient default
+    printf("   Mixed/quantized scenario → defaulting to FP16 output\n");
+    return OutputPrecision::FP16;
+}
+
+torch::Tensor create_typed_output_tensor(const torch::Tensor& reference_tensor,
+                                        OutputPrecision output_precision,
+                                        bool validate_size) {
+    auto target_dtype = QuantizationConfig::precision_to_torch_dtype(output_precision);
+
+    printf("🔧 Creating typed output tensor: %s → %s\n",
+           scalar_type_to_string(reference_tensor.scalar_type()).c_str(),
+           scalar_type_to_string(target_dtype).c_str());
+
+    // Create output tensor with correct dtype and same shape as reference
+    auto output = torch::empty_like(reference_tensor, target_dtype);
+
+    if (validate_size) {
+        size_t expected_size = calculate_expected_buffer_size(reference_tensor, output_precision);
+        size_t actual_size = output.numel() * output.element_size();
+
+        if (actual_size != expected_size) {
+            throw std::runtime_error(
+                "Output buffer size mismatch: expected " + std::to_string(expected_size) +
+                " bytes, got " + std::to_string(actual_size) + " bytes"
+            );
+        }
+
+        printf("✅ Output buffer size validated: %zu bytes\n", actual_size);
+    }
+
+    return output;
+}
+
+bool validate_output_buffer_type(const torch::Tensor& output_tensor,
+                                OutputPrecision expected_precision,
+                                size_t expected_size) {
+    auto expected_dtype = QuantizationConfig::precision_to_torch_dtype(expected_precision);
+    auto actual_dtype = output_tensor.scalar_type();
+
+    printf("🔍 Validating output buffer type...\n");
+    printf("   Expected: %s, Actual: %s\n",
+           scalar_type_to_string(expected_dtype).c_str(),
+           scalar_type_to_string(actual_dtype).c_str());
+
+    // Check dtype match
+    if (actual_dtype != expected_dtype) {
+        printf("❌ Output buffer dtype mismatch!\n");
+        return false;
+    }
+
+    // Check size match
+    size_t actual_size = output_tensor.numel() * output_tensor.element_size();
+    if (actual_size != expected_size) {
+        printf("❌ Output buffer size mismatch: expected %zu, got %zu bytes\n",
+               expected_size, actual_size);
+        return false;
+    }
+
+    printf("✅ Output buffer validation passed\n");
+    return true;
+}
+
+torch::Tensor convert_output_precision(const torch::Tensor& output_tensor,
+                                      OutputPrecision source_precision,
+                                      OutputPrecision target_precision) {
+    if (source_precision == target_precision) {
+        return output_tensor; // No conversion needed
+    }
+
+    auto target_dtype = QuantizationConfig::precision_to_torch_dtype(target_precision);
+
+    printf("🔄 Converting output precision: %s → %s\n",
+           QuantizationConfig::precision_to_string(source_precision).c_str(),
+           QuantizationConfig::precision_to_string(target_precision).c_str());
+
+    // Perform safe precision conversion
+    auto converted = output_tensor.to(target_dtype);
+
+    printf("✅ Precision conversion completed\n");
+    return converted;
+}
+
+size_t calculate_expected_buffer_size(const torch::Tensor& reference_tensor,
+                                    OutputPrecision precision) {
+    size_t element_count = reference_tensor.numel();
+    size_t element_size;
+
+    switch (precision) {
+        case OutputPrecision::FP16:
+            element_size = sizeof(torch::Half);
+            break;
+        case OutputPrecision::BF16:
+            element_size = sizeof(torch::BFloat16);
+            break;
+        case OutputPrecision::FP32:
+        default:
+            element_size = sizeof(float);
+            break;
+    }
+
+    return element_count * element_size;
+}
+
+} // namespace metal_sdpa (nested)
+
+// UNIFIED QUANTIZED ATTENTION IMPLEMENTATION
+// This function replaces both quantized_scaled_dot_product_attention and quantized_scaled_dot_product_attention_enhanced
+// It supports all quantization granularities, precision options, and advanced features in a single unified codebase
+torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     const torch::Tensor& query,
     const torch::Tensor& key,
     const torch::Tensor& value,
     const QuantizationConfig& config
 ) {
+    printf("🚨 ENTERING unified quantized attention with granularity: %s\n",
+           QuantizationConfig::granularity_to_string(config.granularity).c_str());
+    fflush(stdout);
+
     ensure_initialized();
+
+    // Handle hybrid granularity selection with per-tensor analysis
+    QuantizationConfig effective_config = config;
+    HybridGranularityConfig hybrid_config;
+
+    if (config.granularity == QuantizationGranularity::HYBRID) {
+        printf("🎯 Performing hybrid granularity selection...\n");
+        hybrid_config = select_hybrid_granularities(query, key, value, config);
+
+        // For now, use unified granularity for compatibility with current FFI
+        if (config.enable_per_tensor_granularity) {
+            printf("⚠️  Per-tensor granularity not yet supported in FFI, using unified selection\n");
+            // Use the most common granularity among Q, K, V as unified choice
+            std::map<QuantizationGranularity, int> granularity_votes;
+            granularity_votes[hybrid_config.query_granularity]++;
+            granularity_votes[hybrid_config.key_granularity]++;
+            granularity_votes[hybrid_config.value_granularity]++;
+
+            auto most_common = std::max_element(granularity_votes.begin(), granularity_votes.end(),
+                                              [](const auto& a, const auto& b) { return a.second < b.second; });
+            effective_config.granularity = most_common->first;
+
+            printf("🎯 Unified hybrid selection: %s (based on majority vote)\n",
+                   QuantizationConfig::granularity_to_string(effective_config.granularity).c_str());
+        } else {
+            // Use the primary tensor analysis result
+            effective_config.granularity = hybrid_config.query_granularity;
+            printf("🎯 Unified hybrid selection: %s (based on primary tensor)\n",
+                   QuantizationConfig::granularity_to_string(effective_config.granularity).c_str());
+        }
+    }
 
     // Convert all tensors to CPU and contiguous
     auto q_cpu = MetalSDPABackend::ensure_contiguous_cpu(query);
     auto k_cpu = MetalSDPABackend::ensure_contiguous_cpu(key);
     auto v_cpu = MetalSDPABackend::ensure_contiguous_cpu(value);
 
-    // Get tensor dimensions (same logic as regular SDPA)
+    // Detect tensor layout and convert if necessary
+    printf("🔍 Analyzing tensor layouts for FLUX compatibility...\n");
+
+    auto q_layout = detect_tensor_layout(q_cpu);
+    auto k_layout = detect_tensor_layout(k_cpu);
+    auto v_layout = detect_tensor_layout(v_cpu);
+
+    // Check layout consistency
+    if (q_layout.is_flux_layout != k_layout.is_flux_layout || q_layout.is_flux_layout != v_layout.is_flux_layout) {
+        printf("⚠️  Warning: Inconsistent tensor layouts detected:\n");
+        printf("   Query: %s\n", q_layout.to_string().c_str());
+        printf("   Key: %s\n", k_layout.to_string().c_str());
+        printf("   Value: %s\n", v_layout.to_string().c_str());
+    }
+
+    // Convert FLUX layout to Metal layout if needed
+    bool input_was_flux_layout = q_layout.is_flux_layout;
+    torch::Tensor q_metal = q_cpu;
+    torch::Tensor k_metal = k_cpu;
+    torch::Tensor v_metal = v_cpu;
+
+    if (q_layout.is_flux_layout) {
+        printf("🔄 Converting FLUX layout tensors to Metal layout...\n");
+        q_metal = convert_flux_to_metal_layout(q_cpu);
+        k_metal = convert_flux_to_metal_layout(k_cpu);
+        v_metal = convert_flux_to_metal_layout(v_cpu);
+    }
+
+    // Get tensor dimensions (now in Metal layout [B,S,H,D])
     uint32_t batch_size, seq_len_q, seq_len_kv, num_heads, head_dim;
 
-    if (q_cpu.dim() == 4) {
-        auto q_sizes = q_cpu.sizes();
+    if (q_metal.dim() == 4) {
+        auto q_sizes = q_metal.sizes();
         batch_size = static_cast<uint32_t>(q_sizes[0]);
         seq_len_q = static_cast<uint32_t>(q_sizes[1]);
-        seq_len_kv = static_cast<uint32_t>(k_cpu.sizes()[1]);
+        seq_len_kv = static_cast<uint32_t>(k_metal.sizes()[1]);
         num_heads = static_cast<uint32_t>(q_sizes[2]);
         head_dim = static_cast<uint16_t>(q_sizes[3]);
+
+        printf("📊 Final tensor dimensions: batch=%u, seq_q=%u, seq_kv=%u, heads=%u, dim=%u\n",
+               batch_size, seq_len_q, seq_len_kv, num_heads, head_dim);
+
+        // Validate head count for FLUX
+        if (input_was_flux_layout) {
+            if (num_heads < 12 || num_heads > 96) {
+                printf("⚠️  Warning: Unusual head count for FLUX: %u (expected 12-96)\n", num_heads);
+            } else {
+                printf("✅ FLUX head count validation passed: %u heads\n", num_heads);
+            }
+        }
     } else {
-        throw std::runtime_error("Configurable quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
+        throw std::runtime_error("Unified quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
     }
 
-    // Create output tensor with configurable precision
-    torch::ScalarType output_dtype;
-    switch (config.output_precision) {
-        case OutputPrecision::FP16:
-            output_dtype = torch::kFloat16;
-            break;
-        case OutputPrecision::BF16:
-            output_dtype = torch::kBFloat16;
-            break;
-        case OutputPrecision::FP32:
-        default:
-            output_dtype = torch::kFloat32;
-            break;
-    }
+    // Determine optimal output precision using intelligent selection
+    OutputPrecision optimal_output_precision = metal_sdpa::determine_output_precision(effective_config, q_metal, k_metal, v_metal);
 
-    auto output = torch::empty_like(q_cpu, output_dtype);
+    // Create type-safe output tensor with validation (using Metal layout)
+    auto output = metal_sdpa::create_typed_output_tensor(q_metal, optimal_output_precision, true);
 
-    // Convert precision string to enum
-    mfa_precision_t k_precision, v_precision;
-    if (config.precision == "int8") {
-        k_precision = MFA_PRECISION_INT8;
-        v_precision = MFA_PRECISION_INT8;
-    } else if (config.precision == "int4") {
-        k_precision = MFA_PRECISION_INT4;
-        v_precision = MFA_PRECISION_INT4;
-    } else {
-        throw std::runtime_error("Unsupported quantization precision: " + config.precision + ". Use 'int8' or 'int4'.");
-    }
+    // Convert precision enums to MFA precision
+    auto convert_quantization_precision_to_mfa = [](QuantizationPrecision precision) -> mfa_precision_t {
+        switch (precision) {
+            case QuantizationPrecision::INT4: return MFA_PRECISION_INT4;
+            case QuantizationPrecision::INT8: return MFA_PRECISION_INT8;
+            case QuantizationPrecision::FP16: return MFA_PRECISION_FP16;
+            case QuantizationPrecision::BF16: return MFA_PRECISION_BF16;
+            case QuantizationPrecision::FP32: return MFA_PRECISION_FP32;
+            default: return MFA_PRECISION_INT8;
+        }
+    };
 
-    // Get query precision from tensor dtype
-    mfa_precision_t q_precision = MetalSDPABackend::torch_dtype_to_mfa_dtype(q_cpu.scalar_type());
+    mfa_precision_t q_precision_mfa = convert_quantization_precision_to_mfa(config.query_precision);
+    mfa_precision_t k_precision_mfa = convert_quantization_precision_to_mfa(config.key_precision);
+    mfa_precision_t v_precision_mfa = convert_quantization_precision_to_mfa(config.value_precision);
 
-    // Convert output precision config to MFA precision
+    // Convert optimal output precision to MFA precision
     mfa_precision_t output_precision_mfa;
-    switch (config.output_precision) {
+    switch (optimal_output_precision) {
         case OutputPrecision::FP16:
             output_precision_mfa = MFA_PRECISION_FP16;
             break;
@@ -546,103 +1522,342 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_conf
     // Calculate softmax scale
     float softmax_scale = config.scale ? static_cast<float>(*config.scale) : (1.0f / std::sqrt(static_cast<float>(head_dim)));
 
-    // Calculate quantization scales for K and V tensors
-    float k_scale, v_scale;
-    int32_t k_zero_point = 0, v_zero_point = 0;  // Symmetric quantization
+    // Calculate quantization scales based on effective granularity (after hybrid selection)
+    float q_scale = 1.0f, k_scale = 1.0f, v_scale = 1.0f;
+    int32_t q_zero_point = 0, k_zero_point = 0, v_zero_point = 0;
 
-    if (config.precision == "int8") {
-        k_scale = k_cpu.abs().max().item<float>() / 127.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 127.0f;
-    } else { // int4
-        k_scale = k_cpu.abs().max().item<float>() / 7.0f;
-        v_scale = v_cpu.abs().max().item<float>() / 7.0f;
-    }
+    // Storage for per-row and per-block scales
+    std::vector<float> q_row_scales, k_row_scales, v_row_scales;
+    std::vector<float> q_block_scales, k_block_scales, v_block_scales;
 
-    // 🔧 FIX: Only quantize K and V, keep Q in original precision
-    // This is the standard approach for quantized attention to maintain accuracy
-    torch::Tensor q_original, k_quantized, v_quantized;
+    // Calculate quantization scales based on precision and effective granularity
+    auto calculate_scales = [&](const torch::Tensor& tensor, QuantizationPrecision precision, float& scale, int32_t& zero_point, std::vector<float>& row_scales, std::vector<float>& block_scales, const std::string& tensor_name) {
+        if (precision == QuantizationPrecision::FP16 || precision == QuantizationPrecision::BF16 || precision == QuantizationPrecision::FP32) {
+            scale = 1.0f;  // No quantization needed
+            zero_point = 0;
+            return;
+        }
 
-    // Q stays in original precision (no quantization)
-    q_original = q_cpu; // Keep Q in FP32/BF16
-    float q_scale = 1.0f; // No scaling needed for Q
+        float max_val = 0.0f;
+        switch (effective_config.granularity) {
+            case QuantizationGranularity::TENSOR_WISE:
+                max_val = tensor.abs().max().item<float>();
+                printf("📊 %s tensor-wise scale: max_val=%.6f\n", tensor_name.c_str(), max_val);
+                break;
 
-    printf("🔧 DEBUG: Set q_scale = %f (should be 1.0)\n", q_scale);
-    fflush(stdout);
+            case QuantizationGranularity::ROW_WISE:
+                printf("🚀 Implementing row-wise quantization for %s tensor\n", tensor_name.c_str());
+                row_scales = calculate_row_scales(tensor, precision);
+                // For compatibility with the current FFI interface, use a single fallback scale
+                max_val = tensor.abs().max().item<float>();
+                printf("📊 %s row-wise: calculated %zu per-row scales, fallback scale=%.6f\n",
+                       tensor_name.c_str(), row_scales.size(), max_val);
+                break;
 
-    if (config.precision == "int8") {
-        // Quantize K: FP32 -> INT8
-        k_quantized = torch::round(k_cpu / k_scale).clamp(-127, 127).to(torch::kInt8);
-        // Quantize V: FP32 -> INT8
-        v_quantized = torch::round(v_cpu / v_scale).clamp(-127, 127).to(torch::kInt8);
-    } else { // int4 - clamp to 4-bit range
-        k_quantized = torch::round(k_cpu / k_scale).clamp(-7, 7).to(torch::kInt8);
-        v_quantized = torch::round(v_cpu / v_scale).clamp(-7, 7).to(torch::kInt8);
-    }
+            case QuantizationGranularity::BLOCK_WISE: {
+                printf("🚀 Implementing block-wise quantization for %s tensor\n", tensor_name.c_str());
+                // Use adaptive block sizing if block sizes are not explicitly configured
+                BlockSizeConfig adaptive_config = effective_config.block_sizes;
+                if (effective_config.enable_adaptive_block_sizes) {
+                    printf("🧠 Using adaptive block sizing for %s tensor\n", tensor_name.c_str());
+                    adaptive_config = metal_sdpa::select_optimal_block_sizes(tensor, precision);
+                }
+                block_scales = calculate_block_scales(tensor, adaptive_config, precision);
+                // For compatibility with the current FFI interface, use a single fallback scale
+                max_val = tensor.abs().max().item<float>();
+                printf("📊 %s block-wise: calculated %zu per-block scales, fallback scale=%.6f\n",
+                       tensor_name.c_str(), block_scales.size(), max_val);
+                break;
+            }
+
+            case QuantizationGranularity::HYBRID: {
+                // This case should not occur since hybrid is resolved earlier, but handle gracefully
+                printf("⚠️  Unexpected hybrid granularity in scale calculation, falling back to tensor-wise\n");
+                max_val = tensor.abs().max().item<float>();
+                break;
+            }
+        }
+
+        // Robust scale calculation with epsilon protection
+        const float epsilon = 1e-6f;  // Minimum scale to prevent division by zero
+        if (precision == QuantizationPrecision::INT8) {
+            scale = std::max(epsilon, max_val / 127.0f);
+        } else { // INT4
+            scale = std::max(epsilon, max_val / 7.0f);
+        }
+
+        // Additional safety: clamp scale to reasonable range
+        const float max_scale = 1000.0f;  // Prevent extremely large scales
+        scale = std::clamp(scale, epsilon, max_scale);
+
+        // Validate scale is not NaN or Inf
+        if (!std::isfinite(scale)) {
+            printf("⚠️  Warning: Invalid tensor scale detected (%.6f) for %s, using epsilon\n", scale, tensor_name.c_str());
+            scale = epsilon;
+        }
+
+        printf("📊 %s tensor-wise scale: max_val=%.6f, scale=%.6f (clamped and validated)\n", tensor_name.c_str(), max_val, scale);
+
+        if (effective_config.force_symmetric_quantization) {
+            zero_point = 0;
+        } else {
+            // For now, use symmetric quantization
+            zero_point = 0;
+        }
+    };
+
+    calculate_scales(q_metal, config.query_precision, q_scale, q_zero_point, q_row_scales, q_block_scales, "Query");
+    calculate_scales(k_metal, config.key_precision, k_scale, k_zero_point, k_row_scales, k_block_scales, "Key");
+    calculate_scales(v_metal, config.value_precision, v_scale, v_zero_point, v_row_scales, v_block_scales, "Value");
+
+    // Quantize tensors if needed using the unified quantization function
+    torch::Tensor q_processed = q_cpu;
+    torch::Tensor k_processed = k_cpu;
+    torch::Tensor v_processed = v_cpu;
+
+    // Enhanced quantization function that supports all granularities
+    auto quantize_tensor_unified = [&](const torch::Tensor& tensor, QuantizationPrecision precision, float scale, const std::vector<float>& row_scales, const std::vector<float>& block_scales, const std::string& tensor_name) -> torch::Tensor {
+        if (precision == QuantizationPrecision::FP16 || precision == QuantizationPrecision::BF16 || precision == QuantizationPrecision::FP32) {
+            return tensor;  // No quantization
+        }
+
+        // Choose quantization method based on effective granularity
+        switch (effective_config.granularity) {
+            case QuantizationGranularity::ROW_WISE:
+                if (!row_scales.empty()) {
+                    printf("🔧 Using row-wise quantization for %s tensor\n", tensor_name.c_str());
+                    return quantize_per_row(tensor, row_scales, precision);
+                }
+                break;
+
+            case QuantizationGranularity::BLOCK_WISE:
+                if (!block_scales.empty()) {
+                    printf("🔧 Using block-wise quantization for %s tensor\n", tensor_name.c_str());
+                    return quantize_per_block(tensor, block_scales, effective_config.block_sizes, precision);
+                }
+                break;
+
+            case QuantizationGranularity::TENSOR_WISE:
+            default:
+                // Use tensor-wise quantization
+                break;
+        }
+
+        // Fall back to tensor-wise quantization with enhanced safety
+        printf("🔧 Using tensor-wise quantization for %s tensor (scale=%.6f)\n", tensor_name.c_str(), scale);
+
+        // Validate inputs before quantization and create working tensor
+        torch::Tensor working_tensor = tensor;
+        if (!torch::isfinite(tensor).all().item<bool>()) {
+            printf("❌ Error: Input tensor contains NaN or Inf values before quantization\n");
+            // Replace NaN/Inf with zeros to prevent propagation
+            working_tensor = torch::where(torch::isfinite(tensor), tensor, torch::zeros_like(tensor));
+        }
+
+        // Perform quantization with overflow protection
+        auto quantized_float = working_tensor / scale;
+
+        // Check for overflow before rounding and clamping
+        if (!torch::isfinite(quantized_float).all().item<bool>()) {
+            printf("⚠️  Warning: Quantization produced NaN/Inf values, clamping aggressively\n");
+            quantized_float = torch::where(torch::isfinite(quantized_float), quantized_float, torch::zeros_like(quantized_float));
+        }
+
+        if (precision == QuantizationPrecision::INT8) {
+            // More aggressive clamping to prevent overflow
+            auto clamped = torch::clamp(quantized_float, -126.0f, 126.0f);  // Leave 1 margin for safety
+            return torch::round(clamped).to(torch::kInt8);
+        } else { // INT4
+            // More aggressive clamping to prevent overflow
+            auto clamped = torch::clamp(quantized_float, -6.0f, 6.0f);  // Leave 1 margin for safety
+            return torch::round(clamped).to(torch::kInt8);
+        }
+    };
+
+    q_processed = quantize_tensor_unified(q_metal, config.query_precision, q_scale, q_row_scales, q_block_scales, "Query");
+    k_processed = quantize_tensor_unified(k_metal, config.key_precision, k_scale, k_row_scales, k_block_scales, "Key");
+    v_processed = quantize_tensor_unified(v_metal, config.value_precision, v_scale, v_row_scales, v_block_scales, "Value");
 
     // Create MFA buffers
     mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
 
-    size_t q_original_bytes = q_original.numel() * q_original.element_size();
-    size_t k_quantized_bytes = k_quantized.numel() * k_quantized.element_size();
-    size_t v_quantized_bytes = v_quantized.numel() * v_quantized.element_size();
+    size_t q_bytes = q_processed.numel() * q_processed.element_size();
+    size_t k_bytes = k_processed.numel() * k_processed.element_size();
+    size_t v_bytes = v_processed.numel() * v_processed.element_size();
     size_t out_bytes = output.numel() * output.element_size();
 
     mfa_error_t result;
 
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_original.data_ptr(), q_original_bytes, &q_buffer);
+    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_processed.data_ptr(), q_bytes, &q_buffer);
     if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create query buffer for configurable quantized attention");
+        throw std::runtime_error("Failed to create query buffer for unified quantized attention");
     }
 
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, k_quantized.data_ptr(), k_quantized_bytes, &k_buffer);
+    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, k_processed.data_ptr(), k_bytes, &k_buffer);
     if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create key buffer for configurable quantized attention");
+        throw std::runtime_error("Failed to create key buffer for unified quantized attention");
     }
 
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, v_quantized.data_ptr(), v_quantized_bytes, &v_buffer);
+    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, v_processed.data_ptr(), v_bytes, &v_buffer);
     if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create value buffer for configurable quantized attention");
+        throw std::runtime_error("Failed to create value buffer for unified quantized attention");
     }
 
     result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, output.data_ptr(), out_bytes, &out_buffer);
     if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create output buffer for configurable quantized attention");
+        throw std::runtime_error("Failed to create output buffer for unified quantized attention");
     }
 
     try {
-        // Call quantized attention function with configurable output precision
-        result = mfa_attention_forward_quantized(
+        // Convert effective granularity enum to int32_t for FFI
+        int32_t granularity_int = static_cast<int32_t>(effective_config.granularity);
+
+        printf("🚀 Calling unified quantized attention with:\n");
+        printf("   Effective Granularity: %s (%d)\n", QuantizationConfig::granularity_to_string(effective_config.granularity).c_str(), granularity_int);
+        printf("   Block sizes: Q=%u, K=%u, V=%u\n", effective_config.block_sizes.query_block_size, effective_config.block_sizes.key_block_size, effective_config.block_sizes.value_block_size);
+        printf("   Mixed precision: %s, Symmetric quantization: %s\n", effective_config.enable_mixed_precision ? "enabled" : "disabled", effective_config.force_symmetric_quantization ? "enabled" : "disabled");
+        if (config.granularity == QuantizationGranularity::HYBRID) {
+            printf("   Hybrid Selection Reasoning: %s\n", hybrid_config.selection_reasoning.c_str());
+        }
+        fflush(stdout);
+
+        // Set scale arrays in the context for row-wise and block-wise quantization
+        if (effective_config.granularity == QuantizationGranularity::ROW_WISE ||
+            effective_config.granularity == QuantizationGranularity::BLOCK_WISE ||
+            effective_config.granularity == QuantizationGranularity::HYBRID) {
+
+            // Prepare scale arrays - use non-empty arrays for non-tensor granularities
+            const float* q_scales_ptr = q_row_scales.empty() ? (q_block_scales.empty() ? nullptr : q_block_scales.data()) : q_row_scales.data();
+            uint32_t q_scales_count = q_row_scales.empty() ? static_cast<uint32_t>(q_block_scales.size()) : static_cast<uint32_t>(q_row_scales.size());
+
+            const float* k_scales_ptr = k_row_scales.empty() ? (k_block_scales.empty() ? nullptr : k_block_scales.data()) : k_row_scales.data();
+            uint32_t k_scales_count = k_row_scales.empty() ? static_cast<uint32_t>(k_block_scales.size()) : static_cast<uint32_t>(k_row_scales.size());
+
+            const float* v_scales_ptr = v_row_scales.empty() ? (v_block_scales.empty() ? nullptr : v_block_scales.data()) : v_row_scales.data();
+            uint32_t v_scales_count = v_row_scales.empty() ? static_cast<uint32_t>(v_block_scales.size()) : static_cast<uint32_t>(v_row_scales.size());
+
+            printf("🔧 Setting scale arrays: Q(%u), K(%u), V(%u) scales for granularity %s\n",
+                   q_scales_count, k_scales_count, v_scales_count,
+                   QuantizationConfig::granularity_to_string(effective_config.granularity).c_str());
+
+            mfa_error_t scale_result = mfa_set_scale_arrays(
+                MetalSDPABackend::swift_context_,
+                q_scales_ptr, q_scales_count,
+                k_scales_ptr, k_scales_count,
+                v_scales_ptr, v_scales_count
+            );
+
+            if (scale_result != MFA_SUCCESS) {
+                printf("⚠️ Failed to set scale arrays, continuing with fallback\n");
+            }
+        }
+
+        // Call unified quantized attention function
+        result = mfa_attention_forward_quantized_unified(
             MetalSDPABackend::swift_context_,
             q_buffer, k_buffer, v_buffer, out_buffer,
             batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
             softmax_scale, config.is_causal,
-            q_scale, 0,  // 🔧 FIX: Pass q_scale=1.0 since Q is not quantized
+            q_scale, q_zero_point,
             k_scale, k_zero_point,
             v_scale, v_zero_point,
-            q_precision,
-            k_precision,
-            v_precision,
-            output_precision_mfa,  // 🚨 CONFIGURABLE: Use specified output precision
+            q_precision_mfa, k_precision_mfa, v_precision_mfa, output_precision_mfa,
+            granularity_int,
+            effective_config.block_sizes.query_block_size, effective_config.block_sizes.key_block_size, effective_config.block_sizes.value_block_size,
+            effective_config.enable_mixed_precision, effective_config.force_symmetric_quantization,
             false, false, false, false  // No transpose for standard layout
         );
 
         if (result != MFA_SUCCESS) {
-            throw std::runtime_error("Configurable quantized attention forward pass failed with error code: " + std::to_string(result));
+            throw std::runtime_error("Unified quantized attention forward pass failed with error code: " + std::to_string(result));
         }
 
-        // Move output back to original device
-        printf("🎯 EXITING C++ function - returning tensor to device\n");
+        // Validate output buffer type matches expectations
+        size_t expected_size = metal_sdpa::calculate_expected_buffer_size(output, optimal_output_precision);
+        if (!metal_sdpa::validate_output_buffer_type(output, optimal_output_precision, expected_size)) {
+            throw std::runtime_error("Output buffer type validation failed - potential data corruption detected");
+        }
+
+        printf("✅ Unified quantized attention completed successfully with type validation\n");
+
+        // Convert output back to original layout if input was FLUX
+        torch::Tensor final_output = output;
+        if (input_was_flux_layout) {
+            printf("🔄 Converting output back to FLUX layout...\n");
+            final_output = convert_metal_to_flux_layout(output);
+        }
+
         fflush(stdout);
-        return output.to(query.device());
+        return final_output.to(query.device());
 
     } catch (...) {
         throw;
     }
 }
 
-void MetalSDPABackend::unregister_backend() {
-    cleanup();
-    std::cout << "Metal SDPA backend unregistered" << std::endl;
+// BACKWARD COMPATIBILITY WRAPPERS
+// These functions provide backward compatibility for existing code while routing through the unified implementation
+
+torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const std::string& precision,
+    bool is_causal,
+    std::optional<double> scale
+) {
+    printf("🔀 COMPATIBILITY: Routing legacy quantized_scaled_dot_product_attention to unified implementation\n");
+
+    // Convert legacy string-based API to unified QuantizationConfig
+    QuantizationConfig config;
+    config.precision = precision;  // Legacy string field
+    config.is_causal = is_causal;
+    config.scale = scale;
+
+    // Set default granularity for legacy API (tensor-wise for compatibility)
+    config.granularity = QuantizationGranularity::TENSOR_WISE;
+
+    // Set precisions based on legacy API behavior:
+    // - Query stays in original precision (FP16/FP32)
+    // - Key and Value are quantized to specified precision
+    config.query_precision = QuantizationPrecision::FP16;  // Keep Q in original precision
+    config.key_precision = QuantizationConfig::string_to_quantization_precision(precision);
+    config.value_precision = QuantizationConfig::string_to_quantization_precision(precision);
+
+    // Use FP16 output for efficiency (matches legacy behavior)
+    config.output_precision = OutputPrecision::FP16;
+
+    printf("🔀 Legacy API converted to: granularity=%s, q_precision=%s, kv_precision=%s\n",
+           QuantizationConfig::granularity_to_string(config.granularity).c_str(),
+           QuantizationConfig::quantization_precision_to_string(config.query_precision).c_str(),
+           QuantizationConfig::quantization_precision_to_string(config.key_precision).c_str());
+
+    // Route to unified implementation
+    return quantized_scaled_dot_product_attention_unified(query, key, value, config);
+}
+
+torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_config(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const QuantizationConfig& config
+) {
+    printf("🔀 COMPATIBILITY: Routing quantized_scaled_dot_product_attention_with_config to unified implementation\n");
+
+    // This function already uses QuantizationConfig, so route directly
+    return quantized_scaled_dot_product_attention_unified(query, key, value, config);
+}
+
+torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_enhanced(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const QuantizationConfig& config
+) {
+    printf("🔀 COMPATIBILITY: Routing quantized_scaled_dot_product_attention_enhanced to unified implementation\n");
+
+    // This function already uses QuantizationConfig, so route directly
+    return quantized_scaled_dot_product_attention_unified(query, key, value, config);
 }
 
 // Utility functions for Python binding
