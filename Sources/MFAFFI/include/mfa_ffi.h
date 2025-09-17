@@ -41,6 +41,29 @@ enum {
 typedef int mfa_precision_t;
 
 /**
+ * @brief Mask types supported by the attention FFI
+ */
+enum {
+    MFA_MASK_TYPE_NONE = 0,
+    MFA_MASK_TYPE_BOOL = 1,
+    MFA_MASK_TYPE_ADDITIVE = 2
+};
+
+typedef int mfa_mask_type_t;
+
+/**
+ * @brief Scalar element encodings for attention masks
+ */
+enum {
+    MFA_MASK_SCALAR_BYTE = 0,
+    MFA_MASK_SCALAR_FP16 = 1,
+    MFA_MASK_SCALAR_BF16 = 2,
+    MFA_MASK_SCALAR_FP32 = 3
+};
+
+typedef int mfa_mask_scalar_t;
+
+/**
  * @brief Opaque handle to MFA context (Metal device/command queue)
  */
 typedef void* mfa_context_t;
@@ -205,7 +228,14 @@ mfa_error_t mfa_attention_forward(
     bool transpose_q,
     bool transpose_k,
     bool transpose_v,
-    bool transpose_o
+    bool transpose_o,
+    const void* mask_ptr,
+    size_t mask_size_bytes,
+    const int64_t* mask_shape,
+    const int64_t* mask_strides,
+    uint32_t mask_ndim,
+    mfa_mask_type_t mask_type,
+    mfa_mask_scalar_t mask_scalar_type
 );
 
 /**
