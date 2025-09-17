@@ -263,6 +263,10 @@ extern "C" {
     mfa_error_t mfa_buffer_from_ptr_with_strides(mfa_context_t context, void* data_ptr, size_t size_bytes,
                                                   const int64_t* shape, const int64_t* strides, uint32_t ndim,
                                                   mfa_buffer_t* buffer);
+    mfa_error_t mfa_buffer_from_mtl_buffer(mfa_context_t context, void* metal_buffer, size_t size_bytes, mfa_buffer_t* buffer);
+    mfa_error_t mfa_buffer_from_mtl_buffer_with_strides(mfa_context_t context, void* metal_buffer, size_t size_bytes,
+                                                        const int64_t* shape, const int64_t* strides, uint32_t ndim,
+                                                        mfa_buffer_t* buffer);
     void* mfa_buffer_contents(mfa_buffer_t buffer);
     void mfa_destroy_buffer(mfa_buffer_t buffer);
 
@@ -462,6 +466,15 @@ private:
         const torch::Tensor& v,
         bool is_causal,
         float softmax_scale
+    );
+
+    static torch::Tensor call_swift_flash_attention_impl(
+        torch::Tensor q,
+        torch::Tensor k,
+        torch::Tensor v,
+        bool is_causal,
+        float softmax_scale,
+        bool use_mps_buffers
     );
 
     static mfa_precision_t torch_dtype_to_mfa_dtype(torch::ScalarType dtype);

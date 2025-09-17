@@ -23,6 +23,7 @@ ext_modules = [
         sources=[
             str(CURRENT_DIR / "src" / "metal_sdpa_backend.cpp"),
             str(CURRENT_DIR / "src" / "python_bindings.cpp"),
+            str(CURRENT_DIR / "src" / "mps_utils.mm"),
         ],
         include_dirs=[
             str(CURRENT_DIR / "include"),
