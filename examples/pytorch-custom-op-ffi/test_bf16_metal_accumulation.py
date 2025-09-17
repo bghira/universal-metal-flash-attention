@@ -12,17 +12,19 @@ Key investigation areas:
 4. Complex vs simple attention pattern NaN generation isolation
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
-import torch
+
 import numpy as np
+import torch
 
 # Add the python package to path
 sys.path.insert(0, str(Path(__file__).parent / "python"))
 
 try:
     import metal_sdpa_extension
+
     METAL_AVAILABLE = True
     print("✓ metal_sdpa_extension imported successfully")
 except ImportError as e:
@@ -34,7 +36,7 @@ def print_test_header(test_name):
     """Print formatted test header."""
     print(f"\n{'='*70}")
     print(f"TEST: {test_name}")
-    print('='*70)
+    print("=" * 70)
 
 
 def print_test_result(passed, message=""):
@@ -44,7 +46,9 @@ def print_test_result(passed, message=""):
     return passed
 
 
-def create_simple_attention_pattern(batch_size=1, num_heads=1, seq_len=32, head_dim=64, dtype=torch.float32):
+def create_simple_attention_pattern(
+    batch_size=1, num_heads=1, seq_len=32, head_dim=64, dtype=torch.float32
+):
     """Create simple, well-conditioned attention tensors that should not cause overflow."""
     # Use small, normalized values to prevent overflow
     scale = 0.05  # Very small scale to avoid accumulation overflow
@@ -61,7 +65,9 @@ def create_simple_attention_pattern(batch_size=1, num_heads=1, seq_len=32, head_
     return q, k, v
 
 
-def create_complex_attention_pattern(batch_size=2, num_heads=8, seq_len=128, head_dim=64, dtype=torch.float32):
+def create_complex_attention_pattern(
+    batch_size=2, num_heads=8, seq_len=128, head_dim=64, dtype=torch.float32
+):
     """Create complex attention patterns that stress the accumulation pipeline."""
     # Create patterns that will stress accumulation precision
     q = torch.randn(batch_size, num_heads, seq_len, head_dim, dtype=dtype)
@@ -70,11 +76,11 @@ def create_complex_attention_pattern(batch_size=2, num_heads=8, seq_len=128, hea
 
     # Add some challenging patterns for accumulation
     # Pattern 1: Large dynamic range
-    q[:, :, :seq_len//4, :] *= 10.0  # Some elements much larger
-    k[:, :, seq_len//2:, :] *= 0.1   # Some elements much smaller
+    q[:, :, : seq_len // 4, :] *= 10.0  # Some elements much larger
+    k[:, :, seq_len // 2 :, :] *= 0.1  # Some elements much smaller
 
     # Pattern 2: Create correlation patterns that will produce large attention scores
-    k[:, :, :seq_len//2, :] = q[:, :, :seq_len//2, :] * 2.0  # High correlation
+    k[:, :, : seq_len // 2, :] = q[:, :, : seq_len // 2, :] * 2.0  # High correlation
 
     return q, k, v
 
@@ -88,17 +94,17 @@ def analyze_attention_scores(q, k, scale=None):
     scores = torch.matmul(q, k.transpose(-2, -1)) * scale
 
     stats = {
-        'min': scores.min().item(),
-        'max': scores.max().item(),
-        'mean': scores.mean().item(),
-        'std': scores.std().item(),
-        'has_nan': torch.isnan(scores).any().item(),
-        'has_inf': torch.isinf(scores).any().item(),
+        "min": scores.min().item(),
+        "max": scores.max().item(),
+        "mean": scores.mean().item(),
+        "std": scores.std().item(),
+        "has_nan": torch.isnan(scores).any().item(),
+        "has_inf": torch.isinf(scores).any().item(),
     }
 
     # Check for potential overflow in softmax
     max_score = scores.max().item()
-    stats['softmax_overflow_risk'] = max_score > 80.0  # exp(80) is near float32 limit
+    stats["softmax_overflow_risk"] = max_score > 80.0  # exp(80) is near float32 limit
 
     return stats
 
@@ -115,7 +121,7 @@ def test_1_bf16_simple_accumulation():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -135,18 +141,30 @@ def test_1_bf16_simple_accumulation():
         fp32_scores = analyze_attention_scores(q_fp32, k_fp32)
         bf16_scores = analyze_attention_scores(q_bf16.float(), k_bf16.float())
 
-        print(f"FP32 attention scores: min={fp32_scores['min']:.3f}, max={fp32_scores['max']:.3f}, "
-              f"overflow_risk={fp32_scores['softmax_overflow_risk']}")
-        print(f"BF16 attention scores: min={bf16_scores['min']:.3f}, max={bf16_scores['max']:.3f}, "
-              f"overflow_risk={bf16_scores['softmax_overflow_risk']}")
+        print(
+            f"FP32 attention scores: min={fp32_scores['min']:.3f}, max={fp32_scores['max']:.3f}, "
+            f"overflow_risk={fp32_scores['softmax_overflow_risk']}"
+        )
+        print(
+            f"BF16 attention scores: min={bf16_scores['min']:.3f}, max={bf16_scores['max']:.3f}, "
+            f"overflow_risk={bf16_scores['softmax_overflow_risk']}"
+        )
 
         # Compute attention
-        output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_fp32, k_fp32, v_fp32)
-        output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_bf16, k_bf16, v_bf16)
+        output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+            q_fp32, k_fp32, v_fp32
+        )
+        output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+            q_bf16, k_bf16, v_bf16
+        )
 
         # Check for NaN/Inf
-        fp32_valid = not torch.isnan(output_fp32).any() and not torch.isinf(output_fp32).any()
-        bf16_valid = not torch.isnan(output_bf16).any() and not torch.isinf(output_bf16).any()
+        fp32_valid = (
+            not torch.isnan(output_fp32).any() and not torch.isinf(output_fp32).any()
+        )
+        bf16_valid = (
+            not torch.isnan(output_bf16).any() and not torch.isinf(output_bf16).any()
+        )
 
         print(f"FP32 output valid: {fp32_valid}")
         print(f"BF16 output valid: {bf16_valid}")
@@ -167,11 +185,19 @@ def test_1_bf16_simple_accumulation():
             diff_reasonable = max_abs_diff < 0.01 and max_rel_diff < 0.1
 
             passed = fp32_valid and bf16_valid and diff_reasonable
-            return print_test_result(passed,
-                "Simple BF16 accumulation works correctly" if passed
-                else f"Simple BF16 accumulation failed (abs_diff={max_abs_diff:.6f}, rel_diff={max_rel_diff:.4f})")
+            return print_test_result(
+                passed,
+                (
+                    "Simple BF16 accumulation works correctly"
+                    if passed
+                    else f"Simple BF16 accumulation failed (abs_diff={max_abs_diff:.6f}, rel_diff={max_rel_diff:.4f})"
+                ),
+            )
         else:
-            return print_test_result(False, f"Invalid outputs: FP32_valid={fp32_valid}, BF16_valid={bf16_valid}")
+            return print_test_result(
+                False,
+                f"Invalid outputs: FP32_valid={fp32_valid}, BF16_valid={bf16_valid}",
+            )
 
     except Exception as e:
         return print_test_result(False, f"Exception in simple accumulation test: {e}")
@@ -189,7 +215,7 @@ def test_2_bf16_complex_accumulation():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -209,14 +235,20 @@ def test_2_bf16_complex_accumulation():
         fp32_scores = analyze_attention_scores(q_fp32, k_fp32)
         bf16_scores = analyze_attention_scores(q_bf16.float(), k_bf16.float())
 
-        print(f"FP32 attention scores: min={fp32_scores['min']:.3f}, max={fp32_scores['max']:.3f}, "
-              f"overflow_risk={fp32_scores['softmax_overflow_risk']}")
-        print(f"BF16 attention scores: min={bf16_scores['min']:.3f}, max={bf16_scores['max']:.3f}, "
-              f"overflow_risk={bf16_scores['softmax_overflow_risk']}")
+        print(
+            f"FP32 attention scores: min={fp32_scores['min']:.3f}, max={fp32_scores['max']:.3f}, "
+            f"overflow_risk={fp32_scores['softmax_overflow_risk']}"
+        )
+        print(
+            f"BF16 attention scores: min={bf16_scores['min']:.3f}, max={bf16_scores['max']:.3f}, "
+            f"overflow_risk={bf16_scores['softmax_overflow_risk']}"
+        )
 
         # This is the critical test - complex patterns with bf16
         try:
-            output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_fp32, k_fp32, v_fp32)
+            output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                q_fp32, k_fp32, v_fp32
+            )
             fp32_success = True
         except Exception as e:
             print(f"FP32 computation failed: {e}")
@@ -224,7 +256,9 @@ def test_2_bf16_complex_accumulation():
             fp32_success = False
 
         try:
-            output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_bf16, k_bf16, v_bf16)
+            output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                q_bf16, k_bf16, v_bf16
+            )
             bf16_success = True
         except Exception as e:
             print(f"BF16 computation failed: {e}")
@@ -232,27 +266,43 @@ def test_2_bf16_complex_accumulation():
             bf16_success = False
 
         if not fp32_success or not bf16_success:
-            return print_test_result(False, f"Computation failed: FP32={fp32_success}, BF16={bf16_success}")
+            return print_test_result(
+                False, f"Computation failed: FP32={fp32_success}, BF16={bf16_success}"
+            )
 
         # Check for NaN/Inf in outputs
-        fp32_valid = not torch.isnan(output_fp32).any() and not torch.isinf(output_fp32).any()
-        bf16_valid = not torch.isnan(output_bf16).any() and not torch.isinf(output_bf16).any()
+        fp32_valid = (
+            not torch.isnan(output_fp32).any() and not torch.isinf(output_fp32).any()
+        )
+        bf16_valid = (
+            not torch.isnan(output_bf16).any() and not torch.isinf(output_bf16).any()
+        )
 
         print(f"FP32 output valid: {fp32_valid}")
         print(f"BF16 output valid: {bf16_valid}")
 
         if fp32_valid:
-            print(f"FP32 output range: [{output_fp32.min():.6f}, {output_fp32.max():.6f}]")
+            print(
+                f"FP32 output range: [{output_fp32.min():.6f}, {output_fp32.max():.6f}]"
+            )
         if bf16_valid:
-            print(f"BF16 output range: [{output_bf16.min():.6f}, {output_bf16.max():.6f}]")
+            print(
+                f"BF16 output range: [{output_bf16.min():.6f}, {output_bf16.max():.6f}]"
+            )
 
         # The key insight: does complex attention cause NaN in bf16 but not fp32?
         bf16_fails_complex = fp32_valid and not bf16_valid
 
         if bf16_fails_complex:
-            print("🚨 CRITICAL FINDING: BF16 fails on complex patterns while FP32 succeeds")
-            print("    This indicates bf16 accumulation precision issues in Metal kernels")
-            return print_test_result(False, "BF16 accumulation fails on complex patterns (IDENTIFIED ISSUE)")
+            print(
+                "🚨 CRITICAL FINDING: BF16 fails on complex patterns while FP32 succeeds"
+            )
+            print(
+                "    This indicates bf16 accumulation precision issues in Metal kernels"
+            )
+            return print_test_result(
+                False, "BF16 accumulation fails on complex patterns (IDENTIFIED ISSUE)"
+            )
 
         if fp32_valid and bf16_valid:
             # Both succeeded - compare quality
@@ -266,11 +316,19 @@ def test_2_bf16_complex_accumulation():
             diff_reasonable = max_abs_diff < 1.0  # Much more generous threshold
 
             passed = diff_reasonable
-            return print_test_result(passed,
-                "Complex BF16 accumulation works within tolerance" if passed
-                else f"Complex BF16 accumulation shows excessive error (abs_diff={max_abs_diff:.6f})")
+            return print_test_result(
+                passed,
+                (
+                    "Complex BF16 accumulation works within tolerance"
+                    if passed
+                    else f"Complex BF16 accumulation shows excessive error (abs_diff={max_abs_diff:.6f})"
+                ),
+            )
         else:
-            return print_test_result(False, f"Both computations failed: FP32_valid={fp32_valid}, BF16_valid={bf16_valid}")
+            return print_test_result(
+                False,
+                f"Both computations failed: FP32_valid={fp32_valid}, BF16_valid={bf16_valid}",
+            )
 
     except Exception as e:
         return print_test_result(False, f"Exception in complex accumulation test: {e}")
@@ -288,7 +346,7 @@ def test_3_accumulation_dtype_detection():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -320,18 +378,24 @@ def test_3_accumulation_dtype_detection():
 
         for pattern_name, q, k, v in patterns:
             print(f"\nTesting pattern: {pattern_name}")
-            print(f"  Input ranges: Q[{q.min():.6f}, {q.max():.6f}], "
-                  f"K[{k.min():.6f}, {k.max():.6f}], V[{v.min():.6f}, {v.max():.6f}]")
+            print(
+                f"  Input ranges: Q[{q.min():.6f}, {q.max():.6f}], "
+                f"K[{k.min():.6f}, {k.max():.6f}], V[{v.min():.6f}, {v.max():.6f}]"
+            )
 
             try:
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
                 valid = not torch.isnan(output).any() and not torch.isinf(output).any()
 
                 print(f"  Output valid: {valid}")
                 if valid:
                     print(f"  Output range: [{output.min():.6f}, {output.max():.6f}]")
                 else:
-                    print(f"  Output contains: NaN={torch.isnan(output).any()}, Inf={torch.isinf(output).any()}")
+                    print(
+                        f"  Output contains: NaN={torch.isnan(output).any()}, Inf={torch.isinf(output).any()}"
+                    )
                     accumulation_issues.append(pattern_name)
 
                 all_patterns_valid = all_patterns_valid and valid
@@ -342,16 +406,27 @@ def test_3_accumulation_dtype_detection():
                 all_patterns_valid = False
 
         if accumulation_issues:
-            print(f"\n🚨 ACCUMULATION ISSUES DETECTED in patterns: {accumulation_issues}")
-            print("    This suggests bf16 accumulation precision problems in Metal kernels")
+            print(
+                f"\n🚨 ACCUMULATION ISSUES DETECTED in patterns: {accumulation_issues}"
+            )
+            print(
+                "    This suggests bf16 accumulation precision problems in Metal kernels"
+            )
 
         passed = all_patterns_valid
-        return print_test_result(passed,
-            "No accumulation dtype issues detected" if passed
-            else f"Accumulation dtype issues found in: {accumulation_issues}")
+        return print_test_result(
+            passed,
+            (
+                "No accumulation dtype issues detected"
+                if passed
+                else f"Accumulation dtype issues found in: {accumulation_issues}"
+            ),
+        )
 
     except Exception as e:
-        return print_test_result(False, f"Exception in accumulation dtype detection: {e}")
+        return print_test_result(
+            False, f"Exception in accumulation dtype detection: {e}"
+        )
 
 
 def test_4_overflow_underflow_detection():
@@ -366,7 +441,7 @@ def test_4_overflow_underflow_detection():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -416,7 +491,9 @@ def test_4_overflow_underflow_detection():
                 print(f"  Predicted underflow risk: {underflow_risk}")
 
             try:
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
 
                 has_nan = torch.isnan(output).any().item()
                 has_inf = torch.isinf(output).any().item()
@@ -451,17 +528,26 @@ def test_4_overflow_underflow_detection():
         has_underflow_issues = len(underflow_cases) > 0
 
         if has_overflow_issues:
-            print("🚨 OVERFLOW DETECTED: BF16 accumulation overflows on large attention scores")
+            print(
+                "🚨 OVERFLOW DETECTED: BF16 accumulation overflows on large attention scores"
+            )
         if has_underflow_issues:
             print("🚨 UNDERFLOW DETECTED: BF16 accumulation underflows on small values")
 
         passed = len(successful_cases) == len(test_cases)
-        return print_test_result(passed,
-            "No overflow/underflow issues detected" if passed
-            else f"Issues found - Overflow: {overflow_cases}, Underflow: {underflow_cases}")
+        return print_test_result(
+            passed,
+            (
+                "No overflow/underflow issues detected"
+                if passed
+                else f"Issues found - Overflow: {overflow_cases}, Underflow: {underflow_cases}"
+            ),
+        )
 
     except Exception as e:
-        return print_test_result(False, f"Exception in overflow/underflow detection: {e}")
+        return print_test_result(
+            False, f"Exception in overflow/underflow detection: {e}"
+        )
 
 
 def main():
@@ -476,8 +562,12 @@ def main():
         print("\n⚠️  Metal extension not available - tests will be skipped")
         return
 
-    print("\nThis test suite isolates bf16 accumulation precision issues in Metal kernels")
-    print("that cause NaN values in complex attention patterns while simple patterns work.")
+    print(
+        "\nThis test suite isolates bf16 accumulation precision issues in Metal kernels"
+    )
+    print(
+        "that cause NaN values in complex attention patterns while simple patterns work."
+    )
 
     # Run all diagnostic tests
     test_results = []
@@ -490,7 +580,7 @@ def main():
     # Summary and analysis
     print(f"\n{'='*70}")
     print("DIAGNOSTIC SUMMARY")
-    print('='*70)
+    print("=" * 70)
 
     passed_count = sum(test_results)
     total_count = len(test_results)
@@ -505,22 +595,24 @@ def main():
         print("\nDIAGNOSIS:")
 
         if not test_results[0] and not test_results[1]:
-            print("• Both simple and complex patterns fail → Fundamental bf16 support issue")
+            print(
+                "• Both simple and complex patterns fail → Fundamental bf16 support issue"
+            )
         elif test_results[0] and not test_results[1]:
-            print("• Simple patterns work, complex patterns fail → Accumulation precision issue")
+            print(
+                "• Simple patterns work, complex patterns fail → Accumulation precision issue"
+            )
             print("• LIKELY CAUSE: Metal kernels use bf16 accumulation instead of fp32")
 
         if not test_results[2]:
-            print("• Accumulation dtype mismatch detected → Metal kernel configuration issue")
+            print(
+                "• Accumulation dtype mismatch detected → Metal kernel configuration issue"
+            )
 
         if not test_results[3]:
-            print("• Overflow/underflow detected → BF16 range limitations in accumulation")
-
-        print(f"\nRECOMMENDED FIXES:")
-        print("1. Check AttentionDescriptor+Precisions.swift for bf16 register precision settings")
-        print("2. Verify Metal kernels use FP32 accumulation for bf16 inputs (registerPrecisions)")
-        print("3. Check MFABridge precision conversion (convertCFFIPrecisionToSwift)")
-        print("4. Ensure Metal simdgroup_matrix_storage uses FP32 for accumulation")
+            print(
+                "• Overflow/underflow detected → BF16 range limitations in accumulation"
+            )
 
 
 if __name__ == "__main__":
