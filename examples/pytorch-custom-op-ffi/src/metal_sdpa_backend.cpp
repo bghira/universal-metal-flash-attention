@@ -1847,7 +1847,7 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
             final_output = convert_metal_to_flux_layout(output);
         }
 
-        // CRITICAL FIX: Ensure tensor data is copied before buffer cleanup to prevent use-after-free
+        // IMPORTANT: Ensure tensor data is copied before buffer cleanup to prevent use-after-free
         // This is especially important for small tensors where PyTorch may not automatically copy
         printf("🧹 Creating safe copy of output tensor before buffer cleanup...\n");
         torch::Tensor safe_output = final_output.clone().contiguous();
