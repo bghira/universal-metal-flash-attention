@@ -1,160 +1,99 @@
-# Quantized Metal SIMD Flash Attention Implementation
+# Quantised Metal SIMD Implementation (2025)
 
-## Overview
+This document explains how the current Metal kernels handle INT8/INT4 tensors, how the
+kernel generator binds quantisation metadata, and where the runtime blockwise pipeline
+plugs in.
 
-This document describes the actual implementation of quantized Flash Attention using Metal SIMD group operations on Apple Silicon GPUs. The implementation achieves significant memory savings while maintaining competitive performance through GPU-accelerated quantized matrix operations.
+## Building Blocks
 
-## Architecture
+| Component | Location | Purpose |
+| --- | --- | --- |
+| Metal kernels | `metal-flash-attention/Sources/FlashAttention/GEMM/GEMMHeaders.swift` & friends | Provide `load_quantized_int8/int4` helpers that dequantise directly into register tiles. |
+| Kernel generator | `AttentionKernel+Source.swift`, `AttentionKernel+GluonOptimizations.swift` | Emits kernel source with the appropriate bindings for quantised operands. |
+| Runtime quantiser | `GEMMRuntimeQuantization.swift` + `.metal` | Fused GPU pre-processing for symmetric blockwise INT8 (centering + scale computation). |
+| Swift API | `QuantizedAttention.swift` | Configures precision/strategy per operand, manages `QuantizedTensor` lifetimes, and calls into kernels. |
 
-### Core Components
+## Metadata Bound Per Operand
 
-1. **Metal SIMD Group Operations**: Uses `simdgroup_matrix_storage<T>` for efficient GPU matrix operations
-2. **AttentionKernel Framework**: Integrates with the existing kernel generation system
-3. **Quantized Load Functions**: GPU-optimized `load_quantized_int8` and `load_quantized_int4` operations
-4. **Automatic Parameter Binding**: Dynamic buffer binding generation for quantization parameters
+For every operand marked as `.INT8` or `.INT4`, the generated Metal function receives four
+buffers:
 
-### Precision Strategy
+```metal
+constant float  &q_scale             [[buffer(i)]];
+constant int32_t&q_zero_point        [[buffer(i+1)]];
+constant uint   &q_strategy          [[buffer(i+2)]];   // QuantizationStrategy raw value
+constant uint   &q_strategy_version  [[buffer(i+3)]];   // Increment on breaking changes
+```
 
-- **Quantized Inputs**: INT8/INT4 for Query, Key, Value tensors
-- **FP32 Computation**: All intermediate computations in FP32 after dequantization
-- **FP32 Outputs**: Gradients and results in FP32 for numerical stability
-
-## Implementation Details
-
-### 1. Quantized Tensor Representation
+This matches the Swift-side structure:
 
 ```swift
-public struct QuantizedTensor {
-    public let data: MTLBuffer           // Raw quantized data (INT8/INT4)
-    public let parameters: QuantizationParameters
-
-    public struct QuantizationParameters {
-        public let precision: GEMMOperandPrecision  // .INT8 or .INT4
-        public let scale: Float                     // Scaling factor
-        public let zeroPoint: Int32                 // Zero point (symmetric = 0)
-        public let shape: [Int]                     // Tensor dimensions
-    }
+struct QuantizationParameters: Codable {
+  var scale: Float
+  var zeroPoint: Int32
+  var precision: GEMMOperandPrecision
+  var mode: QuantizationMode
+  var strategy: QuantizationStrategy   // legacy / asymmetric / symmetric
+  var strategyVersion: UInt8
+  var additionalScales: [Float]?       // optional block tables
+  var additionalZeroPoints: [Int32]?
 }
 ```
 
-### 2. Metal SIMD Integration
+The helper `quantizationBindings(for:)` in `MultiHeadAttention.swift` iterates Q/K/V/O and
+binds only the operands that actually have quantisation metadata.
 
-The implementation extends the existing `AttentionKernel` framework with quantization support:
+## Load/Store Helpers
 
-```swift
-extension AttentionKernel {
-    func isQuantized(_ operand: AttentionOperand) -> Bool {
-        guard let memoryPrecision = memoryPrecisions[operand] else {
-            fatalError("Memory precision not specified")
-        }
-        return memoryPrecision == .INT8 || memoryPrecision == .INT4
-    }
-
-    func loadCall(_ operand: AttentionOperand, src: String, leadingDim: String,
-                  origin: String, transpose: String) -> String {
-        if isQuantized(operand) {
-            let operandName = "\(operand)".lowercased()
-            return """
-            \(loadFunction(operand))(
-                \(src), \(leadingDim),
-                \(origin), \(operandName)_scale, \(operandName)_zero_point, \(transpose))
-            """
-        } else {
-            return """
-            \(loadFunction(operand))(
-                \(src), \(leadingDim),
-                \(origin), \(transpose))
-            """
-        }
-    }
-}
-```
-
-### 3. GPU Kernel Generation
-
-The system automatically generates Metal kernels with appropriate buffer bindings:
-
-#### Regular Operand Buffers
+`GEMMHeaders.swift` provides overloads that the generator calls automatically:
 
 ```metal
-device char* Q [[buffer(0)]],     // INT8 quantized query
-device char* K [[buffer(1)]],     // INT8 quantized key
-device char* V [[buffer(2)]],     // INT8 quantized value
-device float* O [[buffer(3)]],    // FP32 output
+METAL_FUNC void load_quantized_int8(
+    const device char *src,
+    uint elements_per_row,
+    ushort2 matrix_origin,
+    float scale,
+    int32_t zero_point,
+    bool transpose_matrix = false)
 ```
 
-#### Quantization Parameter Buffers
+These helpers dequantise directly into `simdgroup_matrix_storage<float>` registers so the
+main GEMM loop can continue to use the standard `multiply` instruction. INT4 uses a packed
+representation (two 4-bit values per byte) with a similar helper.
 
-```metal
-constant float &q_scale [[buffer(4)]],
-constant int32_t &q_zero_point [[buffer(5)]],
-constant float &k_scale [[buffer(6)]],
-constant int32_t &k_zero_point [[buffer(7)]],
-constant float &v_scale [[buffer(8)]],
-constant int32_t &v_zero_point [[buffer(9)]],
-```
+## Blockwise Symmetric Pipeline
 
-### 4. SIMD Matrix Operations
+For symmetric INT8 you can request `.blockwise(blockSize: 64, granularity: .perHead)` while
+setting `strategy = .symmetric`. The Swift runtime then:
 
-The implementation uses Metal's built-in SIMD group matrix functions:
+1. Calls `GEMMRuntimeQuantization.quantizeBlockwiseCenteredTensor`, which
+   - computes block means on GPU,
+   - subtracts them before quantising,
+   - writes per-block scale / bias tables, and
+   - returns a `QuantizedTensor` with those buffers attached.
+2. Feeds the tensor into `QuantizedAttention.forward`, which
+   - binds the per-block scale arrays (via `additionalScales`),
+   - restores the bias after GEMM using the stored block means,
+   - routes through multi-head if needed.
 
-```metal
-// Load quantized data with automatic dequantization
-Q_sram[d / 8].load_quantized_int8(
-    Q_src, leading_dimension,
-    origin, q_scale, q_zero_point, transpose);
+If the fused runtime quantiser is unavailable (e.g. for non-symmetric strategies), the
+code falls back to CPU quantisation but still binds the same metadata.
 
-// Perform GPU-accelerated matrix multiplication
-simdgroup_matrix_storage<float> result;
-result.multiply(Q_sram[i], K_sram[j]);
-```
+## Interaction With GLUON Heuristics
 
-## Performance Characteristics
+GLUON (`optimizedSoftmax`) and the baseline path are both aware of the additional buffers;
+no special-case code is required. The subtiled softmax runs on the dequantised FP32 tiles,
+so accuracy is governed by the quantiser rather than the optimisation itself.
 
-### Memory Efficiency
+## Practical Tips
 
-- **INT8 Quantization**: 4x memory reduction vs FP32, 2x vs FP16
-- **INT4 Quantization**: 8x memory reduction vs FP32, 4x vs FP16
+- Always run `swift build -c release` before benchmarking; Metal shaders are emitted in
+  the same step.
+- Verify kernel signatures with `swift test --filter QuantizedAttentionTest` after touching
+  binding logic; the test suite inspects the emitted source and catches missing buffers.
+- When adding new strategies or block layouts, bump `QuantizationParameters.currentStrategyVersion`
+  to avoid cross-version deserialisation surprises.
 
-### Benchmark Results
-
-Based on our test suite running on Apple Silicon:
-
-| Precision | Avg Time (ms) | GOPS | Memory Usage |
-|-----------|---------------|------|--------------|
-| FP16      | 0.96          | 34.98| 100%         |
-| INT8      | 1.10          | 30.46| 50%          |
-| INT4      | 1.09          | 30.90| 25%          |
-
-### Key Findings
-
-1. **Competitive Performance**: INT8/INT4 achieve ~87% of FP16 GOPS
-2. **Memory Bandwidth Bound**: On small matrices, dequantization overhead is minimal
-3. **GPU Acceleration**: SIMD group operations maintain efficiency
-4. **Numerical Stability**: FP32 intermediate precision prevents accuracy loss
-
-## Integration with Existing Codebase
-
-### AttentionKernel Extensions
-
-The quantized implementation seamlessly integrates with existing attention kernels:
-
-1. **Load Function Mapping**: Automatic selection of `load_quantized_int8/int4`
-2. **Buffer Binding Generation**: Dynamic addition of quantization parameters
-3. **Kernel Source Generation**: Unified code path for quantized and non-quantized
-
-### QuantizedAttention API
-
-```swift
-let quantizedAttention = QuantizedAttention(device: device)
-
-// Create quantized tensors
-let queryTensor = QuantizedTensor.from(
-    device: device, floatData: queryData,
-    shape: [batchSize, seqLen, headDim], precision: .INT8)
-
-// Execute quantized attention
-let commandBuffer = quantizedAttention.forward(
-    query: queryTensor, key: keyTensor, value: valueTensor,
-    output: outputBuffer, descriptor: descriptor)
-```
+This design keeps the Metal kernels agnostic to the higher-level strategy logic while
+exposing enough metadata to evolve quantisation behaviour without rewriting the core
+GEMM/softmax loops.

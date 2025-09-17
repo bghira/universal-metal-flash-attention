@@ -1,4 +1,4 @@
-#!/usr/bin/env /Users/kash/src/universal-metal-flash-attention/.venv/bin/python3
+#!/usr/bin/env python3
 """
 Quick FLUX benchmark for Metal SDPA - Tests one resolution with minimal steps
 """
@@ -13,20 +13,51 @@ from typing import Dict, Optional
 import torch
 import torch.nn.functional as F
 
-# Set up library paths for Metal FFI
-project_root = Path("/Users/kash/src/universal-metal-flash-attention")
-lib_path = f"{project_root}/.build/arm64-apple-macosx/release:{project_root}/.build/arm64-apple-macosx/debug"
-os.environ["DYLD_LIBRARY_PATH"] = lib_path + ":" + os.environ.get("DYLD_LIBRARY_PATH", "")
+# Resolve repository root dynamically
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Add the pytorch-custom-op-ffi to path
-sys.path.insert(0, str(project_root / "examples" / "pytorch-custom-op-ffi"))
+
+def _prepend_dyld_library_path(paths) -> None:
+    existing = os.environ.get("DYLD_LIBRARY_PATH", "")
+    valid = [str(path) for path in paths if path.exists()]
+    if not valid:
+        return
+    prefix = ":".join(valid)
+    os.environ["DYLD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
+
+
+_prepend_dyld_library_path(
+    [
+        PROJECT_ROOT / ".build" / "arm64-apple-macosx" / "release",
+        PROJECT_ROOT / ".build" / "arm64-apple-macosx" / "debug",
+    ]
+)
+
+# Add the PyTorch custom op path to sys.path
+sys.path.insert(0, str(PROJECT_ROOT / "examples" / "pytorch-custom-op-ffi"))
+
+
+def _maybe_add_venv_site_packages() -> None:
+    venv_root = Path(os.environ.get("VIRTUAL_ENV", PROJECT_ROOT / ".venv"))
+    if not venv_root.exists():
+        return
+    for site_packages in venv_root.glob("lib/python*/site-packages"):
+        if site_packages.is_dir():
+            sys.path.insert(0, str(site_packages))
+            break
+
+
+_maybe_add_venv_site_packages()
 
 # Try to import Metal SDPA extension
 try:
     import metal_sdpa_extension
+
     METAL_PYTORCH_AVAILABLE = True
     print("✅ Metal PyTorch Custom Op available")
-    HAS_QUANTIZATION = hasattr(metal_sdpa_extension, 'quantized_scaled_dot_product_attention')
+    HAS_QUANTIZATION = hasattr(
+        metal_sdpa_extension, "quantized_scaled_dot_product_attention"
+    )
     if HAS_QUANTIZATION:
         print("✅ Quantization support available")
 except ImportError as e:
@@ -36,6 +67,7 @@ except ImportError as e:
 
 try:
     from diffusers import FluxPipeline
+
     DIFFUSERS_AVAILABLE = True
     print("✅ Diffusers available")
 except ImportError:
@@ -78,21 +110,29 @@ def create_metal_sdpa_wrapper(quantization_mode: Optional[str] = None):
             # Use quantized version if quantization mode is specified
             if quantization_mode and HAS_QUANTIZATION:
                 result = metal_sdpa_extension.quantized_scaled_dot_product_attention(
-                    query, key, value,
+                    query,
+                    key,
+                    value,
                     precision=quantization_mode,  # 'int4' or 'int8'
                     is_causal=is_causal,
-                    scale=scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5))
+                    scale=(
+                        scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5))
+                    ),
                 )
                 return result
             else:
                 # Use regular Metal SDPA without quantization
                 result = metal_sdpa_extension.metal_scaled_dot_product_attention(
-                    query, key, value,
+                    query,
+                    key,
+                    value,
                     attn_mask=attn_mask,
                     dropout_p=dropout_p,
                     is_causal=is_causal,
-                    scale=scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5)),
-                    enable_gqa=False
+                    scale=(
+                        scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5))
+                    ),
+                    enable_gqa=False,
                 )
                 return result
         except Exception:
@@ -128,9 +168,9 @@ def run_quick_benchmark():
         print("❌ Cannot run benchmark without diffusers")
         return
 
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("🚀 FLUX Quick Benchmark - 512x512, 2 steps")
-    print("="*60)
+    print("=" * 60)
 
     configs = [
         ("PyTorch Vanilla", None),
@@ -138,10 +178,12 @@ def run_quick_benchmark():
     ]
 
     if HAS_QUANTIZATION:
-        configs.extend([
-            ("Metal UMFA INT8", "int8"),
-            ("Metal UMFA INT4", "int4"),
-        ])
+        configs.extend(
+            [
+                ("Metal UMFA INT8", "int8"),
+                ("Metal UMFA INT4", "int4"),
+            ]
+        )
 
     results = []
 
@@ -164,8 +206,7 @@ def run_quick_benchmark():
             # Load pipeline
             print("  Loading pipeline...")
             pipe = FluxPipeline.from_pretrained(
-                "black-forest-labs/FLUX.1-schnell",
-                torch_dtype=torch.bfloat16
+                "black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16
             )
             pipe = pipe.to("mps")
 
@@ -186,16 +227,13 @@ def run_quick_benchmark():
             generation_time = time.time() - start_time
 
             # Save result
-            output_dir = Path("/Users/kash/src/universal-metal-flash-attention/examples/flux/output/quick_test")
+            output_dir = PROJECT_ROOT / "examples" / "flux" / "output" / "quick_test"
             output_dir.mkdir(parents=True, exist_ok=True)
-            filename = config_name.lower().replace(' ', '_') + ".png"
+            filename = config_name.lower().replace(" ", "_") + ".png"
             image.save(output_dir / filename)
 
             print(f"  ✅ Time: {generation_time:.2f}s")
-            results.append({
-                "config": config_name,
-                "time": generation_time
-            })
+            results.append({"config": config_name, "time": generation_time})
 
             # Clean up
             del pipe
@@ -205,20 +243,16 @@ def run_quick_benchmark():
 
         except Exception as e:
             print(f"  ❌ Failed: {e}")
-            results.append({
-                "config": config_name,
-                "time": None,
-                "error": str(e)
-            })
+            results.append({"config": config_name, "time": None, "error": str(e)})
 
         finally:
             # Restore original attention
             restore_attention(original_sdpa)
 
     # Print summary
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("📈 RESULTS SUMMARY")
-    print("="*60)
+    print("=" * 60)
 
     baseline_time = None
     for result in results:

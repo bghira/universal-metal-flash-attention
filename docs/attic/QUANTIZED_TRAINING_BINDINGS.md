@@ -1,269 +1,70 @@
-# Universal Quantized Flash Attention: Cross-Language Bindings
+# Quantised Flash Attention – Cross‑Language Bindings (2025)
 
-## Overview
+This document summarises the C FFI surface that Universal Metal Flash Attention exports
+and how the shipped examples (Objective‑C, Python, Rust, Flux) consume it. It replaces the
+old “planned bindings” document and reflects the current code in `Sources/MFABridge` and
+`examples/*`.
 
-This document describes the cross-language bindings that make quantized Flash Attention accessible from multiple programming environments. The core implementation uses Metal SIMD operations on Apple Silicon GPUs, with C FFI bindings providing universal access across programming languages.
+## Architecture Recap
 
-## Architecture
-
-### Core Implementation Stack
-
-1. **Metal SIMD Kernels**: GPU-accelerated quantized matrix operations
-2. **Swift Implementation**: QuantizedAttention class with forward/backward passes
-3. **C FFI Bridge**: MFABridge providing C-compatible interface
-4. **Language Bindings**: Rust, Python, Objective-C wrappers
-
-### Current Implementation Status
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| Swift Core | Complete | 23 tests passing, forward pass implemented |
-| Metal Kernels | Complete | INT8/INT4 quantized load functions |
-| C FFI Bridge | Partial | Forward pass only, backward bindings needed |
-| Backward Pass | Complete | QuantizedAttention.backwardQuery() implemented |
-| Cross-Language Bindings | Documentation | Reference implementations provided |
-
-## C FFI Interface
-
-### Current FFI Functions (Implemented)
-
-```c
-// Context management
-int32_t mfa_create_context(void** context);
-int32_t mfa_destroy_context(void* context);
-
-// Forward pass (quantized precision support)
-int32_t mfa_attention_forward(
-    void* context,
-    void* query_ptr, void* key_ptr, void* value_ptr, void* output_ptr,
-    uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
-    uint32_t num_heads, uint16_t head_dim,
-    float softmax_scale, bool causal,
-    int32_t q_precision, int32_t k_precision, int32_t v_precision,
-    bool transpose_q, bool transpose_k, bool transpose_v, bool transpose_o
-);
+```
+Metal kernels  ← Swift (FlashAttention, QuantizedAttention) ← C FFI (@_cdecl) ← Language bindings
 ```
 
-### Required FFI Extensions for Training
+- Swift remains the reference implementation: `QuantizedAttention` handles tensor
+  creation, runtime blockwise quantisation, and kernel dispatch. `MultiHeadAttention`
+  provides multi-head routing.
+- `MFABridge.swift` exposes a small C ABI; it is the only interface other languages link
+  against.
+- Bindings (Rust via bindgen, Python via ctypes, Objective‑C via a thin wrapper) simply
+  forward through these symbols.
 
-```c
-// Quantized forward with training state preservation
-int32_t mfa_attention_forward_quantized(
-    void* context,
-    void* query_ptr, void* key_ptr, void* value_ptr,
-    void* output_ptr, void* logsumexp_ptr,
-    uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
-    uint32_t num_heads, uint16_t head_dim,
-    float softmax_scale, bool causal,
-    int32_t q_precision, int32_t k_precision, int32_t v_precision,
-    float q_scale, int32_t q_zero_point,
-    float k_scale, int32_t k_zero_point,
-    float v_scale, int32_t v_zero_point,
-    bool transpose_q, bool transpose_k, bool transpose_v, bool transpose_o
-);
+## Exported C Functions
 
-// Backward pass for query gradients
-int32_t mfa_attention_backward_query_quantized(
-    void* context,
-    void* query_ptr, void* key_ptr, void* value_ptr,
-    void* grad_output_ptr, void* logsumexp_ptr,
-    void* grad_query_ptr, void* d_values_ptr,
-    uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
-    uint32_t num_heads, uint16_t head_dim,
-    float q_scale, int32_t q_zero_point
-);
+| Category | Functions | Notes |
+| --- | --- | --- |
+| Context | `mfa_create_context`, `mfa_destroy_context`, `mfa_is_device_supported`, `mfa_get_version`, `mfa_get_gpu_latency` | Single shared context per process; `mfa_get_gpu_latency` reports last GPU time. |
+| Buffers | `mfa_create_buffer`, `mfa_buffer_from_ptr`, `mfa_buffer_from_ptr_with_strides`, `mfa_buffer_from_mtl_buffer`, `mfa_buffer_from_mtl_buffer_with_strides`, `mfa_buffer_contents`, `mfa_destroy_buffer` | Support both copied and zero-copy buffers. |
+| Masks | `mfa_attention_forward` / `_str` accept optional mask pointer + metadata; `MaskType`/`MaskScalarType` enums set the interpretation. | |
+| Forward (dense) | `mfa_attention_forward`, `mfa_attention_forward_str` | Accept transpose flags, precision enums, and optional mask metadata. Multi-head flows through Swift `MultiHeadAttention`. |
+| Forward (quantised) | `mfa_attention_forward_quantized_unified` (+ legacy wrappers `_quantized`, `_quantized_enhanced`, `_quantized_direct`) | Parameters include per-tensor scales/zero points, block sizes, granularity flag, and strategy toggles (`force_symmetric_quantization`). Call `mfa_set_scale_arrays` when supplying per-block scale tables. |
+| Backward (quantised) | `mfa_attention_backward_query_quantized`, `mfa_attention_backward_kv_quantized` | Currently **single-head only**. Each expects pre-quantised Q/K/V buffers plus FP32 gradients and log-sum-exp scratch tensors. |
+| Utilities | `mfa_error_string` | Returns a heap-allocated C string for a given error code. |
 
-// Backward pass for key/value gradients
-int32_t mfa_attention_backward_kv_quantized(
-    void* context,
-    void* query_ptr, void* key_ptr, void* value_ptr,
-    void* grad_output_ptr, void* logsumexp_ptr, void* d_values_ptr,
-    void* grad_key_ptr, void* grad_value_ptr,
-    uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
-    uint32_t num_heads, uint16_t head_dim,
-    float q_scale, int32_t q_zero_point,
-    float k_scale, int32_t k_zero_point,
-    float v_scale, int32_t v_zero_point
-);
-```
+See [API.md](../API.md) for full signatures and sample calls.
 
-## Quantization Parameters
+## Language Bindings Today
 
-### Precision Encoding
+| Language | Entry point | Status / Notes |
+| --- | --- | --- |
+| Python (ctypes) | `examples/python-ffi/src/umfa` | Wraps the full FFI, including `mfa_attention_forward_quantized_unified`. `examples/flux` builds on this to integrate with PyTorch. |
+| PyTorch custom op | `examples/pytorch-custom-op-ffi` | C++ extension calling into the FFI. Supports INT8/INT4 forward (multi-head) and the new mask parameters. |
+| Rust | `examples/rust-ffi` | Uses `bindgen` to generate the FFI; exposes safe RAII wrappers for context/buffers. Currently limited to forward paths. |
+| Objective‑C | `examples/objc` | Simple bridge class that forwards to `mfa_attention_forward` and demonstrates Metal buffer interop. |
 
-```c
-#define MFA_PRECISION_FP32  0
-#define MFA_PRECISION_FP16  1
-#define MFA_PRECISION_INT8  8
-#define MFA_PRECISION_INT4  4
-```
+## Gaps & Future Work
 
-### Quantization Strategy
+| Area | Status |
+| --- | --- |
+| Multi-head backward via FFI | ❌ Not yet supported; QuantizedAttention handles it in Swift, but the C API still asserts `numHeads == 1` for backward calls. |
+| Dedicated quantisation helpers | ❌ Functions such as `mfa_quantize_tensor_batch` or `mfa_create_quantized_buffer` are not implemented; callers quantise data in their native language (or use the Swift runtime quantiser). |
+| Error-handling helpers | ⚠️ `mfa_error_string` exists, but higher-level helpers (e.g. to classify recoverable vs fatal errors) are left to each binding. |
 
-- **Symmetric quantization**: Zero point typically 0 for signed types
-- **Per-tensor scaling**: Single scale factor per operand
-- **FP32 gradients**: All gradient computations maintain FP32 precision
-- **Scale calculation**: `scale = max_abs_value / quantization_range`
+## Recommended Validation Pipeline
 
-## Language Bindings
+1. Follow [INSTALL.md](../INSTALL.md) to build the Swift package.
+2. Run the core tests:
 
-### Rust Integration
+   ```bash
+   swift test --filter QuantizedAttentionTest
+   swift test --filter MultiHeadAttentionTest
+   swift test --filter QuantizedBackwardTest
+   ```
 
-**Setup:** `examples/rust-ffi/`
+3. Exercise the FFI from your language of choice (see the README in each `examples/*`
+   directory). Flux/PyTorch benchmarks provide the most demanding real-world workload.
 
-```toml
-# Cargo.toml
-[dependencies]
-libc = "0.2"
-bindgen = "0.70"
-
-[build-dependencies]
-bindgen = "0.70"
-```
-
-**Key Types:**
-
-- `MfaContext` - RAII wrapper for device context
-- `MfaBuffer` - Memory-managed Metal buffers
-- Auto-generated bindings via `bindgen`
-
-**Usage Pattern:**
-
-```rust
-let context = MfaContext::new()?;
-let buffers = create_buffers(&context, seq_len, head_dim)?;
-let result = unsafe { mfa_attention_forward(/* params */) };
-// Automatic cleanup via Drop trait
-```
-
-### Python Integration
-
-**Setup:** `examples/python-ffi/`
-
-```python
-pip install -e examples/python-ffi/
-import umfa
-```
-
-**PyTorch SDPA Drop-in Replacement:**
-
-```python
-# examples/pytorch_sdpa_replacement.py
-import umfa
-import torch.nn.functional as F
-
-metal_sdpa = umfa.MetalSDPA()
-
-# Replace this:
-torch_out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
-
-# With this:
-metal_out = metal_sdpa(q, k, v, is_causal=True)
-```
-
-**Low-level API:**
-
-```python
-with umfa.MFAContext() as ctx:
-    output = umfa.flash_attention_forward(ctx, q, k, v, causal=True)
-```
-
-**Key Features:**
-
-- Zero-copy PyTorch/NumPy integration
-- Automatic resource management via context managers
-- FP16/FP32 precision support
-
-### Objective-C Integration
-
-**Setup:** `examples/objc/`
-
-```objc
-// examples/objc/bridge.h
-@interface MFABridge : NSObject
-- (instancetype)initWithDevice:(id<MTLDevice>)device;
-- (double)runAttentionWithQ:(id<MTLBuffer>)qBuffer
-                          K:(id<MTLBuffer>)kBuffer
-                          V:(id<MTLBuffer>)vBuffer
-                          O:(id<MTLBuffer>)oBuffer
-                  seqLength:(NSUInteger)seqLength
-                   headDim:(NSUInteger)headDim
-                      scale:(float)scale
-                     causal:(BOOL)causal;
-@end
-```
-
-**Usage:**
-
-```objc
-MFABridge *bridge = [[MFABridge alloc] initWithDevice:device];
-double executionTime = [bridge runAttentionWithQ:qBuf K:kBuf V:vBuf O:oBuf
-                                        seqLength:512 headDim:64
-                                            scale:0.125 causal:YES];
-```
-
-**Integration Notes:**
-
-- Direct Metal buffer management
-- Swift FlashAttention backend
-- Returns execution timing for performance monitoring
-
-## Performance Characteristics
-
-### Measured Performance (Apple M3 Max)
-
-**Forward Pass Performance:**
-
-- Small matrices (512x64): 89-91% of FP16 performance
-- Medium matrices (1024x64): 85-88% of FP16 performance
-- Large matrices (2048x128): 80-81% of FP16 performance
-
-**Memory Efficiency:**
-
-- INT8 quantization: 50% memory usage, 1.8x efficiency per GOPS
-- INT4 quantization: 25% memory usage, 3.6x efficiency per GOPS
-
-**Backward Pass Performance (Larger Matrices):**
-
-- 1024x1024x1024: 1.15x faster than FP16 (memory bandwidth bound)
-
-### Quality Metrics
-
-- INT8 quantization: <0.2% RMSE error
-- INT4 quantization: ~2% RMSE error
-- Symmetric quantization with zero point = 0
-- FP32 gradient precision maintains training stability
-
-## Technical Notes
-
-### Memory Layout Requirements
-
-All tensors must be contiguous in memory with the following layout:
-
-- Query: [batch_size, seq_len_q, head_dim]
-- Key: [batch_size, seq_len_kv, head_dim]
-- Value: [batch_size, seq_len_kv, head_dim]
-- Output: [batch_size, seq_len_q, head_dim]
-
-### Thread Safety
-
-The C FFI interface is not thread-safe. Each thread requires its own context:
-
-```c
-// Per-thread usage
-void* context_thread1, context_thread2;
-mfa_create_context(&context_thread1);
-mfa_create_context(&context_thread2);
-```
-
-### Error Handling
-
-Return codes follow standard conventions:
-
-- 0: Success
-- 1: Invalid context
-- 2: Buffer allocation failed
-- 3: Invalid dimensions
-- 4: Kernel execution failed
-
-This implementation provides a foundation for universal quantized Flash Attention across programming environments, enabling efficient transformer training and inference on Apple Silicon hardware.
+Keeping bindings thin and delegating quantisation details to Swift means the C surface
+remains stable even as strategies and blockwise logic evolve. When new functionality is
+added (e.g. multi-head backward), update this document alongside the examples so every
+integration stays in sync.

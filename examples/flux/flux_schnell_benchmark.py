@@ -1,4 +1,4 @@
-#!/usr/bin/env /Users/kash/src/universal-metal-flash-attention/.venv/bin/python3
+#!/usr/bin/env python3
 """
 FLUX.1-Schnell Comprehensive Metal SDPA Benchmark
 
@@ -26,24 +26,51 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional, Any, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import psutil
 import torch
 import torch.nn.functional as F
 
-# Set up library paths for Metal FFI
-project_root = Path("/Users/kash/src/universal-metal-flash-attention")
-lib_path = f"{project_root}/.build/arm64-apple-macosx/release:{project_root}/.build/arm64-apple-macosx/debug"
-os.environ["DYLD_LIBRARY_PATH"] = lib_path + ":" + os.environ.get("DYLD_LIBRARY_PATH", "")
+# Resolve repository root dynamically
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Add the pytorch-custom-op-ffi to path
-sys.path.insert(0, str(project_root / "examples" / "pytorch-custom-op-ffi"))
 
-# Ensure we're using the venv
-venv_site_packages = project_root / ".venv" / "lib" / "python3.13" / "site-packages"
-if venv_site_packages.exists():
-    sys.path.insert(0, str(venv_site_packages))
+def _prepend_dyld_library_path(paths) -> None:
+    """Prepend paths to DYLD_LIBRARY_PATH if they exist."""
+    existing = os.environ.get("DYLD_LIBRARY_PATH", "")
+    valid_paths = [str(path) for path in paths if path.exists()]
+    if not valid_paths:
+        return
+    prefix = ":".join(valid_paths)
+    if existing:
+        os.environ["DYLD_LIBRARY_PATH"] = f"{prefix}:{existing}"
+    else:
+        os.environ["DYLD_LIBRARY_PATH"] = prefix
+
+
+_prepend_dyld_library_path(
+    [
+        PROJECT_ROOT / ".build" / "arm64-apple-macosx" / "release",
+        PROJECT_ROOT / ".build" / "arm64-apple-macosx" / "debug",
+    ]
+)
+
+# Ensure repository modules (PyTorch custom op, Python bindings) are importable
+sys.path.insert(0, str(PROJECT_ROOT / "examples" / "pytorch-custom-op-ffi"))
+
+
+def _maybe_add_venv_site_packages() -> None:
+    venv_root = Path(os.environ.get("VIRTUAL_ENV", PROJECT_ROOT / ".venv"))
+    if not venv_root.exists():
+        return
+    for site_packages in venv_root.glob("lib/python*/site-packages"):
+        if site_packages.is_dir():
+            sys.path.insert(0, str(site_packages))
+            break
+
+
+_maybe_add_venv_site_packages()
 
 # Try to import Metal SDPA extension
 try:
@@ -52,16 +79,20 @@ try:
     if build_dir.exists():
         # Add build directory to path
         import glob
+
         lib_dirs = glob.glob(str(build_dir / "lib.*"))
         if lib_dirs:
             sys.path.insert(0, lib_dirs[0])
 
     import metal_sdpa_extension
+
     METAL_PYTORCH_AVAILABLE = True
     print("✅ Metal PyTorch Custom Op available")
 
     # Check for quantization support
-    HAS_QUANTIZATION = hasattr(metal_sdpa_extension, 'quantized_scaled_dot_product_attention')
+    HAS_QUANTIZATION = hasattr(
+        metal_sdpa_extension, "quantized_scaled_dot_product_attention"
+    )
     if HAS_QUANTIZATION:
         print("✅ Quantization support available")
     else:
@@ -87,12 +118,15 @@ except ImportError:
 
 class BenchmarkConfig:
     """Configuration for a benchmark run"""
-    def __init__(self, name: str, quantization: Optional[str] = None,
-                 use_metal: bool = False):
+
+    def __init__(
+        self, name: str, quantization: Optional[str] = None, use_metal: bool = False
+    ):
         self.name = name
         self.quantization = quantization  # None, 'int8', 'int4'
         self.use_metal = use_metal
         self.metrics: Dict[str, Any] = {}
+
 
 def create_metal_sdpa_wrapper(quantization_mode: Optional[str] = None):
     """Create a Metal SDPA wrapper with specified quantization"""
@@ -141,21 +175,29 @@ def create_metal_sdpa_wrapper(quantization_mode: Optional[str] = None):
                 # Use the simpler quantized_scaled_dot_product_attention function
                 # which takes a precision string directly
                 result = metal_sdpa_extension.quantized_scaled_dot_product_attention(
-                    query, key, value,
+                    query,
+                    key,
+                    value,
                     precision=quantization_mode,  # 'int4' or 'int8'
                     is_causal=is_causal,
-                    scale=scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5))
+                    scale=(
+                        scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5))
+                    ),
                 )
                 return result
             else:
                 # Use regular Metal SDPA without quantization
                 result = metal_sdpa_extension.metal_scaled_dot_product_attention(
-                    query, key, value,
+                    query,
+                    key,
+                    value,
                     attn_mask=attn_mask,
                     dropout_p=dropout_p,
                     is_causal=is_causal,
-                    scale=scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5)),
-                    enable_gqa=enable_gqa
+                    scale=(
+                        scale if scale is not None else (1.0 / (query.shape[-1] ** 0.5))
+                    ),
+                    enable_gqa=enable_gqa,
                 )
                 return result
         except Exception as e:
@@ -176,7 +218,7 @@ def get_mps_memory_info():
     if torch.backends.mps.is_available():
         return {
             "allocated": torch.mps.current_allocated_memory() / 1024 / 1024,
-            "reserved": torch.mps.driver_allocated_memory() / 1024 / 1024
+            "reserved": torch.mps.driver_allocated_memory() / 1024 / 1024,
         }
     return {"allocated": 0, "reserved": 0}
 
@@ -200,8 +242,9 @@ def restore_attention(original_sdpa):
         F.scaled_dot_product_attention = original_sdpa
 
 
-def benchmark_flux_configuration(config: BenchmarkConfig, resolution: Tuple[int, int],
-                                 prompt: str = None) -> Dict[str, Any]:
+def benchmark_flux_configuration(
+    config: BenchmarkConfig, resolution: Tuple[int, int], prompt: str = None
+) -> Dict[str, Any]:
     """Benchmark FLUX with a specific configuration and resolution"""
 
     if prompt is None:
@@ -240,7 +283,7 @@ def benchmark_flux_configuration(config: BenchmarkConfig, resolution: Tuple[int,
 
         pipe = FluxPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-schnell",
-            torch_dtype=torch.float32  # Always use FP32 base weights
+            torch_dtype=torch.float32,  # Always use FP32 base weights
         )
 
         if torch.backends.mps.is_available():
@@ -286,17 +329,18 @@ def benchmark_flux_configuration(config: BenchmarkConfig, resolution: Tuple[int,
 
         # Calculate per-step times
         if len(step_times) > 1:
-            per_step_times = [step_times[i+1] - step_times[i]
-                             for i in range(len(step_times)-1)]
+            per_step_times = [
+                step_times[i + 1] - step_times[i] for i in range(len(step_times) - 1)
+            ]
             avg_step_time = sum(per_step_times) / len(per_step_times)
         else:
             avg_step_time = generation_time / 4
 
         # Save image
-        output_dir = Path("/Users/kash/src/universal-metal-flash-attention/examples/flux/output") / res_str
+        output_dir = PROJECT_ROOT / "examples" / "flux" / "output" / res_str
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        filename = config.name.lower().replace(' ', '_')
+        filename = config.name.lower().replace(" ", "_")
         output_path = output_dir / f"{filename}.png"
         image.save(output_path)
 
@@ -319,8 +363,8 @@ def benchmark_flux_configuration(config: BenchmarkConfig, resolution: Tuple[int,
             "avg_step_time": avg_step_time,
             "load_memory_mb": load_memory,
             "peak_memory_mb": peak_memory - initial_memory,
-            "mps_allocated_mb": peak_mps['allocated'],
-            "mps_reserved_mb": peak_mps['reserved'],
+            "mps_allocated_mb": peak_mps["allocated"],
+            "mps_reserved_mb": peak_mps["reserved"],
             "output_path": str(output_path),
         }
 
@@ -335,6 +379,7 @@ def benchmark_flux_configuration(config: BenchmarkConfig, resolution: Tuple[int,
     except Exception as e:
         print(f"❌ Error during {config.name} benchmark: {e}")
         import traceback
+
         traceback.print_exc()
         return None
 
@@ -363,10 +408,12 @@ def main():
 
     # Add quantization configs if available
     if HAS_QUANTIZATION:
-        configurations.extend([
-            BenchmarkConfig("Metal UMFA INT8", quantization='int8', use_metal=True),
-            BenchmarkConfig("Metal UMFA INT4", quantization='int4', use_metal=True),
-        ])
+        configurations.extend(
+            [
+                BenchmarkConfig("Metal UMFA INT8", quantization="int8", use_metal=True),
+                BenchmarkConfig("Metal UMFA INT4", quantization="int4", use_metal=True),
+            ]
+        )
     else:
         print("⚠️ Quantization not available, skipping INT8/INT4 tests")
 
@@ -395,7 +442,7 @@ def main():
     # Save results to JSON
     if all_results:
         results_file = Path(f"examples/flux/output/benchmark_results_{timestamp}.json")
-        with open(results_file, 'w') as f:
+        with open(results_file, "w") as f:
             json.dump(all_results, f, indent=2, default=str)
         print(f"\n📊 Results saved to: {results_file}")
 
@@ -407,20 +454,24 @@ def main():
         # Group results by resolution
         for resolution in resolutions:
             res_str = f"{resolution[0]}x{resolution[1]}"
-            res_results = [r for r in all_results if r['resolution'] == res_str]
+            res_results = [r for r in all_results if r["resolution"] == res_str]
 
             if not res_results:
                 continue
 
             print(f"\n🔍 Resolution: {res_str}")
-            print(f"{'Configuration':<20} {'Time (s)':<12} {'Speedup':<10} {'Memory (MB)':<12}")
+            print(
+                f"{'Configuration':<20} {'Time (s)':<12} {'Speedup':<10} {'Memory (MB)':<12}"
+            )
             print("-" * 54)
 
             # Find baseline (PyTorch Vanilla)
-            baseline = next((r for r in res_results if 'Vanilla' in r['config']), res_results[0])
+            baseline = next(
+                (r for r in res_results if "Vanilla" in r["config"]), res_results[0]
+            )
 
             for result in res_results:
-                speedup = baseline['generation_time'] / result['generation_time']
+                speedup = baseline["generation_time"] / result["generation_time"]
                 speedup_str = f"{speedup:.2f}x" if speedup != 1.0 else "baseline"
 
                 print(
@@ -431,8 +482,10 @@ def main():
                 )
 
         # Overall best performer
-        best_result = min(all_results, key=lambda x: x['generation_time'])
-        print(f"\n🏆 Best Overall: {best_result['config']} @ {best_result['resolution']}")
+        best_result = min(all_results, key=lambda x: x["generation_time"])
+        print(
+            f"\n🏆 Best Overall: {best_result['config']} @ {best_result['resolution']}"
+        )
         print(f"   Time: {best_result['generation_time']:.2f}s")
         print(f"   Memory: {best_result['peak_memory_mb']:.1f} MB")
 

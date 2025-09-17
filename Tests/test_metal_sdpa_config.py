@@ -14,13 +14,28 @@ issues in the MFA library's Swift/Metal implementation.
 import os
 import sys
 import unittest
+from pathlib import Path
 
 import torch
 
-# Add the PyTorch extension path
-sys.path.append(
-    "/Users/kash/src/universal-metal-flash-attention/examples/pytorch-custom-op-ffi"
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.append(str(PROJECT_ROOT / "examples" / "pytorch-custom-op-ffi"))
+
+
+def _prepend_dyld_library_path():
+    existing = os.environ.get("DYLD_LIBRARY_PATH", "")
+    candidates = [
+        PROJECT_ROOT / ".build" / "arm64-apple-macosx" / "release",
+        PROJECT_ROOT / ".build" / "arm64-apple-macosx" / "debug",
+    ]
+    valid = [str(path) for path in candidates if path.exists()]
+    if not valid:
+        return
+    prefix = ":".join(valid)
+    os.environ["DYLD_LIBRARY_PATH"] = f"{prefix}:{existing}" if existing else prefix
+
+
+_prepend_dyld_library_path()
 
 # Import the Metal SDPA extension
 import metal_sdpa_extension

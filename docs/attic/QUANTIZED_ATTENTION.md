@@ -1,210 +1,154 @@
-# Quantized Metal SIMD Flash Attention
+# Quantised Flash Attention (Architecture Overview)
 
-This document describes an implementation that extends the Universal Metal Flash Attention library with quantized precision support. It uses Apple's Metal SIMD group operations for hardware-accelerated int8 and int4 matrix operations on Apple Silicon GPUs.
+This document explains how the current Universal Metal Flash Attention stack implements
+INT8/INT4 support, how the pieces interact (Swift, Metal, and C FFI), and what trade-offs
+we observe in practice.
 
-## Features
+## Feature Highlights – 2025
 
-- Metal SIMD acceleration for quantized matrix operations.
-- INT8 quantization (8-bit signed integer precision with symmetric quantization).
-- INT4 quantization (4-bit integer precision using packed storage).
-- 2-4x memory reduction compared to FP16/FP32.
-- Integration with the existing `AttentionKernel` framework.
-- Performance at ~87-88% of FP16 GOPS with significant memory savings.
+- **Per-operand strategies**: `QuantizationStrategy` (`legacy`, `asymmetric`, `symmetric`)
+  travels with every tensor, along with a `strategyVersion` for forward compatibility.
+- **Blockwise bias restoration**: Symmetric INT8 uses a fused runtime quantiser that
+  subtracts block means on GPU (`GEMMRuntimeQuantization`), stores per-block scales/biases,
+  and adds them back after GEMM.
+- **Unified kernel bindings**: Each quantised operand now exposes four buffers in the
+  generated Metal source: scale, zero point, strategy, and strategy version. The bindings
+  are present regardless of whether GLUON heuristics are enabled.
+- **Multi-head aware**: The Swift `MultiHeadAttention` path carries quantisation state for
+  each operand. FFI forward calls (`mfa_attention_forward_quantized_unified`) route through
+  this code path automatically when `numHeads > 1`.
+- **Backward support**: Single-head backward passes are available via
+  `mfa_attention_backward_query_quantized` and `mfa_attention_backward_kv_quantized`.
+  Multi-head backward remains on the roadmap.
 
-## Supported Quantization Formats
+## Data Flow
 
-| **Precision** | **Storage** | **Memory Reduction** | **GPU Support** | **Use Case** |
-|---------------|-------------|---------------------|-----------------|--------------|
-| **INT8** | 8-bit signed | 2x vs FP16, 4x vs FP32 | SIMD Native | Balanced efficiency |
-| **INT4** | 4-bit packed | 4x vs FP16, 8x vs FP32 | SIMD Native | Maximum compression |
-| **Mixed** | INT8 + INT4 | 2-4x vs FP16/32 | Dynamic | Adaptive precision |
+```text
+Host (Swift/Python/Rust)  →  QuantizationParameters (scale/zero/strategy)
+                         →  GEMMRuntimeQuantization (optional fused blockwise)
+                         →  QuantizedTensor (MTLBuffer + metadata)
+                         →  QuantizedAttention.forward/backward
+                         →  Metal kernels (load_quantized_int8/int4 + bias restore)
+```
 
-## Performance Characteristics
+### QuantizedTensor Structure
 
-**Benchmark Results from Test Suite (Apple Silicon M-series):**
+```swift
+let tensor = QuantizedTensor.from(
+  device: device,
+  floatData: values,
+  shape: [batch, heads, seq, headDim],
+  precision: .INT8,
+  mode: .blockwise(blockSizeK: 64),
+  strategy: .symmetric
+)
 
-| Precision | Avg Time (ms) | GOPS | Relative Performance | Memory Usage |
-|-----------|---------------|------|---------------------|--------------|
-| **FP16**  | 0.96          | 34.98| 100% (baseline)     | 100%         |
-| **INT8**  | 1.10          | 30.46| 87%                 | 50%          |
-| **INT4**  | 1.09          | 30.90| 88%                 | 25%          |
+// tensor.parameters.scale / zeroPoint / strategy / strategyVersion available here
+```
 
-### Findings
+`QuantizedTensor.from` calls into `GEMMRuntimeQuantization` when a symmetric blockwise
+INT8 request is made, so you obtain both the quantised buffer and the per-block metadata
+needed by the kernels.
 
-- **Memory Bandwidth Bound**: Performance scales with memory access patterns.
-- **GPU Acceleration**: SIMD group operations are used to offset the overhead of dequantization.
-- **Numerical Stability**: FP32 intermediate precision is used to maintain accuracy.
-- **Trade-offs**: A ~13% performance cost results in 2-4x memory savings.
-
-## Quick Start
-
-### Basic Usage
+## Swift API Primer
 
 ```swift
 import FlashAttention
-import Metal
 
-// Initialize quantized attention
-guard let device = MTLCreateSystemDefaultDevice() else {
-    fatalError("Metal device required")
-}
-let quantizedAttention = QuantizedAttention(device: device)
-
-// Configure quantization settings
 var config = QuantizedAttention.Configuration()
-config.queryPrecision = .FP16    // Keep queries in higher precision
-config.keyPrecision = .INT8      // Quantize keys for memory efficiency
-config.valuePrecision = .INT8    // Quantize values for memory efficiency
-
-// Create quantized tensors from float data
-let (query, key, value) = quantizedAttention.createQuantizedTensors(
-    queryData: queryFloats, keyData: keyFloats, valueData: valueFloats,
-    queryShape: [batchSize, seqLen, headDim],
-    keyShape: [batchSize, seqLen, headDim],
-    valueShape: [batchSize, seqLen, headDim],
-    config: config
+config.queryPrecision = .FP16
+config.keyPrecision   = .INT8
+config.valuePrecision = .INT8
+config.queryStrategy  = .legacy
+config.keyStrategy    = .symmetric
+config.valueStrategy  = .symmetric
+config.quantizationParameters[.K] = QuantizationParameters(
+  scale: 0.12,
+  zeroPoint: 0,
+  precision: .INT8,
+  mode: .blockwise(blockSizeK: 64),
+  strategy: .symmetric
+)
+config.quantizationParameters[.V] = QuantizationParameters(
+  scale: 0.08,
+  zeroPoint: 0,
+  precision: .INT8,
+  strategy: .symmetric
 )
 
-// Set up attention descriptor
+let tensors = quantizedAttention.createQuantizedTensors(
+  queryData: qFloats,
+  keyData:   kFloats,
+  valueData: vFloats,
+  queryShape: [batch, seq, headDim],
+  keyShape:   [batch, seq, headDim],
+  valueShape: [batch, seq, headDim],
+  config: config
+)
+
 var baseDescriptor = AttentionDescriptor()
 baseDescriptor.matrixDimensions = (
-    row: UInt32(seqLen),
-    column: UInt32(seqLen),
-    head: UInt16(headDim)
+  row: UInt32(seq),
+  column: UInt32(seq),
+  head: UInt16(headDim)
 )
+baseDescriptor.transposeState = (Q: false, K: false, V: false, O: false)
 
-let quantizedDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
-    baseDescriptor: baseDescriptor,
-    quantizationConfig: config
+let descriptor = QuantizedAttention.QuantizedAttentionDescriptor(
+  baseDescriptor: baseDescriptor,
+  quantizationConfig: config
 )
-
-// Execute quantized attention
-guard let outputBuffer = device.makeBuffer(
-    length: batchSize * seqLen * headDim * MemoryLayout<Float>.size
-) else {
-    fatalError("Failed to create output buffer")
-}
 
 let commandBuffer = quantizedAttention.forward(
-    query: query, key: key, value: value,
-    output: outputBuffer,
-    descriptor: quantizedDescriptor
+  query: tensors.query,
+  key: tensors.key,
+  value: tensors.value,
+  output: outputBuffer,
+  descriptor: descriptor
 )
-
-// Submit for execution
 commandBuffer?.commit()
 commandBuffer?.waitUntilCompleted()
 ```
 
-### Performance Benchmarking
+### FFI Entry Points
 
-```swift
-// Run comprehensive benchmarks
-let results = quantizedAttention.benchmark(
-    batchSize: 1,
-    sequenceLength: 512,
-    headDim: 64,
-    iterations: 100
-)
+- `mfa_attention_forward_quantized_unified` – main path (supports mask metadata, strategy
+  flags, block sizes, and multi-head forward).
+- `mfa_attention_forward_quantized` / `_enhanced` – legacy wrappers that forward into the
+  unified function.
+- `mfa_attention_backward_query_quantized`, `mfa_attention_backward_kv_quantized` – single-
+  head backward routines.
+- `mfa_set_scale_arrays` – optional helper to pass precomputed per-block scales when using
+  the FFI directly.
 
-print("Benchmark Results:")
-for (precision, timeMs) in results {
-    if precision.contains("avg_ms") {
-        let gops = results[precision.replacingOccurrences(of: "_avg_ms", with: "_gops")] ?? 0
-        print("\(precision): \(String(format: "%.2f", timeMs)) ms, \(String(format: "%.1f", gops)) GOPS")
-    }
-}
+See [API.md](../API.md) for complete signatures.
+
+## Performance at a Glance
+
+| Scenario | INT8 | INT4 | Notes |
+| --- | --- | --- | --- |
+| Flux 1024×1024 image generation | +15 % vs FP16 | +37 % vs FP16 | Memory footprint reduced by ×2 / ×4 respectively; accuracy maintained on tested prompts. |
+| `QuantizedAttention.benchmark` (1×1024×1024, head=128) | 33 ms | 30.5 ms | Both faster than FP16 (38.5 ms) once the workload is bandwidth bound. |
+
+Quantisation error remains ≈ 0.1 % (INT8) / 2 % (INT4) relative to FP32 reference across the
+synthetic workloads used in `QuantizedAttentionTest`.
+
+## Testing Checklist
+
+```bash
+swift test --filter QuantizedAttentionTest      # Kernel signature + quantisation accuracy
+swift test --filter MultiHeadAttentionTest      # Multi-head + quantised bindings
+swift test --filter QuantizedBackwardTest       # Single-head backward FFI
 ```
 
-## Technical Implementation
+These suites ensure the strategy metadata, bias buffers, and fused runtime quantisation
+stay in sync with code generation.
 
-### Metal SIMD Integration
+## Roadmap
 
-The implementation uses Metal's SIMD group matrix operations:
+- Multi-head backward FFI surface.
+- Additional heuristics for GLUON enablement tuned to newer GPUs (M4 family).
+- Expanded symmetric INT4 runtime quantiser (currently relies on CPU packing).
 
-```metal
-// GPU-optimized quantized matrix load
-simdgroup_matrix_storage<float> matrix;
-matrix.load_quantized_int8(
-    quantized_data_ptr,
-    elements_per_row,
-    matrix_origin,
-    scale_parameter,
-    zero_point_parameter,
-    transpose_flag
-);
-
-// Standard SIMD group matrix multiply
-result.multiply(quantized_matrix_a, quantized_matrix_b);
-```
-
-See the [full design document](/docs/QuantizedMetalSIMDImplementation.md) for more information.
-
-### Automatic Parameter Management
-
-The system handles:
-
-- **Buffer Binding Generation**: Dynamic allocation of quantization parameter buffers.
-- **Kernel Source Generation**: Automatic selection of quantized vs. standard load functions.
-- **Memory Layout**: Packing of INT4 data and parameter alignment.
-
-### Quantization Strategy
-
-1. **Symmetric Quantization**: Zero point = 0.
-2. **Per-Tensor Scaling**: Single scale factor per tensor.
-3. **FP32 Intermediate**: All computations in FP32 after dequantization.
-4. **Range Selection**: Automatic scale calculation based on input data range.
-
-## Testing and Validation
-
-### Test Coverage
-
-- **Accuracy Tests**: RMSE validation for INT8/INT4 quantization.
-- **Performance Tests**: Speed and memory efficiency benchmarks.
-- **Edge Case Tests**: Zero data, constant data, extreme ranges.
-- **Integration Tests**: End-to-end attention computation validation.
-- **Metal Kernel Tests**: GPU shader compilation and execution.
-
-### Quality Metrics
-
-- **INT8 Quantization**: RMSE < 0.1 for standard ranges.
-- **INT4 Quantization**: RMSE < 0.2 for narrow ranges.
-- **Memory Compression**: 4x (INT8) to 8x (INT4) vs FP32.
-- **Performance Retention**: 87-88% of FP16 throughput.
-
-## Future Work
-
-### Planned Features
-
-1. **Per-Channel Quantization**: For improved accuracy with diverse activation ranges.
-2. **Mixed Precision Training**: INT8/INT4 forward with FP32 backward pass.
-3. **Dynamic Quantization**: Runtime precision selection based on data characteristics.
-4. **Hardware Optimization**: M3/M4 specific SIMD optimizations.
-
-### Research Directions
-
-1. **Adaptive Quantization**: Machine learning-based quantization parameter tuning.
-2. **Sparse Quantization**: Combining quantization with attention sparsity patterns.
-3. **Multi-GPU Scaling**: Distributed quantized attention across multiple Apple Silicon devices.
-
-## References
-
-- [QuantizedMetalSIMDImplementation.md](QuantizedMetalSIMDImplementation.md) - Detailed technical documentation
-- [Apple Metal Shading Language](https://developer.apple.com/metal/Metal-Shading-Language-Specification.pdf)
-- [SIMD Group Matrix Functions](https://developer.apple.com/documentation/metal/mtlcomputecommandencoder)
-
-## Contributing
-
-The quantized implementation is integrated with the existing codebase:
-
-- All tests pass with quantized precision.
-- Performance benchmarks are included in the test suite.
-- Documentation matches the implementation.
-- Code follows existing patterns and conventions.
-
-For contributions, ensure:
-
-1. Tests pass for all quantization modes.
-2. Performance benchmarks show expected characteristics.
-3. Documentation accurately reflects the implementation.
-4. Integration with the `AttentionKernel` framework is maintained.
+Contributions with new measurements or features are welcome—raise an issue or submit a
+PR with updates to this document and the associated benchmarks.
