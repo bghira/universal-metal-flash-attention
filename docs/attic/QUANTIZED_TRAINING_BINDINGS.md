@@ -5,6 +5,14 @@ and how the shipped examples (Objective‑C, Python, Rust, Flux) consume it. It 
 old “planned bindings” document and reflects the current code in `Sources/MFABridge` and
 `examples/*`.
 
+## 17 Sep 2025 - Backward Pipeline Update
+
+- Shared `QuantizedKernelLayoutManifest` now drives both Swift encoders and Metal kernels for the query and key/value backward passes, and `mfa_get_quantized_layout` exposes the same slots over the FFI so bindings can stay in sync without hard-coded tables.
+- `backwardQuery` / `backwardKeyValue` now accept either `QuantizedTensor` operands or raw `MTLBuffer` handles for K/V. Blockwise activations/weights are forwarded when block tables are supplied, while float buffers still receive neutral scale/zero-point defaults so the kernels can reuse the same binding layout.
+- Precision detection (`detectPrecisionConfiguration`) and operand-binding helpers centralise warnings plus scale/zero-point resolution, reducing ad-hoc binding logic in the FFI.
+- Regenerated Metal kernels dereference layout indices directly and explicitly dequantise INT8 K/V lanes on device, keeping host bindings and GPU code in lockstep.
+- `QuantizedAttentionTest` now reads GPU gradients, compares them with a float reference implementation, and asserts cosine similarity ≥ 0.7 with relative error ≤ 30% to guard against silent drift.
+
 ## Architecture Recap
 
 ```
@@ -28,7 +36,7 @@ Metal kernels  ← Swift (FlashAttention, QuantizedAttention) ← C FFI (@_cdecl
 | Masks | `mfa_attention_forward` / `_str` accept optional mask pointer + metadata; `MaskType`/`MaskScalarType` enums set the interpretation. | |
 | Forward (dense) | `mfa_attention_forward`, `mfa_attention_forward_str` | Accept transpose flags, precision enums, and optional mask metadata. Multi-head flows through Swift `MultiHeadAttention`. |
 | Forward (quantised) | `mfa_attention_forward_quantized_unified` (+ legacy wrappers `_quantized`, `_quantized_enhanced`, `_quantized_direct`) | Parameters include per-tensor scales/zero points, block sizes, granularity flag, and strategy toggles (`force_symmetric_quantization`). Call `mfa_set_scale_arrays` when supplying per-block scale tables. |
-| Backward (quantised) | `mfa_attention_backward_query_quantized`, `mfa_attention_backward_kv_quantized` | Currently **single-head only**. Each expects pre-quantised Q/K/V buffers plus FP32 gradients and log-sum-exp scratch tensors. |
+| Backward (quantised) | `mfa_attention_backward_query_quantized[_ex]`, `mfa_attention_backward_kv_quantized[_ex]` | `_ex` variants accept `num_kv_heads` plus optional block-scale/zero-point buffers, enabling multi-head INT4/INT8 backward paths from C callers. Legacy entry points forward to `_ex` with single-head/contiguous defaults. Use `mfa_get_quantized_capabilities` to probe feature support. |
 | Utilities | `mfa_error_string` | Returns a heap-allocated C string for a given error code. |
 
 See [API.md](../API.md) for full signatures and sample calls.
@@ -63,6 +71,8 @@ See [API.md](../API.md) for full signatures and sample calls.
 
 3. Exercise the FFI from your language of choice (see the README in each `examples/*`
    directory). Flux/PyTorch benchmarks provide the most demanding real-world workload.
+
+The quantised backward test suite streams GPU gradients back to the CPU, compares them against a float fallback (`runFloatBackward`), and enforces the 0.7 cosine / 30% relative error thresholds.
 
 Keeping bindings thin and delegating quantisation details to Swift means the C surface
 remains stable even as strategies and blockwise logic evolve. When new functionality is
