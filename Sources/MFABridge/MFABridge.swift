@@ -985,8 +985,13 @@ public func mfa_attention_forward(
     guard lBuffer.length >= statsByteCount, dBuffer.length >= statsByteCount else {
       return 2 // MFA_ERROR_MEMORY_ALLOCATION
     }
-    memset(lBuffer.contents(), 0, statsByteCount)
-    memset(dBuffer.contents(), 0, statsByteCount)
+    let elementCount = Int(seqLenQ)
+    lBuffer.contents()
+      .assumingMemoryBound(to: Float.self)
+      .update(repeating: 0, count: elementCount)
+    dBuffer.contents()
+      .assumingMemoryBound(to: Float.self)
+      .update(repeating: 0, count: elementCount)
     lBuffer.didModifyRange(0..<statsByteCount)
     dBuffer.didModifyRange(0..<statsByteCount)
 
