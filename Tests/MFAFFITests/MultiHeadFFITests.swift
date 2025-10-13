@@ -5,8 +5,8 @@
 //  Created by bghira on 9/15/24.
 //
 
-import MFAFFI
 import Metal
+import MFAFFI
 import XCTest
 
 extension [Float] {
@@ -1405,7 +1405,10 @@ final class MultiHeadFFITests: XCTestCase {
     let containsInf = outputData.contains { $0.isInfinite }
     if containsNaN || containsInf {
       let sample = outputData.prefix(16)
-      print("⚠️ CausalMasking output sample:", sample.map { String(format: "%.5f", $0) }.joined(separator: ", "))
+      print(
+        "⚠️ CausalMasking output sample:",
+        sample.map { String(format: "%.5f", $0) }.joined(separator: ", ")
+      )
     }
     XCTAssertFalse(containsNaN, "Causal output contains NaN values")
     XCTAssertFalse(containsInf, "Causal output contains infinite values")

@@ -9,8 +9,7 @@ from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
-
-from config import load_config, DeepSeekConfig
+from config import DeepSeekConfig, load_config
 from model import DeepSeekModel
 
 
@@ -69,9 +68,10 @@ class TextGenerator:
 
             # Apply top-k filtering
             if top_k is not None:
-                indices_to_remove = next_token_logits < torch.topk(
-                    next_token_logits, top_k
-                )[0][..., -1, None]
+                indices_to_remove = (
+                    next_token_logits
+                    < torch.topk(next_token_logits, top_k)[0][..., -1, None]
+                )
                 next_token_logits[indices_to_remove] = float("-inf")
 
             # Apply nucleus (top-p) sampling
@@ -236,9 +236,7 @@ def demo_generation():
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="DeepSeek-V3.2-Exp text generation"
-    )
+    parser = argparse.ArgumentParser(description="DeepSeek-V3.2-Exp text generation")
     parser.add_argument(
         "--demo",
         action="store_true",

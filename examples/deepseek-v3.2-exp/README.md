@@ -70,6 +70,7 @@ tests/                 # unit tests
 **mla:** compresses kv cache 32x (16384→512 dims) via low-rank projection. decompression uses learned weights W_k, W_v (ffi stack exists, weights not loaded yet).
 
 **sparse indexer:**
+
 - complete ffi stack: `kernel.py` → `metal_sdpa_ffi` → c++ extension → swift bridge → metal
 - computes Q@K^T with scale, applies relu, returns scores [batch, heads, seq_q, seq_k]
 - uses mfa bridge if extension built, falls back to pytorch mps if not

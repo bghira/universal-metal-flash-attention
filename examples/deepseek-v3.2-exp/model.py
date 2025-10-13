@@ -13,10 +13,8 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from config import DeepSeekConfig
 from kernel import SparseIndexer
-
 
 # =============================================================================
 # Basic Layers (PyTorch Functional)
@@ -73,9 +71,7 @@ class Linear(nn.Module):
         self.out_features = out_features
 
         # Use FP16 for Metal (FP8 not supported on Apple Silicon)
-        self.weight = nn.Parameter(
-            torch.empty(out_features, in_features, dtype=dtype)
-        )
+        self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype))
 
         if bias:
             self.bias = nn.Parameter(torch.zeros(out_features, dtype=dtype))
@@ -129,8 +125,7 @@ class Indexer(nn.Module):
 
         # Metal/MPS kernel for sparse indexing
         self.sparse_indexer = SparseIndexer(
-            topk=self.topk,
-            scale=1.0 / math.sqrt(self.head_dim)
+            topk=self.topk, scale=1.0 / math.sqrt(self.head_dim)
         )
 
     def forward(
@@ -239,8 +234,11 @@ class MLA(nn.Module):
         # For now, placeholder: just return projection of input
         # This bypasses proper attention until MLA FFI is integrated
         placeholder_output = torch.randn(
-            batch, seq, self.n_heads * self.config.v_head_dim,
-            device=x.device, dtype=x.dtype
+            batch,
+            seq,
+            self.n_heads * self.config.v_head_dim,
+            device=x.device,
+            dtype=x.dtype,
         )
         output = self.o_proj(placeholder_output)
 
@@ -271,9 +269,9 @@ class MoE(nn.Module):
         self.gate = Linear(config.dim, config.n_routed_experts, bias=False)
 
         # Routed experts (simplified - use nn.ModuleList)
-        self.experts = nn.ModuleList([
-            self._make_expert(config) for _ in range(config.n_routed_experts)
-        ])
+        self.experts = nn.ModuleList(
+            [self._make_expert(config) for _ in range(config.n_routed_experts)]
+        )
 
         # Shared expert
         self.shared_expert = self._make_expert(config)
@@ -411,9 +409,9 @@ class DeepSeekModel(nn.Module):
         self.embed_tokens = ParallelEmbedding(config.vocab_size, config.dim)
 
         # Decoder layers
-        self.layers = nn.ModuleList([
-            DecoderLayer(config, layer_idx) for layer_idx in range(config.n_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [DecoderLayer(config, layer_idx) for layer_idx in range(config.n_layers)]
+        )
 
         # Final norm
         self.norm = RMSNorm(config.dim)
@@ -441,8 +439,11 @@ class DeepSeekModel(nn.Module):
 
         # TODO: Compress to KV latent (placeholder)
         kv_latent = torch.randn(
-            x.shape[0], x.shape[1], self.config.kv_lora_rank,
-            device=x.device, dtype=x.dtype
+            x.shape[0],
+            x.shape[1],
+            self.config.kv_lora_rank,
+            device=x.device,
+            dtype=x.dtype,
         )
 
         # Pass through decoder layers

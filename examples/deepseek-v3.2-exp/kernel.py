@@ -9,9 +9,10 @@ Based on CUDA kernels from: https://github.com/deepseek-ai/DeepSeek-V3.2-Exp
 Adapted for Metal/Apple Silicon
 """
 
+from typing import Tuple
+
 import torch
 import torch.nn.functional as F
-from typing import Tuple
 
 try:
     from python.metal_sdpa_ffi import sparse_indexer_scores
@@ -161,7 +162,7 @@ class SparseIndexer:
         # Auto-compute scale if not provided
         if self.scale is None:
             head_dim = q.shape[-1]
-            scale = 1.0 / (head_dim ** 0.5)
+            scale = 1.0 / (head_dim**0.5)
         else:
             scale = self.scale
 
@@ -308,4 +309,4 @@ if __name__ == "__main__":
 
     print(f"\n{'='*60}")
     print("All kernel tests passed! ✅")
-    print('='*60)
+    print("=" * 60)

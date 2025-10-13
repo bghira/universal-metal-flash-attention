@@ -6,7 +6,7 @@ enum TestEnvironment {
   /// Check if running in CI environment (GitHub Actions, etc.)
   static var isCI: Bool {
     ProcessInfo.processInfo.environment["CI"] != nil ||
-    ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] != nil
+      ProcessInfo.processInfo.environment["GITHUB_ACTIONS"] != nil
   }
 
   /// Check if running on GitHub Actions specifically

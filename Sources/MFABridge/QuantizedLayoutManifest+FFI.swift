@@ -136,7 +136,7 @@ public func mfa_get_quantized_capabilities(_ outPtr: UnsafeMutableRawPointer?) {
 
 @_cdecl("mfa_get_quantized_layout")
 public func mfa_get_quantized_layout(
-  _ kernelRaw: Int32,
+  _: Int32,
   _ outPtr: UnsafeMutableRawPointer?
 ) {
   guard let outPtr else {

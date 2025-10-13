@@ -6,14 +6,12 @@ Demonstrates KV cache decompression using optimized MFA GEMM.
 Performance: 10.9 TFLOPS @ 2048×2048 on M3 Max
 """
 
-import torch
 import numpy as np
+import torch
 
 try:
-    from python.metal_sdpa_ffi import (
-        MlaContext,
-        is_metal_available,
-    )
+    from python.metal_sdpa_ffi import MlaContext, is_metal_available
+
     EXTENSION_AVAILABLE = True
 except ImportError as e:
     print(f"⚠️  Extension not yet built: {e}")
@@ -61,6 +59,7 @@ def test_mla_decompression():
     except Exception as e:
         print(f"❌ Failed to create MLA context: {e}")
         import traceback
+
         traceback.print_exc()
         return
 
@@ -71,21 +70,18 @@ def test_mla_decompression():
 
         # Create compressed KV latent tensor on MPS device
         kv_latent = torch.randn(
-            batch_size, sequence_length, kv_latent_dim,
+            batch_size,
+            sequence_length,
+            kv_latent_dim,
             dtype=torch.float16,
-            device=torch.device("mps")
+            device=torch.device("mps"),
         )
         print(f"✓ Created compressed KV latent tensor: {list(kv_latent.shape)} FP16")
 
         # Perform MLA forward pass
         print("\n⚡ Running MLA decompression...")
         decompressed_k, decompressed_v = mla_ctx.forward(
-            kv_latent,
-            batch_size,
-            num_heads,
-            sequence_length,
-            head_dim,
-            kv_latent_dim
+            kv_latent, batch_size, num_heads, sequence_length, head_dim, kv_latent_dim
         )
 
         print("\n✅ MLA decompression successful!")
@@ -94,14 +90,19 @@ def test_mla_decompression():
 
         # Verify shapes
         expected_shape = [batch_size * sequence_length, total_dim]
-        assert list(decompressed_k.shape) == expected_shape, f"K shape mismatch: {decompressed_k.shape} != {expected_shape}"
-        assert list(decompressed_v.shape) == expected_shape, f"V shape mismatch: {decompressed_v.shape} != {expected_shape}"
+        assert (
+            list(decompressed_k.shape) == expected_shape
+        ), f"K shape mismatch: {decompressed_k.shape} != {expected_shape}"
+        assert (
+            list(decompressed_v.shape) == expected_shape
+        ), f"V shape mismatch: {decompressed_v.shape} != {expected_shape}"
 
         print("\n✅ All assertions passed!")
 
     except Exception as e:
         print(f"\n❌ MLA test failed: {e}")
         import traceback
+
         traceback.print_exc()
 
 
@@ -114,7 +115,7 @@ def test_mla_with_real_model():
     print("\n📚 MLA Usage Example (Conceptual)")
     print("=" * 60)
 
-    code_example = '''
+    code_example = """
 # 1. Load pre-trained MLA weights from model checkpoint
 wk = torch.load("model_weights/mla_wk.pt")  # [kv_latent_dim, num_heads × head_dim]
 wv = torch.load("model_weights/mla_wv.pt")  # [kv_latent_dim, num_heads × head_dim]
@@ -138,7 +139,7 @@ decompressed_k, decompressed_v = mla_forward(
 
 # 4. Use decompressed K, V for attention
 attention_output = flash_attention(q, decompressed_k, decompressed_v)
-'''
+"""
 
     print(code_example)
     print("=" * 60)

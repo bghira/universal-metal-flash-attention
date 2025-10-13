@@ -4,45 +4,8 @@
 #include <stdexcept>
 #include <iostream>
 
-// Forward declarations from C FFI
-extern "C" {
-    typedef void* mfa_context_t;
-    typedef void* mfa_mla_context_t;
-    typedef void* mfa_buffer_t;
-    typedef int32_t mfa_error_t;
-
-    mfa_error_t mfa_create_context(mfa_context_t* context);
-    void mfa_destroy_context(mfa_context_t context);
-
-    mfa_error_t mfa_mla_create_context(mfa_mla_context_t* context);
-    void mfa_mla_destroy_context(mfa_mla_context_t context);
-
-    mfa_error_t mfa_mla_init_weights(
-        mfa_mla_context_t context,
-        uint32_t num_heads,
-        uint32_t head_dim,
-        uint32_t kv_latent_dim
-    );
-
-    mfa_error_t mfa_mla_load_weights(
-        mfa_mla_context_t context,
-        mfa_buffer_t wk,
-        mfa_buffer_t wv
-    );
-
-    mfa_error_t mfa_mla_forward(
-        mfa_mla_context_t context,
-        mfa_context_t mfa_context,
-        mfa_buffer_t kv_latent,
-        mfa_buffer_t* decompressed_k,
-        mfa_buffer_t* decompressed_v,
-        uint32_t batch_size,
-        uint32_t num_heads,
-        uint32_t sequence_length,
-        uint32_t head_dim,
-        uint32_t kv_latent_dim
-    );
-}
+// The FFI declarations are already in metal_sdpa_backend.h
+// No need to re-declare them here
 
 namespace metal_sdpa {
 
@@ -93,8 +56,8 @@ void MlaContextWrapper::load_weights(const torch::Tensor& wk, const torch::Tenso
     }
 
     // Get Metal buffers from tensors
-    auto wk_buffer = get_mtl_buffer_storage(wk);
-    auto wv_buffer = get_mtl_buffer_storage(wv);
+    auto wk_buffer = mps_utils::get_mtl_buffer_handle(wk);
+    auto wv_buffer = mps_utils::get_mtl_buffer_handle(wv);
 
     mfa_error_t result = mfa_mla_load_weights(mla_context_, wk_buffer, wv_buffer);
     if (result != 0) {
@@ -114,19 +77,63 @@ std::tuple<torch::Tensor, torch::Tensor> MlaContextWrapper::forward(
         throw std::runtime_error("MLA/MFA context not initialized");
     }
 
-    // Get Metal buffer from kv_latent tensor
-    auto kv_latent_buffer = get_mtl_buffer_storage(kv_latent);
+    // Create output tensors on the same device as input
+    auto output_shape = std::vector<int64_t>{
+        static_cast<int64_t>(batch_size * sequence_length),
+        static_cast<int64_t>(num_heads * head_dim)
+    };
 
-    // Call MLA forward
-    mfa_buffer_t decompressed_k_buffer = nullptr;
-    mfa_buffer_t decompressed_v_buffer = nullptr;
+    auto decompressed_k = torch::empty(output_shape,
+        torch::TensorOptions()
+            .dtype(torch::kFloat16)
+            .device(kv_latent.device()));
 
-    mfa_error_t result = mfa_mla_forward(
+    auto decompressed_v = torch::empty(output_shape,
+        torch::TensorOptions()
+            .dtype(torch::kFloat16)
+            .device(kv_latent.device()));
+
+    // Get Metal buffer handles
+    auto kv_latent_buffer = mps_utils::get_mtl_buffer_handle(kv_latent);
+    auto k_buffer = mps_utils::get_mtl_buffer_handle(decompressed_k);
+    auto v_buffer = mps_utils::get_mtl_buffer_handle(decompressed_v);
+
+    // Wrap Metal buffers in mfa_buffer_t for FFI
+    mfa_buffer_t kv_latent_mfa_buffer = nullptr;
+    mfa_buffer_t k_mfa_buffer = nullptr;
+    mfa_buffer_t v_mfa_buffer = nullptr;
+
+    mfa_error_t result;
+
+    // Create MFA buffers from Metal buffers
+    result = mfa_buffer_from_mtl_buffer(mfa_context_, kv_latent_buffer,
+                                        kv_latent.nbytes(), &kv_latent_mfa_buffer);
+    if (result != MFA_SUCCESS) {
+        throw std::runtime_error("Failed to create MFA buffer for kv_latent");
+    }
+
+    result = mfa_buffer_from_mtl_buffer(mfa_context_, k_buffer,
+                                        decompressed_k.nbytes(), &k_mfa_buffer);
+    if (result != MFA_SUCCESS) {
+        mfa_destroy_buffer(kv_latent_mfa_buffer);
+        throw std::runtime_error("Failed to create MFA buffer for decompressed_k");
+    }
+
+    result = mfa_buffer_from_mtl_buffer(mfa_context_, v_buffer,
+                                        decompressed_v.nbytes(), &v_mfa_buffer);
+    if (result != MFA_SUCCESS) {
+        mfa_destroy_buffer(kv_latent_mfa_buffer);
+        mfa_destroy_buffer(k_mfa_buffer);
+        throw std::runtime_error("Failed to create MFA buffer for decompressed_v");
+    }
+
+    // Call MLA forward - note: it now takes mfa_buffer_t* as outputs to fill in
+    result = mfa_mla_forward(
         mla_context_,
         mfa_context_,
-        kv_latent_buffer,
-        &decompressed_k_buffer,
-        &decompressed_v_buffer,
+        kv_latent_mfa_buffer,
+        &k_mfa_buffer,
+        &v_mfa_buffer,
         batch_size,
         num_heads,
         sequence_length,
@@ -134,29 +141,14 @@ std::tuple<torch::Tensor, torch::Tensor> MlaContextWrapper::forward(
         kv_latent_dim
     );
 
-    if (result != 0) {
+    // Clean up MFA buffers (they're just wrappers, not the underlying Metal buffers)
+    mfa_destroy_buffer(kv_latent_mfa_buffer);
+    mfa_destroy_buffer(k_mfa_buffer);
+    mfa_destroy_buffer(v_mfa_buffer);
+
+    if (result != MFA_SUCCESS) {
         throw std::runtime_error("MLA forward pass failed");
     }
-
-    // Create output tensors from Metal buffers
-    auto output_shape = std::vector<int64_t>{
-        static_cast<int64_t>(batch_size * sequence_length),
-        static_cast<int64_t>(num_heads * head_dim)
-    };
-
-    auto decompressed_k = create_tensor_from_mtl_buffer(
-        decompressed_k_buffer,
-        output_shape,
-        torch::kFloat16,
-        kv_latent.device()
-    );
-
-    auto decompressed_v = create_tensor_from_mtl_buffer(
-        decompressed_v_buffer,
-        output_shape,
-        torch::kFloat16,
-        kv_latent.device()
-    );
 
     return std::make_tuple(decompressed_k, decompressed_v);
 }

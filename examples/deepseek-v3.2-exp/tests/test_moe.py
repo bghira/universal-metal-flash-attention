@@ -34,13 +34,17 @@ def test_moe_basic():
         route_scale=2.5,
     )
 
-    print(f"Config: {config.dim} dim, {config.n_routed_experts} experts, "
-          f"{config.n_activated_experts} activated, route_scale={config.route_scale}")
+    print(
+        f"Config: {config.dim} dim, {config.n_routed_experts} experts, "
+        f"{config.n_activated_experts} activated, route_scale={config.route_scale}"
+    )
 
     # Create MoE
     moe = MoE(config).to(device)
-    print(f"✓ MoE created with {config.n_routed_experts} routed + "
-          f"{config.n_shared_experts} shared experts")
+    print(
+        f"✓ MoE created with {config.n_routed_experts} routed + "
+        f"{config.n_shared_experts} shared experts"
+    )
 
     # Create test tensor
     batch = 2
@@ -93,7 +97,9 @@ def test_moe_routing():
     gate_scores = torch.sigmoid(gate_logits * config.route_scale)
 
     print(f"✓ Gate logits: {list(gate_logits.shape)}")
-    print(f"✓ Gate scores range: [{gate_scores.min().item():.4f}, {gate_scores.max().item():.4f}]")
+    print(
+        f"✓ Gate scores range: [{gate_scores.min().item():.4f}, {gate_scores.max().item():.4f}]"
+    )
 
     # Select top-k
     topk_scores, topk_indices = torch.topk(
@@ -104,13 +110,15 @@ def test_moe_routing():
     print(f"✓ Top-{config.n_activated_experts} scores: {list(topk_scores.shape)}")
 
     # Verify correct number of experts selected
-    assert topk_indices.shape[-1] == config.n_activated_experts, \
-        f"Wrong number of experts selected: {topk_indices.shape[-1]} != {config.n_activated_experts}"
+    assert (
+        topk_indices.shape[-1] == config.n_activated_experts
+    ), f"Wrong number of experts selected: {topk_indices.shape[-1]} != {config.n_activated_experts}"
 
     # Verify indices are in valid range
     assert topk_indices.min() >= 0, "Expert indices contain negative values"
-    assert topk_indices.max() < config.n_routed_experts, \
-        f"Expert indices exceed range: {topk_indices.max()} >= {config.n_routed_experts}"
+    assert (
+        topk_indices.max() < config.n_routed_experts
+    ), f"Expert indices exceed range: {topk_indices.max()} >= {config.n_routed_experts}"
 
     print("\n✅ Routing correctness verified!")
     print("=" * 60)
@@ -138,7 +146,9 @@ def test_moe_gradient_flow():
     moe = MoE(config).to(device)
 
     # Enable gradients
-    x = torch.randn(1, 4, config.dim, device=device, dtype=torch.float16, requires_grad=True)
+    x = torch.randn(
+        1, 4, config.dim, device=device, dtype=torch.float16, requires_grad=True
+    )
 
     # Forward pass
     output = moe(x)
@@ -153,9 +163,7 @@ def test_moe_gradient_flow():
     # Check that expert gradients exist
     gate_has_grad = any(p.grad is not None for p in moe.gate.parameters())
     expert_has_grad = any(
-        p.grad is not None
-        for expert in moe.experts
-        for p in expert.parameters()
+        p.grad is not None for expert in moe.experts for p in expert.parameters()
     )
 
     assert gate_has_grad, "Gate gradients not computed"

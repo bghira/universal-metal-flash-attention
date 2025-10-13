@@ -32,8 +32,10 @@ def test_indexer_basic():
         index_topk=32,
     )
 
-    print(f"Config: {config.dim} dim, {config.index_n_heads} heads, "
-          f"{config.index_head_dim} head_dim, top-k={config.index_topk}")
+    print(
+        f"Config: {config.dim} dim, {config.index_n_heads} heads, "
+        f"{config.index_head_dim} head_dim, top-k={config.index_topk}"
+    )
 
     # Create indexer
     indexer = Indexer(config).to(device)
@@ -60,14 +62,18 @@ def test_indexer_basic():
     expected_indices_shape = (batch, config.index_n_heads, seq, config.index_topk)
     expected_scores_shape = (batch, config.index_n_heads, seq, config.index_topk)
 
-    assert indices.shape == expected_indices_shape, \
-        f"Indices shape mismatch: {indices.shape} != {expected_indices_shape}"
-    assert scores.shape == expected_scores_shape, \
-        f"Scores shape mismatch: {scores.shape} != {expected_scores_shape}"
+    assert (
+        indices.shape == expected_indices_shape
+    ), f"Indices shape mismatch: {indices.shape} != {expected_indices_shape}"
+    assert (
+        scores.shape == expected_scores_shape
+    ), f"Scores shape mismatch: {scores.shape} != {expected_scores_shape}"
 
     # Verify indices are in valid range
     assert indices.min() >= 0, "Indices contain negative values"
-    assert indices.max() < seq, f"Indices exceed sequence length: {indices.max()} >= {seq}"
+    assert (
+        indices.max() < seq
+    ), f"Indices exceed sequence length: {indices.max()} >= {seq}"
 
     print("\n✅ All assertions passed!")
     print("=" * 60)
@@ -131,8 +137,12 @@ def test_indexer_gradient_flow():
     indexer = Indexer(config).to(device)
 
     # Enable gradients
-    q = torch.randn(1, 8, config.dim, device=device, dtype=torch.float16, requires_grad=True)
-    k = torch.randn(1, 8, config.dim, device=device, dtype=torch.float16, requires_grad=True)
+    q = torch.randn(
+        1, 8, config.dim, device=device, dtype=torch.float16, requires_grad=True
+    )
+    k = torch.randn(
+        1, 8, config.dim, device=device, dtype=torch.float16, requires_grad=True
+    )
 
     # Forward pass
     indices, scores = indexer(q, k)

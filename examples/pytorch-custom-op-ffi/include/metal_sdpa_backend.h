@@ -531,6 +531,13 @@ public:
         const QuantizationConfig& config = QuantizationConfig{}
     );
 
+    // Public sparse_indexer_scores - needed for Python bindings
+    static torch::Tensor sparse_indexer_scores(
+        const torch::Tensor& q,
+        const torch::Tensor& k,
+        double scale
+    );
+
 private:
     static mfa_context_t swift_context_;
     static bool is_initialized_;
@@ -557,12 +564,6 @@ private:
         bool is_causal,
         float softmax_scale,
         bool use_mps_buffers
-    );
-
-    static torch::Tensor sparse_indexer_scores(
-        const torch::Tensor& q,
-        const torch::Tensor& k,
-        double scale
     );
 
     static mfa_precision_t torch_dtype_to_mfa_dtype(torch::ScalarType dtype);

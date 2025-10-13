@@ -418,7 +418,8 @@ final class MFAFFITests: XCTestCase {
       XCTAssertEqual(nanCount, 0, "\(testName): Found \(nanCount) NaN values in output")
       XCTAssertEqual(infCount, 0, "\(testName): Found \(infCount) Inf values in output")
 
-      // For extreme softmax scales (>= 10.0), all zeros is mathematically expected due to saturation
+      // For extreme softmax scales (>= 10.0), all zeros is mathematically expected due to
+      // saturation
       let isExtremeSoftmaxScale = testName.contains("Scale-10") || testName.contains("Scale-100")
       if !isExtremeSoftmaxScale {
         XCTAssertGreaterThan(nonZeroCount, 0, "\(testName): Output should contain non-zero values")
@@ -547,7 +548,7 @@ final class MFAFFITests: XCTestCase {
     let isExtremeSoftmaxScale = testName.contains("Scale-10") || testName.contains("Scale-100")
 
     // Attention outputs should have reasonable statistical properties
-    if !isMinimalSize && !isExtremeSoftmaxScale {
+    if !isMinimalSize, !isExtremeSoftmaxScale {
       XCTAssertGreaterThan(stdDev, 0.001, "\(testName): Output has too little variance")
     } else if isExtremeSoftmaxScale {
       // For extreme softmax scales, we expect low variance or even all zeros
@@ -572,7 +573,7 @@ final class MFAFFITests: XCTestCase {
     let minVal = output.min() ?? 0
     let maxVal = output.max() ?? 0
 
-    if !isMinimalSize && !isExtremeSoftmaxScale {
+    if !isMinimalSize, !isExtremeSoftmaxScale {
       XCTAssertGreaterThan(maxVal - minVal, 0.001, "\(testName): Output range is too narrow")
     } else if isExtremeSoftmaxScale {
       // For extreme scales, the range can be very narrow or zero - this is expected

@@ -7,10 +7,10 @@ import MetalPerformanceShaders
 // Swift expects: FP32=0, FP16=1, BF16=2
 private func convertCFFIPrecisionToSwift(_ cPrecision: Int32) -> Int32 {
   switch cPrecision {
-  case 0: return 1 // FP16: C=0 -> Swift=1
-  case 1: return 2 // BF16: C=1 -> Swift=2
-  case 2: return 0 // FP32: C=2 -> Swift=0
-  default: return cPrecision // INT8=3, INT4=4 remain the same
+  case 0: 1 // FP16: C=0 -> Swift=1
+  case 1: 2 // BF16: C=1 -> Swift=2
+  case 2: 0 // FP32: C=2 -> Swift=0
+  default: cPrecision // INT8=3, INT4=4 remain the same
   }
 }
 
@@ -245,16 +245,16 @@ final class MFAContext {
       return nil
     }
 
-  guard
-    let maskInputBuffer = device.makeBuffer(
-      bytesNoCopy: arguments.pointer,
-      length: arguments.sizeBytes,
-      options: .storageModeShared,
-      deallocator: nil
-    )
-  else {
-    throw MaskPreparationError.bufferAllocationFailed
-  }
+    guard
+      let maskInputBuffer = device.makeBuffer(
+        bytesNoCopy: arguments.pointer,
+        length: arguments.sizeBytes,
+        options: .storageModeShared,
+        deallocator: nil
+      )
+    else {
+      throw MaskPreparationError.bufferAllocationFailed
+    }
 
     maskInputBuffer.didModifyRange(0..<arguments.sizeBytes)
 
@@ -430,7 +430,7 @@ final class MFABuffer {
     self.shape = shape
     self.strides = strides
     self.ndim = ndim
-    self.isStrided = (shape != nil && strides != nil && ndim > 0)
+    isStrided = (shape != nil && strides != nil && ndim > 0)
   }
 }
 
@@ -921,7 +921,8 @@ public func mfa_attention_forward(
       descriptor.softmaxScale = softmaxScale
 
       // Set precision based on input parameters
-      // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently used
+      // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently
+      // used
       // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
       // we must use FP32 inputs to avoid NaN issues from precision mismatch
       // The inputs are always FP32 from the FFI layer
@@ -2465,7 +2466,8 @@ public func mfa_sparse_indexer_scores(
     }
     resultBuffer = existingOutput.buffer
   } else {
-    guard let newBuffer = ctx.device.makeBuffer(length: outputBytes, options: .storageModeShared) else {
+    guard let newBuffer = ctx.device.makeBuffer(length: outputBytes, options: .storageModeShared)
+    else {
       return 2 // MFA_ERROR_MEMORY_ALLOCATION
     }
     resultBuffer = newBuffer
@@ -2520,7 +2522,12 @@ public func mfa_sparse_indexer_scores(
     let kMatrix = MPSMatrix(buffer: kBuffer.buffer, offset: kOffset, descriptor: bDescriptor)
     let cMatrix = MPSMatrix(buffer: resultBuffer, offset: cOffset, descriptor: cDescriptor)
 
-    matmul.encode(commandBuffer: commandBuffer, leftMatrix: qMatrix, rightMatrix: kMatrix, resultMatrix: cMatrix)
+    matmul.encode(
+      commandBuffer: commandBuffer,
+      leftMatrix: qMatrix,
+      rightMatrix: kMatrix,
+      resultMatrix: cMatrix
+    )
   }
 
   commandBuffer.commit()

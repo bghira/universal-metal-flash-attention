@@ -90,10 +90,7 @@ class DeepSeekConfig:
     def to_json(self, output_path: str | Path) -> None:
         """Save configuration to JSON file"""
         output_path = Path(output_path)
-        config_dict = {
-            k: v for k, v in self.__dict__.items()
-            if not k.startswith("_")
-        }
+        config_dict = {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
         with open(output_path, "w") as f:
             json.dump(config_dict, f, indent=4)
 
