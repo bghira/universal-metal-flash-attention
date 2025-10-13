@@ -304,7 +304,7 @@ final class MFAContext {
     var maskScalarValue = UInt32(arguments.scalarType.rawValue)
     encoder.setBytes(&maskScalarValue, length: MemoryLayout<UInt32>.size, index: 3)
 
-    var shapeVector: [UInt32] = [batchSize, numHeads, seqLenQ, seqLenKV]
+    let shapeVector: [UInt32] = [batchSize, numHeads, seqLenQ, seqLenKV]
     shapeVector.withUnsafeBytes { bytes in
       if let baseAddress = bytes.baseAddress {
         encoder.setBytes(baseAddress, length: bytes.count, index: 4)
@@ -913,16 +913,17 @@ public func mfa_attention_forward(
       descriptor.softmaxScale = softmaxScale
 
       // Set precision based on input parameters
-      // Convert C FFI enum values to Swift values
-      let swiftInputPrecision = convertCFFIPrecisionToSwift(inputPrecision)
-      let swiftIntermediatePrecision = convertCFFIPrecisionToSwift(intermediatePrecision)
-
+      // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently used
       // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
       // we must use FP32 inputs to avoid NaN issues from precision mismatch
       // The inputs are always FP32 from the FFI layer
       descriptor.lowPrecisionInputs = false
       // Use FP32 intermediates for numerical stability
       descriptor.lowPrecisionIntermediates = false
+
+      // Suppress unused parameter warnings - these are part of the API but not used yet
+      _ = inputPrecision
+      _ = intermediatePrecision
 
       // Create kernel descriptor
       let kernelDescriptor = descriptor.kernelDescriptor(type: .forward)
@@ -1767,88 +1768,84 @@ private func mfa_attention_forward_multihead_internal(
 )
   -> Int32
 {
-  do {
-    // Create multi-head attention instance
-    let multiHeadAttention = MultiHeadAttention(device: context.device)
+  // Create multi-head attention instance
+  let multiHeadAttention = MultiHeadAttention(device: context.device)
 
-    // Create base attention descriptor
-    var baseDescriptor = AttentionDescriptor()
-    baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
-    // Convert C FFI enum values to Swift values
-    let swiftInputPrecision = convertCFFIPrecisionToSwift(inputPrecision)
-    let swiftIntermediatePrecision = convertCFFIPrecisionToSwift(intermediatePrecision)
+  // Create base attention descriptor
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
 
-    // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
-    // we must use FP32 inputs to avoid NaN issues from precision mismatch
-    // The inputs are always FP32 from the FFI layer
-    baseDescriptor.lowPrecisionInputs = false // Always use FP32 inputs from FFI
-    baseDescriptor
-      // Use FP32 intermediates for numerical stability
-      .lowPrecisionIntermediates = false
-    baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
-    baseDescriptor.sparsityPattern = causal ? .causal : .none
-    baseDescriptor.softmaxScale = softmaxScale
+  // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently used
+  // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
+  // we must use FP32 inputs to avoid NaN issues from precision mismatch
+  // The inputs are always FP32 from the FFI layer
+  baseDescriptor.lowPrecisionInputs = false // Always use FP32 inputs from FFI
+  baseDescriptor
+    // Use FP32 intermediates for numerical stability
+    .lowPrecisionIntermediates = false
 
-    // Create tensor shapes
-    let queryShape = MultiHeadShape(
-      batchSize: batchSize,
-      numHeads: numHeads,
-      sequenceLength: seqLenQ,
-      headDimension: headDim
+  // Suppress unused parameter warnings - these are part of the API but not used yet
+  _ = inputPrecision
+  _ = intermediatePrecision
+  baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
+  baseDescriptor.softmaxScale = softmaxScale
+
+  // Create tensor shapes
+  let queryShape = MultiHeadShape(
+    batchSize: batchSize,
+    numHeads: numHeads,
+    sequenceLength: seqLenQ,
+    headDimension: headDim
+  )
+
+  let kvShape = MultiHeadShape(
+    batchSize: batchSize,
+    numHeads: numHeads, // Standard MHA for now
+    sequenceLength: seqLenKV,
+    headDimension: headDim
+  )
+
+  // Create multi-head descriptor with optimized dispatch strategy
+  let multiHeadDescriptor = MultiHeadAttentionDescriptor(
+    baseDescriptor: baseDescriptor,
+    queryShape: queryShape,
+    keyShape: kvShape,
+    valueShape: kvShape,
+    broadcastMode: .standard, // Standard MHA mode
+    dispatchStrategy: .perBatch // Use per-batch dispatch for better performance with small head
+    // counts
+  )
+
+  // Execute multi-head attention (no logsumexp for forward-only)
+  guard
+    let commandBuffer = multiHeadAttention.forward(
+      query: qBuffer,
+      key: kBuffer,
+      value: vBuffer,
+      output: outBuffer,
+      logsumexp: nil, // Skip logsumexp for forward-only passes
+      descriptor: multiHeadDescriptor,
+      maskBuffer: preparedMask?.buffer
     )
-
-    let kvShape = MultiHeadShape(
-      batchSize: batchSize,
-      numHeads: numHeads, // Standard MHA for now
-      sequenceLength: seqLenKV,
-      headDimension: headDim
-    )
-
-    // Create multi-head descriptor with optimized dispatch strategy
-    let multiHeadDescriptor = MultiHeadAttentionDescriptor(
-      baseDescriptor: baseDescriptor,
-      queryShape: queryShape,
-      keyShape: kvShape,
-      valueShape: kvShape,
-      broadcastMode: .standard, // Standard MHA mode
-      dispatchStrategy: .perBatch // Use per-batch dispatch for better performance with small head
-      // counts
-    )
-
-    // Execute multi-head attention (no logsumexp for forward-only)
-    guard
-      let commandBuffer = multiHeadAttention.forward(
-        query: qBuffer,
-        key: kBuffer,
-        value: vBuffer,
-        output: outBuffer,
-        logsumexp: nil, // Skip logsumexp for forward-only passes
-        descriptor: multiHeadDescriptor,
-        maskBuffer: preparedMask?.buffer
-      )
-    else {
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Execute and wait for completion
-    commandBuffer.commit()
-    commandBuffer.waitUntilCompleted()
-
-    if let error = commandBuffer.error {
-      print("Multi-head attention execution error: \(error)")
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Store GPU timing
-    let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    context.lastGPULatency = gpuLatency
-
-    return 0 // MFA_SUCCESS
-
-  } catch {
-    print("Multi-head attention error: \(error)")
-    return 4 // MFA_ERROR_KERNEL_COMPILATION
+  else {
+    return 5 // MFA_ERROR_EXECUTION_FAILED
   }
+
+  // Execute and wait for completion
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Multi-head attention execution error: \(error)")
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  // Store GPU timing
+  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+  context.lastGPULatency = gpuLatency
+
+  return 0 // MFA_SUCCESS
 }
 
 // Helper function to dequantize buffers for MultiHeadAttention processing
