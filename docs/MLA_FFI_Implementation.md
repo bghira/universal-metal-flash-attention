@@ -421,7 +421,7 @@ Example for batch=1, seq=2048, heads=8, head_dim=128, latent_dim=512:
 ## References
 
 - [FlashMLA Performance Documentation](./attic/PERFORMANCE_RESULTS.md)
-- [MFA GEMM Implementation](../metal-flash-attention/Sources/FlashAttention/GEMM/GEMMRuntimeQuantization.swift)
+- [MFA GEMM Implementation Notes](./attic/QuantizedMetalSIMDImplementation.md)
 - [DeepSeek-V3 Paper](https://arxiv.org/abs/2412.19437) - Original MLA architecture
 
 ---
