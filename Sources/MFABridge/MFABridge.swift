@@ -245,16 +245,18 @@ final class MFAContext {
       return nil
     }
 
-    guard
-      let maskInputBuffer = device.makeBuffer(
-        bytesNoCopy: arguments.pointer,
-        length: arguments.sizeBytes,
-        options: .storageModeShared,
-        deallocator: nil
-      )
-    else {
-      throw MaskPreparationError.bufferAllocationFailed
-    }
+  guard
+    let maskInputBuffer = device.makeBuffer(
+      bytesNoCopy: arguments.pointer,
+      length: arguments.sizeBytes,
+      options: .storageModeShared,
+      deallocator: nil
+    )
+  else {
+    throw MaskPreparationError.bufferAllocationFailed
+  }
+
+    maskInputBuffer.didModifyRange(0..<arguments.sizeBytes)
 
     let requiredBytes = totalElements * MemoryLayout<Float>.size
     if maskOutputBuffer == nil || maskOutputBuffer!.length < requiredBytes {
@@ -594,6 +596,9 @@ public func mfa_buffer_from_ptr(
     return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
+  // Notify Metal that the CPU has populated the backing memory so GPU reads see the latest data.
+  mtlBuffer.didModifyRange(0..<sizeBytes)
+
   let mfaBuffer = MFABuffer(
     buffer: mtlBuffer,
     originalDataPtr: nil,
@@ -643,6 +648,9 @@ public func mfa_buffer_from_ptr_with_strides(
   else {
     return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
+
+  // Ensure GPU observers pick up the CPU-written contents before execution.
+  mtlBuffer.didModifyRange(0..<sizeBytes)
 
   let mfaBuffer = MFABuffer(
     buffer: mtlBuffer,

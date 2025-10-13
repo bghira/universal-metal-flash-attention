@@ -932,6 +932,14 @@ final class MultiHeadFFITests: XCTestCase {
       )
     }
 
+    if
+      let oBuffer,
+      let bufferContents = mfa_buffer_contents(oBuffer),
+      outputData.withUnsafeMutableBytes({ $0.baseAddress }) != bufferContents
+    {
+      print("⚠️ Buffer contents pointer mismatch for \(numHeads) heads (expected direct alias)")
+    }
+
     return outputData
   }
 
@@ -1393,8 +1401,14 @@ final class MultiHeadFFITests: XCTestCase {
     XCTAssertEqual(result, mfa_error_t(MFA_SUCCESS), "Causal multi-head attention execution failed")
 
     // Validate output
-    XCTAssertFalse(outputData.contains { $0.isNaN }, "Causal output contains NaN values")
-    XCTAssertFalse(outputData.contains { $0.isInfinite }, "Causal output contains infinite values")
+    let containsNaN = outputData.contains { $0.isNaN }
+    let containsInf = outputData.contains { $0.isInfinite }
+    if containsNaN || containsInf {
+      let sample = outputData.prefix(16)
+      print("⚠️ CausalMasking output sample:", sample.map { String(format: "%.5f", $0) }.joined(separator: ", "))
+    }
+    XCTAssertFalse(containsNaN, "Causal output contains NaN values")
+    XCTAssertFalse(containsInf, "Causal output contains infinite values")
 
     // Clean up buffers
     mfa_destroy_buffer(qBuffer)
