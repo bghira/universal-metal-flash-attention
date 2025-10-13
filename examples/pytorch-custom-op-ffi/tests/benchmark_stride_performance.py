@@ -5,17 +5,19 @@ This module benchmarks the performance impact of handling non-contiguous
 tensors directly versus the traditional approach of making them contiguous.
 """
 
-import time
-import torch
-import numpy as np
-from typing import Dict, List, Tuple, Optional
-import json
 import gc
-from dataclasses import dataclass, asdict
+import json
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
 
 try:
     import metal_sdpa_extension
+
     HAS_METAL = True
 except ImportError:
     HAS_METAL = False
@@ -25,6 +27,7 @@ except ImportError:
 @dataclass
 class BenchmarkResult:
     """Container for benchmark results."""
+
     name: str
     batch_size: int
     num_heads: int
@@ -41,7 +44,9 @@ class BenchmarkResult:
 class StrideBenchmark:
     """Benchmark suite for stride-aware attention performance."""
 
-    def __init__(self, device: str = "mps", warmup_runs: int = 3, benchmark_runs: int = 10):
+    def __init__(
+        self, device: str = "mps", warmup_runs: int = 3, benchmark_runs: int = 10
+    ):
         self.device = device if torch.backends.mps.is_available() else "cpu"
         self.warmup_runs = warmup_runs
         self.benchmark_runs = benchmark_runs
@@ -57,11 +62,7 @@ class StrideBenchmark:
         return 0
 
     def benchmark_attention(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        name: str = "unnamed"
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, name: str = "unnamed"
     ) -> Tuple[float, bool, Optional[str]]:
         """
         Benchmark a single attention operation.
@@ -83,7 +84,9 @@ class StrideBenchmark:
             # Benchmark
             start_time = time.perf_counter()
             for _ in range(self.benchmark_runs):
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
 
             # Synchronize
             if self.device == "mps":
@@ -109,10 +112,12 @@ class StrideBenchmark:
         num_heads: int,
         seq_len: int,
         head_dim: int,
-        dtype: torch.dtype = torch.float16
+        dtype: torch.dtype = torch.float16,
     ) -> Dict[str, BenchmarkResult]:
         """Run benchmarks for a specific configuration."""
-        print(f"\nBenchmarking B={batch_size}, H={num_heads}, S={seq_len}, D={head_dim}")
+        print(
+            f"\nBenchmarking B={batch_size}, H={num_heads}, S={seq_len}, D={head_dim}"
+        )
 
         results = {}
 
@@ -138,7 +143,7 @@ class StrideBenchmark:
             memory_bytes=q_flux.numel() * q_flux.element_size() * 3,
             is_contiguous=True,
             success=success,
-            error=error
+            error=error,
         )
 
         # 2. Create non-contiguous Metal layout via permute
@@ -160,7 +165,7 @@ class StrideBenchmark:
             memory_bytes=q_metal_perm.numel() * q_metal_perm.element_size() * 3,
             is_contiguous=False,
             success=success,
-            error=error
+            error=error,
         )
 
         # 3. Benchmark with explicit contiguous() call
@@ -190,24 +195,28 @@ class StrideBenchmark:
             seq_len=seq_len,
             head_dim=head_dim,
             time_ms=elapsed_ms,
-            memory_bytes=q_metal_perm.numel() * q_metal_perm.element_size() * 6,  # Double memory
+            memory_bytes=q_metal_perm.numel()
+            * q_metal_perm.element_size()
+            * 6,  # Double memory
             is_contiguous=True,
             success=True,
-            error=None
+            error=None,
         )
 
         # Calculate speedups
         if results["metal_contiguous"].success and results["metal_noncontig"].success:
-            speedup = results["metal_contiguous"].time_ms / results["metal_noncontig"].time_ms
+            speedup = (
+                results["metal_contiguous"].time_ms / results["metal_noncontig"].time_ms
+            )
             results["metal_noncontig"].speedup = speedup
 
         return results
 
     def run_full_benchmark_suite(self):
         """Run complete benchmark suite with various configurations."""
-        print("="*80)
+        print("=" * 80)
         print("Stride-Aware Attention Performance Benchmarks")
-        print("="*80)
+        print("=" * 80)
         print(f"Device: {self.device}")
         print(f"Warmup runs: {self.warmup_runs}")
         print(f"Benchmark runs: {self.benchmark_runs}")
@@ -248,9 +257,9 @@ class StrideBenchmark:
 
     def print_summary(self):
         """Print a summary of benchmark results."""
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Benchmark Summary")
-        print("="*80)
+        print("=" * 80)
 
         if not self.results:
             print("No results to display")
@@ -288,7 +297,7 @@ class StrideBenchmark:
                 memory_saved.append(mem_save)
 
         if total_speedup:
-            print("\n" + "-"*40)
+            print("\n" + "-" * 40)
             print("Overall Statistics:")
             print(f"  Average speedup: {np.mean(total_speedup):.2f}x")
             print(f"  Min speedup: {np.min(total_speedup):.2f}x")
@@ -306,10 +315,10 @@ class StrideBenchmark:
             "device": self.device,
             "warmup_runs": self.warmup_runs,
             "benchmark_runs": self.benchmark_runs,
-            "results": [asdict(r) for r in self.results]
+            "results": [asdict(r) for r in self.results],
         }
 
-        with open(filename, 'w') as f:
+        with open(filename, "w") as f:
             json.dump(data, f, indent=2)
 
         print(f"\nResults saved to {filename}")
@@ -317,9 +326,9 @@ class StrideBenchmark:
 
 def run_memory_allocation_benchmark():
     """Benchmark memory allocation overhead for contiguous() calls."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Memory Allocation Overhead Benchmark")
-    print("="*80)
+    print("=" * 80)
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -365,9 +374,9 @@ def run_memory_allocation_benchmark():
 
 def run_stride_pattern_benchmark():
     """Benchmark different stride patterns and their performance impact."""
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("Stride Pattern Performance Impact")
-    print("="*80)
+    print("=" * 80)
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
     benchmark = StrideBenchmark(device=device, warmup_runs=3, benchmark_runs=10)
@@ -379,7 +388,7 @@ def run_stride_pattern_benchmark():
         ("Contiguous", lambda t: t),
         ("Permute(0,2,1,3)", lambda t: t.permute(0, 2, 1, 3)),
         ("Transpose(1,2)", lambda t: t.transpose(1, 2)),
-        ("Narrow (slice)", lambda t: t[:, :, :seq_len//2, :]),
+        ("Narrow (slice)", lambda t: t[:, :, : seq_len // 2, :]),
         ("Stride-2 slice", lambda t: t[:, :, ::2, :]),
     ]
 
@@ -390,9 +399,18 @@ def run_stride_pattern_benchmark():
 
         # Create base tensors
         torch.manual_seed(42)
-        q = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-        k = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-        v = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
+        q = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
+        k = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
+        v = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
 
         # Apply transformation
         q_t = transform(q)
@@ -437,6 +455,6 @@ if __name__ == "__main__":
     run_memory_allocation_benchmark()
     run_stride_pattern_benchmark()
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("All benchmarks completed")
-    print("="*80)
+    print("=" * 80)

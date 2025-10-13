@@ -15,18 +15,20 @@ These tests help identify if the issue is in:
 - Data corruption during conversion
 """
 
-import sys
-import os
-from pathlib import Path
-import torch
-import numpy as np
 import ctypes
+import os
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
 
 # Add the python package to path
 sys.path.insert(0, str(Path(__file__).parent / "python"))
 
 try:
     import metal_sdpa_extension
+
     METAL_AVAILABLE = True
     print("✓ metal_sdpa_extension imported successfully")
 except ImportError as e:
@@ -38,7 +40,7 @@ def print_test_header(test_name):
     """Print formatted test header."""
     print(f"\n{'='*60}")
     print(f"TEST: {test_name}")
-    print('='*60)
+    print("=" * 60)
 
 
 def print_test_result(passed, message=""):
@@ -83,7 +85,7 @@ def test_1_torch_dtype_to_mfa_dtype_mapping():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -108,7 +110,9 @@ def test_1_torch_dtype_to_mfa_dtype_mapping():
             # Try to process it through Metal SDPA to see if dtype mapping works
             try:
                 q = k = v = tensor
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
 
                 # Check if output has the expected dtype
                 dtype_preserved = output.dtype == torch_dtype
@@ -128,9 +132,14 @@ def test_1_torch_dtype_to_mfa_dtype_mapping():
                     print(f"    -> This looks like a dtype mapping error")
                     all_mappings_correct = False
 
-        return print_test_result(all_mappings_correct,
-                               "All dtype mappings correct" if all_mappings_correct
-                               else "Dtype mapping issues detected")
+        return print_test_result(
+            all_mappings_correct,
+            (
+                "All dtype mappings correct"
+                if all_mappings_correct
+                else "Dtype mapping issues detected"
+            ),
+        )
 
     except Exception as e:
         return print_test_result(False, f"Exception during dtype mapping test: {e}")
@@ -148,15 +157,27 @@ def test_2_ensure_contiguous_cpu_bf16():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
         # Create bf16 tensors in various configurations
         test_configs = [
             ("contiguous_cpu", lambda: torch.randn(2, 4, 8, 16, dtype=torch.bfloat16)),
-            ("non_contiguous_cpu", lambda: torch.randn(2, 8, 4, 16, dtype=torch.bfloat16).permute(0, 2, 1, 3)),
-            ("contiguous_mps", lambda: torch.randn(2, 4, 8, 16, dtype=torch.bfloat16).to('mps') if torch.backends.mps.is_available() else None),
+            (
+                "non_contiguous_cpu",
+                lambda: torch.randn(2, 8, 4, 16, dtype=torch.bfloat16).permute(
+                    0, 2, 1, 3
+                ),
+            ),
+            (
+                "contiguous_mps",
+                lambda: (
+                    torch.randn(2, 4, 8, 16, dtype=torch.bfloat16).to("mps")
+                    if torch.backends.mps.is_available()
+                    else None
+                ),
+            ),
         ]
 
         all_passed = True
@@ -181,10 +202,14 @@ def test_2_ensure_contiguous_cpu_bf16():
                 orig_device = tensor.device
                 orig_contiguous = tensor.is_contiguous()
 
-                print(f"  Original: dtype={orig_dtype}, device={orig_device}, contiguous={orig_contiguous}")
+                print(
+                    f"  Original: dtype={orig_dtype}, device={orig_device}, contiguous={orig_contiguous}"
+                )
 
                 # Call attention (which internally calls ensure_contiguous_cpu)
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
 
                 inspect_tensor_memory(output, f"Output {config_name}")
 
@@ -195,7 +220,9 @@ def test_2_ensure_contiguous_cpu_bf16():
                 config_passed = dtype_preserved and values_reasonable
                 all_passed = all_passed and config_passed
 
-                print(f"  Result: dtype_preserved={dtype_preserved}, values_reasonable={values_reasonable}")
+                print(
+                    f"  Result: dtype_preserved={dtype_preserved}, values_reasonable={values_reasonable}"
+                )
                 status = "✓" if config_passed else "✗"
                 print(f"  {status} {config_name} test")
 
@@ -203,12 +230,19 @@ def test_2_ensure_contiguous_cpu_bf16():
                 print(f"  ✗ Exception in {config_name}: {e}")
                 all_passed = False
 
-        return print_test_result(all_passed,
-                               "ensure_contiguous_cpu preserves bf16 correctly" if all_passed
-                               else "ensure_contiguous_cpu has bf16 issues")
+        return print_test_result(
+            all_passed,
+            (
+                "ensure_contiguous_cpu preserves bf16 correctly"
+                if all_passed
+                else "ensure_contiguous_cpu has bf16 issues"
+            ),
+        )
 
     except Exception as e:
-        return print_test_result(False, f"Exception during ensure_contiguous_cpu test: {e}")
+        return print_test_result(
+            False, f"Exception during ensure_contiguous_cpu test: {e}"
+        )
 
 
 def test_3_bf16_value_corruption_detection():
@@ -223,7 +257,7 @@ def test_3_bf16_value_corruption_detection():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -232,12 +266,12 @@ def test_3_bf16_value_corruption_detection():
 
         # Test values that should be exactly representable in bf16
         test_values = [
-            1.0,      # Exactly representable
-            0.5,      # Exactly representable
-            0.25,     # Exactly representable
-            1.5,      # Exactly representable
-            -1.0,     # Exactly representable
-            0.0,      # Exactly representable
+            1.0,  # Exactly representable
+            0.5,  # Exactly representable
+            0.25,  # Exactly representable
+            1.5,  # Exactly representable
+            -1.0,  # Exactly representable
+            0.0,  # Exactly representable
         ]
 
         print("Testing with known bf16-representable values:")
@@ -274,24 +308,37 @@ def test_3_bf16_value_corruption_detection():
         print(f"All output values finite: {finite_check}")
 
         # 2. Check that the range is reasonable (attention shouldn't blow up)
-        reasonable_range = (output.abs().max() < 10.0)
-        print(f"Output in reasonable range: {reasonable_range} (max abs: {output.abs().max():.4f})")
+        reasonable_range = output.abs().max() < 10.0
+        print(
+            f"Output in reasonable range: {reasonable_range} (max abs: {output.abs().max():.4f})"
+        )
 
         # 3. Check for bf16-like precision patterns
         # If values were converted to fp32 and back, we might see precision artifacts
-        output_converted_back = output.to(torch.float32).to(torch.bfloat16).to(torch.float32)
-        precision_preserved = torch.allclose(output_as_fp32, output_converted_back, rtol=1e-6)
+        output_converted_back = (
+            output.to(torch.float32).to(torch.bfloat16).to(torch.float32)
+        )
+        precision_preserved = torch.allclose(
+            output_as_fp32, output_converted_back, rtol=1e-6
+        )
         print(f"BF16 precision patterns preserved: {precision_preserved}")
 
         # 4. Check that dtype is still bf16
         dtype_correct = output.dtype == torch.bfloat16
         print(f"Output dtype correct: {dtype_correct}")
 
-        all_checks_passed = finite_check and reasonable_range and precision_preserved and dtype_correct
+        all_checks_passed = (
+            finite_check and reasonable_range and precision_preserved and dtype_correct
+        )
 
-        return print_test_result(all_checks_passed,
-                               "No bf16 value corruption detected" if all_checks_passed
-                               else "BF16 value corruption detected")
+        return print_test_result(
+            all_checks_passed,
+            (
+                "No bf16 value corruption detected"
+                if all_checks_passed
+                else "BF16 value corruption detected"
+            ),
+        )
 
     except Exception as e:
         return print_test_result(False, f"Exception during value corruption test: {e}")
@@ -309,7 +356,7 @@ def test_4_direct_ffi_dtype_behavior():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -317,7 +364,7 @@ def test_4_direct_ffi_dtype_behavior():
         extension_attrs = dir(metal_sdpa_extension)
         print("Available extension functions:")
         for attr in sorted(extension_attrs):
-            if not attr.startswith('_'):
+            if not attr.startswith("_"):
                 print(f"  {attr}")
 
         # Test with a minimal example that goes directly through the FFI
@@ -337,9 +384,15 @@ def test_4_direct_ffi_dtype_behavior():
 
         # Check memory layout before FFI call
         print(f"\nMemory layout before FFI:")
-        print(f"  q contiguous: {q.is_contiguous()}, storage size: {q.storage().size()}")
-        print(f"  k contiguous: {k.is_contiguous()}, storage size: {k.storage().size()}")
-        print(f"  v contiguous: {v.is_contiguous()}, storage size: {v.storage().size()}")
+        print(
+            f"  q contiguous: {q.is_contiguous()}, storage size: {q.storage().size()}"
+        )
+        print(
+            f"  k contiguous: {k.is_contiguous()}, storage size: {k.storage().size()}"
+        )
+        print(
+            f"  v contiguous: {v.is_contiguous()}, storage size: {v.storage().size()}"
+        )
 
         # Call the main function
         try:
@@ -352,7 +405,9 @@ def test_4_direct_ffi_dtype_behavior():
             print(f"Output contiguous: {output.is_contiguous()}")
 
             # Verify no unexpected conversions happened
-            input_dtype_preserved = q.dtype == torch.bfloat16  # Input shouldn't be modified
+            input_dtype_preserved = (
+                q.dtype == torch.bfloat16
+            )  # Input shouldn't be modified
             output_dtype_correct = output.dtype == torch.bfloat16
             shape_preserved = output.shape == q.shape
             values_finite = torch.isfinite(output).all()
@@ -363,20 +418,31 @@ def test_4_direct_ffi_dtype_behavior():
             print(f"  Shape preserved: {shape_preserved}")
             print(f"  Values finite: {values_finite}")
 
-            all_good = (input_dtype_preserved and output_dtype_correct and
-                       shape_preserved and values_finite)
+            all_good = (
+                input_dtype_preserved
+                and output_dtype_correct
+                and shape_preserved
+                and values_finite
+            )
 
-            return print_test_result(all_good,
-                                   "Direct FFI dtype behavior correct" if all_good
-                                   else "Direct FFI dtype behavior issues detected")
+            return print_test_result(
+                all_good,
+                (
+                    "Direct FFI dtype behavior correct"
+                    if all_good
+                    else "Direct FFI dtype behavior issues detected"
+                ),
+            )
 
         except Exception as ffi_e:
             print(f"\nFFI call failed: {ffi_e}")
 
             # Analyze the error to see if it's dtype-related
             error_str = str(ffi_e).lower()
-            dtype_related = any(keyword in error_str for keyword in
-                              ['dtype', 'precision', 'type', 'bf16', 'bfloat'])
+            dtype_related = any(
+                keyword in error_str
+                for keyword in ["dtype", "precision", "type", "bf16", "bfloat"]
+            )
 
             print(f"Error appears dtype-related: {dtype_related}")
 
@@ -398,7 +464,7 @@ def test_5_bf16_tensor_round_trip():
     """
     print_test_header("Test 5: BF16 Tensor Round-trip")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -447,11 +513,18 @@ def test_5_bf16_tensor_round_trip():
             memory_match = False
 
         # Overall assessment
-        all_roundtrips_good = cpu_match and contiguous_match and roundtrip_match and memory_match
+        all_roundtrips_good = (
+            cpu_match and contiguous_match and roundtrip_match and memory_match
+        )
 
-        return print_test_result(all_roundtrips_good,
-                               "All BF16 round-trips successful" if all_roundtrips_good
-                               else "Some BF16 round-trips failed - potential conversion issues")
+        return print_test_result(
+            all_roundtrips_good,
+            (
+                "All BF16 round-trips successful"
+                if all_roundtrips_good
+                else "Some BF16 round-trips failed - potential conversion issues"
+            ),
+        )
 
     except Exception as e:
         return print_test_result(False, f"Exception during round-trip test: {e}")
@@ -486,7 +559,7 @@ def main():
     # Summary
     print(f"\n{'='*60}")
     print("FFI CONVERSION TEST SUMMARY")
-    print('='*60)
+    print("=" * 60)
 
     passed_count = sum(test_results)
     total_count = len(test_results)

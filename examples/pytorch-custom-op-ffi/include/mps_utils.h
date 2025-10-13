@@ -12,4 +12,3 @@ void* get_mtl_buffer_handle(const at::Tensor& tensor);
 
 } // namespace mps_utils
 } // namespace metal_sdpa
-

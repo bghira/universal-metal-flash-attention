@@ -39,6 +39,8 @@ fn main() {
         .expect("Couldn't write bindings!");
 
     // Link against the MFA FFI library (dynamic)
+    // Try release first, then debug
+    println!("cargo:rustc-link-search=native=../../.build/arm64-apple-macosx/release");
     println!("cargo:rustc-link-search=native=../../.build/debug");
     println!("cargo:rustc-link-lib=dylib=MFAFFI");
 }

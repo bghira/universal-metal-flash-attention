@@ -24,6 +24,7 @@ ext_modules = [
             str(CURRENT_DIR / "src" / "metal_sdpa_backend.cpp"),
             str(CURRENT_DIR / "src" / "python_bindings.cpp"),
             str(CURRENT_DIR / "src" / "mps_utils.mm"),
+            str(CURRENT_DIR / "src" / "mla_wrappers.cpp"),
         ],
         include_dirs=[
             str(CURRENT_DIR / "include"),

@@ -41,7 +41,7 @@ def main():
         [sys.executable, "setup.py", "build"],
         cwd=project_dir,
         capture_output=True,
-        text=True
+        text=True,
     )
 
     if build_result.returncode != 0:
@@ -59,10 +59,7 @@ def main():
     print(f"🧪 Running tests: {' '.join(pytest_args)}")
     print("=" * 60)
 
-    result = subprocess.run(
-        pytest_args,
-        cwd=project_dir
-    )
+    result = subprocess.run(pytest_args, cwd=project_dir)
 
     return result.returncode
 
@@ -83,10 +80,7 @@ def run_critical_tests():
 
     for test in critical_tests:
         print(f"\n📍 Running: {test}")
-        result = subprocess.run(
-            ["pytest", "-xvs", test],
-            cwd=project_dir
-        )
+        result = subprocess.run(["pytest", "-xvs", test], cwd=project_dir)
         if result.returncode != 0:
             print(f"❌ Test failed: {test}")
             return 1

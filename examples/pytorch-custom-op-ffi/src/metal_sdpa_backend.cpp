@@ -1591,6 +1591,109 @@ size_t calculate_expected_buffer_size(const torch::Tensor& reference_tensor,
 
 } // namespace metal_sdpa (nested)
 
+torch::Tensor MetalSDPABackend::sparse_indexer_scores(
+    const torch::Tensor& q_tensor,
+    const torch::Tensor& k_tensor,
+    double scale
+) {
+    ensure_initialized();
+
+    TORCH_CHECK(mps_utils::is_mps_tensor(q_tensor), "Sparse indexer expects Q tensor on MPS device");
+    TORCH_CHECK(mps_utils::is_mps_tensor(k_tensor), "Sparse indexer expects K tensor on MPS device");
+    TORCH_CHECK(q_tensor.scalar_type() == torch::kFloat16,
+                "Sparse indexer currently supports float16 tensors");
+    TORCH_CHECK(k_tensor.scalar_type() == torch::kFloat16,
+                "Sparse indexer currently supports float16 tensors");
+    TORCH_CHECK(q_tensor.dim() == 4 && k_tensor.dim() == 4,
+                "Sparse indexer expects tensors with shape [batch, heads, seq, head_dim]");
+
+    auto batch = q_tensor.size(0);
+    auto heads = q_tensor.size(1);
+    auto seq_q = q_tensor.size(2);
+    auto head_dim = q_tensor.size(3);
+
+    TORCH_CHECK(k_tensor.size(0) == batch,
+                "Key tensor batch dimension must match query tensor batch dimension");
+    TORCH_CHECK(k_tensor.size(1) == heads,
+                "Key tensor head count must match query tensor head count");
+    TORCH_CHECK(k_tensor.size(3) == head_dim,
+                "Key tensor head dimension must match query tensor head dimension");
+
+    auto seq_k = k_tensor.size(2);
+
+    TORCH_CHECK(batch > 0 && heads > 0 && seq_q > 0 && seq_k > 0 && head_dim > 0,
+                "Sparse indexer received invalid tensor dimensions");
+
+    auto q = q_tensor.contiguous();
+    auto k = k_tensor.contiguous();
+    auto scores = torch::empty({batch, heads, seq_q, seq_k}, q.options());
+
+    auto make_shape_vector = [](const torch::Tensor& tensor) {
+        return std::vector<int64_t>(tensor.sizes().begin(), tensor.sizes().end());
+    };
+
+    auto make_stride_vector = [](const torch::Tensor& tensor) {
+        return std::vector<int64_t>(tensor.strides().begin(), tensor.strides().end());
+    };
+
+    auto wrap_tensor = [&](const char* name, const torch::Tensor& tensor, mfa_buffer_t& buffer) {
+        size_t bytes = tensor.numel() * tensor.element_size();
+        mfa_error_t result = MFA_SUCCESS;
+
+        if (tensor.is_contiguous()) {
+            void* handle = mps_utils::get_mtl_buffer_handle(tensor);
+            TORCH_CHECK(handle, "Failed to acquire MTLBuffer for ", name);
+            result = mfa_buffer_from_mtl_buffer(swift_context_, handle, bytes, &buffer);
+        } else {
+            void* handle = mps_utils::get_mtl_buffer_handle(tensor);
+            TORCH_CHECK(handle, "Failed to acquire strided MTLBuffer for ", name);
+            auto shape_vec = make_shape_vector(tensor);
+            auto stride_vec = make_stride_vector(tensor);
+            result = mfa_buffer_from_mtl_buffer_with_strides(
+                swift_context_, handle, bytes,
+                shape_vec.data(), stride_vec.data(),
+                static_cast<uint32_t>(shape_vec.size()),
+                &buffer
+            );
+        }
+
+        TORCH_CHECK(result == MFA_SUCCESS,
+                    "Failed to create MFA buffer for ", name,
+                    " (error code ", result, ")");
+    };
+
+    mfa_buffer_t q_buffer = nullptr;
+    mfa_buffer_t k_buffer = nullptr;
+    mfa_buffer_t out_buffer = nullptr;
+
+    wrap_tensor("Q", q, q_buffer);
+    wrap_tensor("K", k, k_buffer);
+    wrap_tensor("scores", scores, out_buffer);
+
+    mfa_error_t status = mfa_sparse_indexer_scores(
+        swift_context_,
+        q_buffer,
+        k_buffer,
+        static_cast<uint32_t>(batch),
+        static_cast<uint32_t>(heads),
+        static_cast<uint32_t>(seq_q),
+        static_cast<uint32_t>(seq_k),
+        static_cast<uint16_t>(head_dim),
+        static_cast<float>(scale),
+        out_buffer,
+        nullptr
+    );
+
+    mfa_destroy_buffer(q_buffer);
+    mfa_destroy_buffer(k_buffer);
+    mfa_destroy_buffer(out_buffer);
+
+    TORCH_CHECK(status == MFA_SUCCESS,
+                "Sparse indexer kernel failed with error code ", status);
+
+    return scores;
+}
+
 // UNIFIED QUANTIZED ATTENTION IMPLEMENTATION
 // This function replaces both quantized_scaled_dot_product_attention and quantized_scaled_dot_product_attention_enhanced
 // It supports all quantization granularities, precision options, and advanced features in a single unified codebase

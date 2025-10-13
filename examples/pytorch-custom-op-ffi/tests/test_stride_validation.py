@@ -3,19 +3,21 @@
 Test to validate that stride information is being passed correctly to Metal kernels.
 """
 
-import sys
 import os
+import sys
+
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, parent_dir)
 
-import torch
 import metal_sdpa_extension
+import torch
+
 
 def test_stride_handling():
     """Test that verifies stride information is passed and used."""
 
     print("Testing Stride Information Passing")
-    print("="*50)
+    print("=" * 50)
 
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -26,9 +28,18 @@ def test_stride_handling():
 
     # Test 1: Contiguous tensor
     print("\n1. Contiguous tensor test:")
-    q = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.01
-    k = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.01
-    v = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.01
+    q = (
+        torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+        * 0.01
+    )
+    k = (
+        torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+        * 0.01
+    )
+    v = (
+        torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+        * 0.01
+    )
 
     print(f"   Shape: {list(q.shape)}")
     print(f"   Stride: {q.stride()}")
@@ -77,7 +88,12 @@ def test_stride_handling():
     # Test 3: Direct stride test - create tensor with specific strides
     print("\n3. Custom stride test:")
     # Create a larger tensor and take a slice to get non-standard strides
-    large = torch.randn(batch, heads*2, seq_len*2, dim, dtype=torch.float16, device=device) * 0.01
+    large = (
+        torch.randn(
+            batch, heads * 2, seq_len * 2, dim, dtype=torch.float16, device=device
+        )
+        * 0.01
+    )
     q_slice = large[:, :heads, :seq_len, :]
     k_slice = large[:, :heads, :seq_len, :]
     v_slice = large[:, :heads, :seq_len, :]
@@ -98,8 +114,9 @@ def test_stride_handling():
     except Exception as e:
         print(f"   ❌ Error: {e}")
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("Stride validation complete")
+
 
 if __name__ == "__main__":
     test_stride_handling()

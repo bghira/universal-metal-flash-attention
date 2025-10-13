@@ -43,4 +43,3 @@ void* get_mtl_buffer_handle(const at::Tensor&) {
 } // namespace metal_sdpa
 
 #endif
-

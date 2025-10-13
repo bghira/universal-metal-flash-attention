@@ -5,16 +5,18 @@ This module contains targeted tests to reproduce and validate the fix for
 the memory corruption issue that occurs with non-contiguous tensors.
 """
 
-import pytest
-import torch
-import numpy as np
+import gc
 import hashlib
 import struct
 from typing import List, Tuple
-import gc
+
+import numpy as np
+import pytest
+import torch
 
 try:
     import metal_sdpa_extension
+
     HAS_METAL = True
 except ImportError:
     HAS_METAL = False
@@ -33,19 +35,19 @@ def compute_tensor_checksum(tensor: torch.Tensor) -> str:
 def create_guard_pattern() -> torch.Tensor:
     """Create a guard pattern tensor to detect memory overwrites."""
     # Create a distinctive pattern that's easy to verify
-    pattern = torch.tensor([
-        0xDEAD, 0xBEEF, 0xCAFE, 0xBABE,
-        0xFEED, 0xFACE, 0xC0DE, 0x1337
-    ], dtype=torch.int16)
+    pattern = torch.tensor(
+        [0xDEAD, 0xBEEF, 0xCAFE, 0xBABE, 0xFEED, 0xFACE, 0xC0DE, 0x1337],
+        dtype=torch.int16,
+    )
     return pattern
 
 
 def verify_guard_pattern(pattern: torch.Tensor) -> bool:
     """Verify that a guard pattern hasn't been corrupted."""
-    expected = torch.tensor([
-        0xDEAD, 0xBEEF, 0xCAFE, 0xBABE,
-        0xFEED, 0xFACE, 0xC0DE, 0x1337
-    ], dtype=torch.int16)
+    expected = torch.tensor(
+        [0xDEAD, 0xBEEF, 0xCAFE, 0xBABE, 0xFEED, 0xFACE, 0xC0DE, 0x1337],
+        dtype=torch.int16,
+    )
 
     # Handle sign extension for negative values
     pattern_i32 = pattern.to(torch.int32)
@@ -69,9 +71,9 @@ class TestMemoryCorruptionFix:
         This test simulates how FLUX models create non-contiguous tensors
         through permutation and demonstrates the memory corruption issue.
         """
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Memory Corruption Reproduction Test")
-        print("="*80)
+        print("=" * 80)
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -86,9 +88,18 @@ class TestMemoryCorruptionFix:
 
         # Step 1: Create tensors in FLUX layout [B,H,S,D]
         torch.manual_seed(42)
-        q_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-        k_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-        v_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
+        q_flux = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
+        k_flux = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
+        v_flux = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
 
         # Store checksums of original data
         q_checksum_orig = compute_tensor_checksum(q_flux)
@@ -184,9 +195,9 @@ class TestMemoryCorruptionFix:
         This test places guard patterns around tensors to detect if
         Metal kernels write outside the expected memory regions.
         """
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Guard Buffer Corruption Detection Test")
-        print("="*80)
+        print("=" * 80)
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -196,9 +207,7 @@ class TestMemoryCorruptionFix:
 
         # Allocate contiguous buffer with guards
         buffer = torch.zeros(
-            guard_size + total_elements + guard_size,
-            dtype=torch.float16,
-            device=device
+            guard_size + total_elements + guard_size, dtype=torch.float16, device=device
         )
 
         # Place guard patterns
@@ -221,7 +230,9 @@ class TestMemoryCorruptionFix:
 
         # Fill with test data
         torch.manual_seed(42)
-        data_view.copy_(torch.randn(flux_shape, dtype=torch.float16, device=device) * 0.1)
+        data_view.copy_(
+            torch.randn(flux_shape, dtype=torch.float16, device=device) * 0.1
+        )
 
         # Permute to Metal layout (non-contiguous)
         metal_view = data_view.permute(0, 2, 1, 3)
@@ -274,9 +285,9 @@ class TestMemoryCorruptionFix:
         This test verifies that the Metal kernel correctly interprets
         stride information for different tensor layouts.
         """
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Stride Calculation Validation Test")
-        print("="*80)
+        print("=" * 80)
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -312,7 +323,9 @@ class TestMemoryCorruptionFix:
             # Test accessing element at position [0, 1, 0, 0]
             if all(dim > 1 for dim in permuted.shape):
                 test_idx = (0, 1, 0, 0)
-                offset = sum(idx * stride for idx, stride in zip(test_idx, permuted.stride()))
+                offset = sum(
+                    idx * stride for idx, stride in zip(test_idx, permuted.stride())
+                )
                 print(f"  Element at {test_idx} -> offset {offset}")
 
                 # Verify this matches actual tensor indexing
@@ -326,7 +339,9 @@ class TestMemoryCorruptionFix:
             # Test with Metal SDPA
             try:
                 q, k, v = permuted, permuted, permuted
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
 
                 # Verify output
                 has_nan = torch.isnan(output).any().item()
@@ -347,9 +362,9 @@ class TestMemoryCorruptionFix:
         Runs multiple iterations with different patterns to catch
         intermittent corruption issues.
         """
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Memory Corruption Stress Test")
-        print("="*80)
+        print("=" * 80)
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -440,10 +455,14 @@ def test_quick_corruption_check():
     metal = flux.permute(0, 2, 1, 3)  # Non-contiguous
 
     # Run attention
-    output = metal_sdpa_extension.metal_scaled_dot_product_attention(metal, metal, metal)
+    output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+        metal, metal, metal
+    )
 
     # Verify input wasn't modified (would indicate corruption)
-    assert torch.equal(flux, flux_orig), "Input tensor was modified - memory corruption!"
+    assert torch.equal(
+        flux, flux_orig
+    ), "Input tensor was modified - memory corruption!"
 
     # Verify output is valid
     assert not torch.isnan(output).any(), "Output contains NaN"
@@ -455,13 +474,13 @@ if __name__ == "__main__":
     test_runner = TestMemoryCorruptionFix()
 
     print("Running Memory Corruption Fix Tests")
-    print("="*80)
+    print("=" * 80)
 
     test_runner.test_reproduction_permute_corruption()
     test_runner.test_guard_buffer_corruption()
     test_runner.test_stride_calculation_validation()
     test_runner.test_stress_memory_corruption()
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("All tests completed")
-    print("="*80)
+    print("=" * 80)

@@ -5,15 +5,18 @@ Simple BF16 Fix Validation Test
 This test directly checks if the bf16 fix is working by using the raw extension.
 """
 
-import torch
 import sys
+
+import torch
 
 try:
     import metal_sdpa_extension
+
     print("✅ Successfully imported metal_sdpa_extension")
 except ImportError as e:
     print(f"❌ Failed to import metal_sdpa_extension: {e}")
     sys.exit(1)
+
 
 def test_bf16_fix():
     """Test that bf16 dtype is preserved through the FFI layer."""
@@ -32,7 +35,9 @@ def test_bf16_fix():
     orig_k_val = float(k[0, 0, 0, 0])
     orig_v_val = float(v[0, 0, 0, 0])
 
-    print(f"Original sample values: Q={orig_q_val:.6f}, K={orig_k_val:.6f}, V={orig_v_val:.6f}")
+    print(
+        f"Original sample values: Q={orig_q_val:.6f}, K={orig_k_val:.6f}, V={orig_v_val:.6f}"
+    )
     print(f"Input tensor dtypes: Q={q.dtype}, K={k.dtype}, V={v.dtype}")
 
     try:
@@ -49,7 +54,9 @@ def test_bf16_fix():
         new_k_val = float(k[0, 0, 0, 0])
         new_v_val = float(v[0, 0, 0, 0])
 
-        print(f"After call sample values: Q={new_q_val:.6f}, K={new_k_val:.6f}, V={new_v_val:.6f}")
+        print(
+            f"After call sample values: Q={new_q_val:.6f}, K={new_k_val:.6f}, V={new_v_val:.6f}"
+        )
 
         # Check for value corruption (main sign that the bf16 fix is working)
         tolerance = 1e-6
@@ -70,6 +77,7 @@ def test_bf16_fix():
         print(f"❌ Function call failed: {e}")
         return False
 
+
 def test_mixed_precision():
     """Test mixed precision scenarios."""
     print("\n🧪 Testing mixed precision scenarios...")
@@ -77,7 +85,7 @@ def test_mixed_precision():
     dtypes_to_test = [
         (torch.bfloat16, "BF16"),
         (torch.float16, "FP16"),
-        (torch.float32, "FP32")
+        (torch.float32, "FP32"),
     ]
 
     results = []
@@ -99,6 +107,7 @@ def test_mixed_precision():
             results.append((name, False, str(e)))
 
     return results
+
 
 if __name__ == "__main__":
     print("🔧 Simple BF16 Fix Validation")

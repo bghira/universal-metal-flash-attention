@@ -6,10 +6,11 @@ This test validates the bf16 fixes using only the available functions
 from the rebuilt extension, focusing on core functionality.
 """
 
-import torch
-import numpy as np
-import sys
 import os
+import sys
+
+import numpy as np
+import torch
 
 # Add the project path to sys.path to import our modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +19,7 @@ sys.path.insert(0, current_dir)
 try:
     # Import the extension directly
     import metal_sdpa_extension as ext
+
     print("✅ Successfully imported metal_sdpa_extension")
 except ImportError as e:
     print(f"❌ Failed to import metal_sdpa_extension: {e}")
@@ -29,7 +31,7 @@ class SimpleBF16Validator:
 
     def __init__(self):
         self.test_results = []
-        self.device = torch.device('cpu')
+        self.device = torch.device("cpu")
 
     def log_result(self, test_name, passed, message=""):
         """Log a test result."""
@@ -39,12 +41,19 @@ class SimpleBF16Validator:
         if message:
             print(f"    {message}")
 
-    def create_test_tensors(self, dtype=torch.bfloat16, batch_size=2, seq_len=128,
-                           num_heads=8, head_dim=64):
+    def create_test_tensors(
+        self, dtype=torch.bfloat16, batch_size=2, seq_len=128, num_heads=8, head_dim=64
+    ):
         """Create test tensors with specific patterns for validation."""
-        q = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device)
-        k = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device)
-        v = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device)
+        q = torch.randn(
+            batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device
+        )
+        k = torch.randn(
+            batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device
+        )
+        v = torch.randn(
+            batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device
+        )
 
         # Add some specific values we can check for corruption
         q[0, 0, 0, 0] = 1.5
@@ -60,9 +69,9 @@ class SimpleBF16Validator:
         try:
             # Check for core functions
             required_functions = [
-                'metal_scaled_dot_product_attention',
-                'is_metal_available',
-                'get_version'
+                "metal_scaled_dot_product_attention",
+                "is_metal_available",
+                "get_version",
             ]
 
             missing_functions = []
@@ -157,8 +166,12 @@ class SimpleBF16Validator:
             v_preserved = abs(orig_v_val - new_v_val) < tolerance
 
             passed = q_preserved and k_preserved and v_preserved
-            message = f"Q: {orig_q_val} -> {new_q_val} ({'✓' if q_preserved else '✗'}), "
-            message += f"K: {orig_k_val} -> {new_k_val} ({'✓' if k_preserved else '✗'}), "
+            message = (
+                f"Q: {orig_q_val} -> {new_q_val} ({'✓' if q_preserved else '✗'}), "
+            )
+            message += (
+                f"K: {orig_k_val} -> {new_k_val} ({'✓' if k_preserved else '✗'}), "
+            )
             message += f"V: {orig_v_val} -> {new_v_val} ({'✓' if v_preserved else '✗'})"
 
             self.log_result(test_name, passed, message)
@@ -174,7 +187,7 @@ class SimpleBF16Validator:
             test_cases = [
                 (torch.bfloat16, "bf16"),
                 (torch.float16, "fp16"),
-                (torch.float32, "fp32")
+                (torch.float32, "fp32"),
             ]
 
             all_passed = True
@@ -204,8 +217,10 @@ class SimpleBF16Validator:
 
         try:
             # Check if quantized functions are available
-            if not hasattr(ext, 'quantized_scaled_dot_product_attention'):
-                self.log_result(test_name, True, "Quantized attention not available (skipped)")
+            if not hasattr(ext, "quantized_scaled_dot_product_attention"):
+                self.log_result(
+                    test_name, True, "Quantized attention not available (skipped)"
+                )
                 return
 
             # Create bf16 tensors
@@ -215,7 +230,9 @@ class SimpleBF16Validator:
             result = ext.quantized_scaled_dot_product_attention(q, k, v)
 
             passed = result is not None and result.numel() > 0
-            message = f"Quantized attention with bf16: {'Success' if passed else 'Failed'}"
+            message = (
+                f"Quantized attention with bf16: {'Success' if passed else 'Failed'}"
+            )
 
             self.log_result(test_name, passed, message)
 

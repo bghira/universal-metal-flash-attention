@@ -428,8 +428,57 @@ extern "C" {
         int32_t v_precision    // Quantization mode: 0=tensorWise, 2=blockwise
     );
 
+    mfa_error_t mfa_sparse_indexer_scores(
+        mfa_context_t context,
+        mfa_buffer_t q,
+        mfa_buffer_t k,
+        uint32_t batch_size,
+        uint32_t num_heads,
+        uint32_t seq_len_q,
+        uint32_t seq_len_k,
+        uint16_t head_dim,
+        float scale,
+        mfa_buffer_t scores_in,
+        mfa_buffer_t* scores_out
+    );
+
     bool mfa_is_device_supported(void);
     void mfa_get_version(int* major, int* minor, int* patch);
+
+    // =============================================================================
+    // Multi-Latent Attention (MLA) Support
+    // =============================================================================
+
+    typedef void* mfa_mla_context_t;
+
+    mfa_error_t mfa_mla_create_context(mfa_mla_context_t* context);
+    void mfa_mla_destroy_context(mfa_mla_context_t context);
+
+    mfa_error_t mfa_mla_init_weights(
+        mfa_mla_context_t context,
+        uint32_t num_heads,
+        uint32_t head_dim,
+        uint32_t kv_latent_dim
+    );
+
+    mfa_error_t mfa_mla_load_weights(
+        mfa_mla_context_t context,
+        mfa_buffer_t wk,
+        mfa_buffer_t wv
+    );
+
+    mfa_error_t mfa_mla_forward(
+        mfa_mla_context_t context,
+        mfa_context_t mfa_context,
+        mfa_buffer_t kv_latent,
+        mfa_buffer_t* decompressed_k,
+        mfa_buffer_t* decompressed_v,
+        uint32_t batch_size,
+        uint32_t num_heads,
+        uint32_t sequence_length,
+        uint32_t head_dim,
+        uint32_t kv_latent_dim
+    );
 }
 
 // PyTorch SDPA backend registration
@@ -508,6 +557,12 @@ private:
         bool is_causal,
         float softmax_scale,
         bool use_mps_buffers
+    );
+
+    static torch::Tensor sparse_indexer_scores(
+        const torch::Tensor& q,
+        const torch::Tensor& k,
+        double scale
     );
 
     static mfa_precision_t torch_dtype_to_mfa_dtype(torch::ScalarType dtype);
@@ -610,5 +665,80 @@ namespace metal_sdpa {
     bool is_metal_available();
     std::tuple<int, int, int> get_version();
 }
+
+// =============================================================================
+// MLA (Multi-Latent Attention) Python Wrapper
+// =============================================================================
+
+/**
+ * RAII wrapper for MLA context that provides Python-friendly interface
+ *
+ * Manages the lifecycle of MLA decompression context and provides tensor-based API.
+ */
+class MlaContextWrapper {
+public:
+    MlaContextWrapper();
+    ~MlaContextWrapper();
+
+    // Delete copy/move to ensure single ownership
+    MlaContextWrapper(const MlaContextWrapper&) = delete;
+    MlaContextWrapper& operator=(const MlaContextWrapper&) = delete;
+
+    /**
+     * Initialize random decompression weights for testing
+     *
+     * @param num_heads Number of attention heads
+     * @param head_dim Dimension per head
+     * @param kv_latent_dim Compressed KV dimension
+     */
+    void init_random_weights(uint32_t num_heads, uint32_t head_dim, uint32_t kv_latent_dim);
+
+    /**
+     * Load pre-trained decompression weights
+     *
+     * @param wk Weight matrix for K decompression [kv_latent_dim, num_heads × head_dim]
+     * @param wv Weight matrix for V decompression [kv_latent_dim, num_heads × head_dim]
+     */
+    void load_weights(const torch::Tensor& wk, const torch::Tensor& wv);
+
+    /**
+     * Decompress KV latent into full K and V matrices
+     *
+     * @param kv_latent Compressed KV tensor [batch, seq, kv_latent_dim]
+     * @param batch_size Batch size
+     * @param num_heads Number of attention heads
+     * @param sequence_length Sequence length
+     * @param head_dim Dimension per head
+     * @param kv_latent_dim Compressed KV dimension
+     * @return Tuple of (decompressed_k, decompressed_v) tensors
+     */
+    std::tuple<torch::Tensor, torch::Tensor> forward(
+        const torch::Tensor& kv_latent,
+        uint32_t batch_size,
+        uint32_t num_heads,
+        uint32_t sequence_length,
+        uint32_t head_dim,
+        uint32_t kv_latent_dim
+    );
+
+private:
+    void* mfa_context_ = nullptr;  // MFA context for command queue
+    void* mla_context_ = nullptr;  // MLA decompression context
+};
+
+// Standalone wrapper functions (alternative API)
+void* mla_create_context_wrapper();
+void mla_destroy_context_wrapper(void* context);
+void mla_init_weights_wrapper(void* context, uint32_t num_heads, uint32_t head_dim, uint32_t kv_latent_dim);
+void mla_load_weights_wrapper(void* context, const torch::Tensor& wk, const torch::Tensor& wv);
+std::tuple<torch::Tensor, torch::Tensor> mla_forward_wrapper(
+    void* context,
+    const torch::Tensor& kv_latent,
+    uint32_t batch_size,
+    uint32_t num_heads,
+    uint32_t sequence_length,
+    uint32_t head_dim,
+    uint32_t kv_latent_dim
+);
 
 } // namespace metal_sdpa

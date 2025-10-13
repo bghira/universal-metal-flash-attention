@@ -12,11 +12,6 @@ from typing import Any, NamedTuple, Optional, Tuple, Union
 import numpy as np
 
 from ._ffi import (
-    MFA_PRECISION_BF16,
-    MFA_PRECISION_FP16,
-    MFA_PRECISION_FP32,
-    MFA_PRECISION_INT4,
-    MFA_PRECISION_INT8,
     MFA_MASK_SCALAR_BF16,
     MFA_MASK_SCALAR_BYTE,
     MFA_MASK_SCALAR_FP16,
@@ -24,6 +19,11 @@ from ._ffi import (
     MFA_MASK_TYPE_ADDITIVE,
     MFA_MASK_TYPE_BOOL,
     MFA_MASK_TYPE_NONE,
+    MFA_PRECISION_BF16,
+    MFA_PRECISION_FP16,
+    MFA_PRECISION_FP32,
+    MFA_PRECISION_INT4,
+    MFA_PRECISION_INT8,
     MFAError,
     _check_error,
     _lib,
@@ -203,7 +203,9 @@ class _MaskMetadata(NamedTuple):
     mask_scalar: int
 
 
-def _prepare_mask_metadata(mask: FloatArray, target_shape: Tuple[int, ...]) -> _MaskMetadata:
+def _prepare_mask_metadata(
+    mask: FloatArray, target_shape: Tuple[int, ...]
+) -> _MaskMetadata:
     """Prepare contiguous mask array and metadata for the FFI call."""
 
     mask_arr = np.asarray(mask)
@@ -352,11 +354,15 @@ def flash_attention_forward(
 
     mask_meta: Optional[_MaskMetadata] = None
     if attn_mask is not None:
-        target_shape = (seq_len_q, seq_len_kv) if q.ndim == 2 else (
-            batch_size,
-            seq_len_q,
-            num_heads,
-            seq_len_kv,
+        target_shape = (
+            (seq_len_q, seq_len_kv)
+            if q.ndim == 2
+            else (
+                batch_size,
+                seq_len_q,
+                num_heads,
+                seq_len_kv,
+            )
         )
         mask_meta = _prepare_mask_metadata(attn_mask, target_shape)
 

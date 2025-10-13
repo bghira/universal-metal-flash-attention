@@ -72,6 +72,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("value"),
           py::arg("config"));
 
+    m.def("sparse_indexer_scores",
+          &metal_sdpa::MetalSDPABackend::sparse_indexer_scores,
+          "Compute sparse indexer scores using Metal Flash Attention kernels",
+          py::arg("q"),
+          py::arg("k"),
+          py::arg("scale") = 1.0);
+
     // QuantizationPrecision enum - order matches FFI header values
     py::enum_<metal_sdpa::QuantizationPrecision>(m, "QuantizationPrecision")
         .value("FP16", metal_sdpa::QuantizationPrecision::FP16)
@@ -260,4 +267,60 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     py::class_<metal_sdpa::MetalSDPABackend>(m, "MetalSDPABackend")
         .def_static("register_backend", &metal_sdpa::MetalSDPABackend::register_backend)
         .def_static("unregister_backend", &metal_sdpa::MetalSDPABackend::unregister_backend);
+
+    // =============================================================================
+    // MLA (Multi-Latent Attention) Python Bindings
+    // =============================================================================
+
+    // Simple wrapper class for MLA context management
+    py::class_<metal_sdpa::MlaContextWrapper>(m, "MlaContext")
+        .def(py::init<>())
+        .def("init_random_weights", &metal_sdpa::MlaContextWrapper::init_random_weights,
+             "Initialize random decompression weights for testing",
+             py::arg("num_heads"),
+             py::arg("head_dim"),
+             py::arg("kv_latent_dim"))
+        .def("load_weights", &metal_sdpa::MlaContextWrapper::load_weights,
+             "Load pre-trained decompression weights",
+             py::arg("wk"),
+             py::arg("wv"))
+        .def("forward", &metal_sdpa::MlaContextWrapper::forward,
+             "Decompress KV latent into full K and V matrices",
+             py::arg("kv_latent"),
+             py::arg("batch_size"),
+             py::arg("num_heads"),
+             py::arg("sequence_length"),
+             py::arg("head_dim"),
+             py::arg("kv_latent_dim"));
+
+    // Standalone MLA functions (alternative API)
+    m.def("mla_create_context", &metal_sdpa::mla_create_context_wrapper,
+          "Create MLA decompression context");
+
+    m.def("mla_destroy_context", &metal_sdpa::mla_destroy_context_wrapper,
+          "Destroy MLA decompression context",
+          py::arg("context"));
+
+    m.def("mla_init_weights", &metal_sdpa::mla_init_weights_wrapper,
+          "Initialize random MLA decompression weights",
+          py::arg("context"),
+          py::arg("num_heads"),
+          py::arg("head_dim"),
+          py::arg("kv_latent_dim"));
+
+    m.def("mla_load_weights", &metal_sdpa::mla_load_weights_wrapper,
+          "Load pre-trained MLA decompression weights",
+          py::arg("context"),
+          py::arg("wk"),
+          py::arg("wv"));
+
+    m.def("mla_forward", &metal_sdpa::mla_forward_wrapper,
+          "Decompress KV latent into full K and V matrices",
+          py::arg("context"),
+          py::arg("kv_latent"),
+          py::arg("batch_size"),
+          py::arg("num_heads"),
+          py::arg("sequence_length"),
+          py::arg("head_dim"),
+          py::arg("kv_latent_dim"));
 }
