@@ -980,6 +980,16 @@ public func mfa_attention_forward(
       return 2 // MFA_ERROR_MEMORY_ALLOCATION
     }
 
+    // Ensure cached statistics buffers are reset before each dispatch.
+    let statsByteCount = Int(seqLenQ) * MemoryLayout<Float>.size
+    guard lBuffer.length >= statsByteCount, dBuffer.length >= statsByteCount else {
+      return 2 // MFA_ERROR_MEMORY_ALLOCATION
+    }
+    memset(lBuffer.contents(), 0, statsByteCount)
+    memset(dBuffer.contents(), 0, statsByteCount)
+    lBuffer.didModifyRange(0..<statsByteCount)
+    dBuffer.didModifyRange(0..<statsByteCount)
+
     // Note: Debug output removed - buffer copying now verified to work
 
     // Set buffers (following MFA test pattern)
