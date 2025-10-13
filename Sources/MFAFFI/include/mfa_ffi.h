@@ -356,6 +356,20 @@ mfa_error_t mfa_attention_forward_quantized(
     bool transpose_o
 );
 
+mfa_error_t mfa_sparse_indexer_scores(
+    mfa_context_t context,
+    mfa_buffer_t q,
+    mfa_buffer_t k,
+    uint32_t batch_size,
+    uint32_t num_heads,
+    uint32_t seq_len_q,
+    uint32_t seq_len_k,
+    uint16_t head_dim,
+    float scale,
+    mfa_buffer_t scores_in,
+    mfa_buffer_t* scores_out
+);
+
 mfa_error_t mfa_attention_backward(
     mfa_context_t context,
     // Input tensors
@@ -571,6 +585,102 @@ int32_t mfa_attention_backward_kv_quantized_ex(
     uint32_t k_block_size,
     uint32_t v_block_size,
     uint32_t options
+);
+
+// =============================================================================
+// Multi-Latent Attention (MLA) Support
+// =============================================================================
+
+/**
+ * @brief Opaque handle to MLA decompression context
+ */
+typedef void* mfa_mla_context_t;
+
+/**
+ * @brief Create a new MLA decompression context
+ *
+ * MLA (Multi-Latent Attention) compresses KV cache from [batch, seq, num_heads × head_dim]
+ * to [batch, seq, kv_latent_dim]. This context manages decompression weights and GEMM kernels.
+ *
+ * @param[out] context Pointer to store the created MLA context handle
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_create_context(mfa_mla_context_t* context);
+
+/**
+ * @brief Destroy an MLA context and release associated resources
+ *
+ * @param context The MLA context to destroy
+ */
+void mfa_mla_destroy_context(mfa_mla_context_t context);
+
+/**
+ * @brief Initialize random decompression weights for testing
+ *
+ * Allocates and initializes W_k and W_v weight matrices with random values.
+ * For production use, load pre-trained weights with mfa_mla_load_weights instead.
+ *
+ * @param context The MLA context
+ * @param num_heads Number of attention heads
+ * @param head_dim Dimension of each attention head
+ * @param kv_latent_dim Compressed latent dimension
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_init_weights(
+    mfa_mla_context_t context,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t kv_latent_dim
+);
+
+/**
+ * @brief Load pre-trained decompression weights
+ *
+ * Loads W_k and W_v matrices from pre-trained buffers.
+ *
+ * @param context The MLA context
+ * @param wk Weight matrix for K decompression [kv_latent_dim, num_heads × head_dim]
+ * @param wv Weight matrix for V decompression [kv_latent_dim, num_heads × head_dim]
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_load_weights(
+    mfa_mla_context_t context,
+    mfa_buffer_t wk,
+    mfa_buffer_t wv
+);
+
+/**
+ * @brief Decompress KV latent representations into full K and V matrices
+ *
+ * Performs optimized GEMM operations to decompress compressed KV cache:
+ *   K = KV_latent @ W_k
+ *   V = KV_latent @ W_v
+ *
+ * Achieves 10.9 TFLOPS @ 2048×2048 on M3 Max, matching MPS performance.
+ *
+ * @param context The MLA context
+ * @param mfa_context The MFA context (for command queue)
+ * @param kv_latent Input compressed KV buffer [batch × seq, kv_latent_dim]
+ * @param[out] decompressed_k Output K buffer (allocated if NULL)
+ * @param[out] decompressed_v Output V buffer (allocated if NULL)
+ * @param batch_size Batch size
+ * @param num_heads Number of attention heads
+ * @param sequence_length Sequence length
+ * @param head_dim Head dimension
+ * @param kv_latent_dim Compressed latent dimension
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_forward(
+    mfa_mla_context_t context,
+    mfa_context_t mfa_context,
+    mfa_buffer_t kv_latent,
+    mfa_buffer_t* decompressed_k,
+    mfa_buffer_t* decompressed_v,
+    uint32_t batch_size,
+    uint32_t num_heads,
+    uint32_t sequence_length,
+    uint32_t head_dim,
+    uint32_t kv_latent_dim
 );
 
 #ifdef __cplusplus
