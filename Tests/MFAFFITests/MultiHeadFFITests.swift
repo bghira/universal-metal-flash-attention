@@ -24,6 +24,14 @@ extension [Float] {
 
 final class MultiHeadFFITests: XCTestCase {
   private var context: UnsafeMutableRawPointer?
+  private func deterministicSeed(for label: String) -> UInt64 {
+    var hash: UInt64 = 0xcbf29ce484222325
+    for byte in label.utf8 {
+      hash ^= UInt64(byte)
+      hash &*= 0x100000001b3
+    }
+    return (hash % 10000) + 1000
+  }
 
   override func setUp() {
     super.setUp()
@@ -595,7 +603,7 @@ final class MultiHeadFFITests: XCTestCase {
     let totalElements = Int(batchSize * numHeads * seqLen * UInt32(headDim))
 
     // Use deterministic data for reproducibility
-    let seed = UInt64(bitPattern: Int64(testName.hashValue)) % 10000 + 1000
+    let seed = deterministicSeed(for: testName)
     var queryData = generateDeterministicData(count: totalElements, seed: seed)
     var keyData = generateDeterministicData(count: totalElements, seed: seed + 1)
     var valueData = generateDeterministicData(count: totalElements, seed: seed + 2)
@@ -1046,6 +1054,11 @@ final class MultiHeadFFITests: XCTestCase {
   }
 
   func testPerformanceComparison() throws {
+    if TestEnvironment.isCI {
+      print("    ⚠️  Skipping performance comparison test on CI (performance variability)")
+      return
+    }
+
     // Test multiple problem sizes to find optimal scaling
     let testConfigs = [
       (seqLen: UInt32(64), headDim: UInt16(32)), // Small
