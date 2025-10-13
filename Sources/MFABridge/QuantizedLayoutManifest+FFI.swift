@@ -48,48 +48,54 @@ private func defaultQuantizedLayout() -> mfa_quantized_layout_t {
   mfa_quantized_layout_t()
 }
 
-private func populateLayout(_ layout: QuantizedKernelLayoutManifest.Layout) -> mfa_quantized_layout_t {
-  var result = defaultQuantizedLayout()
-  result.qData = Int32(layout.qData)
-  result.kData = Int32(layout.kData)
-  result.vData = Int32(layout.vData)
-  result.output = Int32(layout.output)
-  result.gradOutput = Int32(layout.gradOutput)
-  result.logsumexp = Int32(layout.logsumexp)
-  result.gradQuery = Int32(layout.gradQuery)
-  result.dValues = Int32(layout.dValues)
-  result.gradKey = Int32(layout.gradKey)
-  result.gradValue = Int32(layout.gradValue)
-  result.qScale = Int32(layout.qScale)
-  result.qZeroPoint = Int32(layout.qZeroPoint)
-  result.kScale = Int32(layout.kScale)
-  result.kZeroPoint = Int32(layout.kZeroPoint)
-  result.vScale = Int32(layout.vScale)
-  result.vZeroPoint = Int32(layout.vZeroPoint)
-  result.dims = Int32(layout.dims)
-  result.steClipRange = Int32(layout.steClipRange)
-  result.qBlockScales = Int32(layout.qBlockScales)
-  result.qBlockZeroPoints = Int32(layout.qBlockZeroPoints)
-  result.kBlockScales = Int32(layout.kBlockScales)
-  result.kBlockZeroPoints = Int32(layout.kBlockZeroPoints)
-  result.vBlockScales = Int32(layout.vBlockScales)
-  result.vBlockZeroPoints = Int32(layout.vBlockZeroPoints)
-  result.qPrecomputedSums = Int32(layout.qPrecomputedSums)
-  result.kPrecomputedSums = Int32(layout.kPrecomputedSums)
-  result.vPrecomputedSums = Int32(layout.vPrecomputedSums)
-  result.qStrides = Int32(layout.qStrides)
-  result.kStrides = Int32(layout.kStrides)
-  result.vStrides = Int32(layout.vStrides)
-  result.oStrides = Int32(layout.oStrides)
-  result.maskBuffer = Int32(layout.maskBuffer)
-  result.numHeads = Int32(layout.numHeads)
-  result.numKeyValueHeads = Int32(layout.numKeyValueHeads)
-  result.headDimension = Int32(layout.headDimension)
-  result.sequenceLength = Int32(layout.sequenceLength)
-  result.scratch0 = Int32(layout.scratch0)
-  result.scratch1 = Int32(layout.scratch1)
-  return result
-}
+// TODO: QuantizedKernelLayoutManifest not yet implemented
+// private func populateLayout(
+//   _ layout: QuantizedKernelLayoutManifest
+//     .Layout
+// )
+//   -> mfa_quantized_layout_t
+// {
+//   var result = defaultQuantizedLayout()
+//   result.qData = Int32(layout.qData)
+//   result.kData = Int32(layout.kData)
+//   result.vData = Int32(layout.vData)
+//   result.output = Int32(layout.output)
+//   result.gradOutput = Int32(layout.gradOutput)
+//   result.logsumexp = Int32(layout.logsumexp)
+//   result.gradQuery = Int32(layout.gradQuery)
+//   result.dValues = Int32(layout.dValues)
+//   result.gradKey = Int32(layout.gradKey)
+//   result.gradValue = Int32(layout.gradValue)
+//   result.qScale = Int32(layout.qScale)
+//   result.qZeroPoint = Int32(layout.qZeroPoint)
+//   result.kScale = Int32(layout.kScale)
+//   result.kZeroPoint = Int32(layout.kZeroPoint)
+//   result.vScale = Int32(layout.vScale)
+//   result.vZeroPoint = Int32(layout.vZeroPoint)
+//   result.dims = Int32(layout.dims)
+//   result.steClipRange = Int32(layout.steClipRange)
+//   result.qBlockScales = Int32(layout.qBlockScales)
+//   result.qBlockZeroPoints = Int32(layout.qBlockZeroPoints)
+//   result.kBlockScales = Int32(layout.kBlockScales)
+//   result.kBlockZeroPoints = Int32(layout.kBlockZeroPoints)
+//   result.vBlockScales = Int32(layout.vBlockScales)
+//   result.vBlockZeroPoints = Int32(layout.vBlockZeroPoints)
+//   result.qPrecomputedSums = Int32(layout.qPrecomputedSums)
+//   result.kPrecomputedSums = Int32(layout.kPrecomputedSums)
+//   result.vPrecomputedSums = Int32(layout.vPrecomputedSums)
+//   result.qStrides = Int32(layout.qStrides)
+//   result.kStrides = Int32(layout.kStrides)
+//   result.vStrides = Int32(layout.vStrides)
+//   result.oStrides = Int32(layout.oStrides)
+//   result.maskBuffer = Int32(layout.maskBuffer)
+//   result.numHeads = Int32(layout.numHeads)
+//   result.numKeyValueHeads = Int32(layout.numKeyValueHeads)
+//   result.headDimension = Int32(layout.headDimension)
+//   result.sequenceLength = Int32(layout.sequenceLength)
+//   result.scratch0 = Int32(layout.scratch0)
+//   result.scratch1 = Int32(layout.scratch1)
+//   return result
+// }
 
 @frozen
 public struct mfa_quantized_capabilities_t {
@@ -137,13 +143,14 @@ public func mfa_get_quantized_layout(
     return
   }
 
-  guard let kernel = QuantizedKernelLayoutManifest.Kernel(rawValue: kernelRaw) else {
-    var layout = defaultQuantizedLayout()
-    outPtr.copyMemory(from: &layout, byteCount: MemoryLayout<mfa_quantized_layout_t>.stride)
-    return
-  }
-
-  let layout = QuantizedKernelLayoutManifest.layout(for: kernel)
-  var populated = populateLayout(layout)
+  // TODO: QuantizedKernelLayoutManifest not yet implemented
+  // guard let kernel = QuantizedKernelLayoutManifest.Kernel(rawValue: kernelRaw) else {
+  //   var layout = defaultQuantizedLayout()
+  //   outPtr.copyMemory(from: &layout, byteCount: MemoryLayout<mfa_quantized_layout_t>.stride)
+  //   return
+  // }
+  //
+  // let layout = QuantizedKernelLayoutManifest.layout(for: kernel)
+  var populated = defaultQuantizedLayout()
   outPtr.copyMemory(from: &populated, byteCount: MemoryLayout<mfa_quantized_layout_t>.stride)
 }
