@@ -1,7 +1,0 @@
-Metal SDPA backend initialized successfully
-objc[41749]: autorelease pool page 0x107116000 corrupted
-  magic     0x7fc00000 0x7fc00000 0x7fc00000 0x7fc00000
-  should be 0xa1a1a1a1 0x4f545541 0x454c4552 0x21455341
-  pthread   0x7fc000007fc00000
-  should be 0x16f49f000
-
