@@ -86,7 +86,7 @@ See the [INSTALL](/docs/INSTALL.md) document for specific help with installation
 
 **Note:** The underlying Metal Flash Attention library supports full forward + backward passes with gradients, even through its native quantised GEMM kernels.
 
-## Language Examples
+## Usage
 
 See the [EXAMPLES](/docs/EXAMPLES.md) for language-specific adapter examples, how to integrate Universal Metal Flash Attention into downstream projects.
 
