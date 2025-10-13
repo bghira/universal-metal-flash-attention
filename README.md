@@ -186,7 +186,7 @@ Thanks to [Mario Lezcano Casado](https://github.com/lezcano) for publishing the 
 
 This work has inspired our quantised attention implementation; I have adapted some of his project's ideas to fit our needs.
 
-The initial project framework was coded with [Claude Code](https://claude.ai), as I'd never worked on Swift before.
+The initial project framework was coded with [Claude Code](https://www.anthropic.com/claude), as I'd never worked on Swift before.
 
 Further debugging of the multi-head quantised attention kernel and backward implementation were assisted by ChatGPT-5 Codex.
 

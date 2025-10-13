@@ -39,7 +39,7 @@ Metal kernels  ← Swift (FlashAttention, QuantizedAttention) ← C FFI (@_cdecl
 | Backward (quantised) | `mfa_attention_backward_query_quantized[_ex]`, `mfa_attention_backward_kv_quantized[_ex]` | `_ex` variants accept `num_kv_heads` plus optional block-scale/zero-point buffers, enabling multi-head INT4/INT8 backward paths from C callers. Legacy entry points forward to `_ex` with single-head/contiguous defaults. Use `mfa_get_quantized_capabilities` to probe feature support. |
 | Utilities | `mfa_error_string` | Returns a heap-allocated C string for a given error code. |
 
-See [API.md](../API.md) for full signatures and sample calls.
+See [`mfa_ffi.h`](../../Sources/MFAFFI/include/mfa_ffi.h) for full signatures and sample calls.
 
 ## Language Bindings Today
 
