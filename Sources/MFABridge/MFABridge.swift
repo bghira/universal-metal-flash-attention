@@ -935,8 +935,19 @@ public func mfa_attention_forward(
     return 5
   }
 
+  let supportsOptimizedSingleHead: Bool = {
+    if numHeads == 0 {
+      return false
+    }
+    if #available(macOS 15.0, *) {
+      return mfaContext.device.supportsFamily(.apple9)
+    } else {
+      return false
+    }
+  }()
+
   // Handle multi-head attention using the new MultiHeadAttention implementation
-  if numHeads > 1 {
+  if numHeads > 1 || !supportsOptimizedSingleHead {
     return mfa_attention_forward_multihead_internal(
       context: mfaContext,
       qBuffer: qBuffer.buffer,
@@ -1936,6 +1947,7 @@ private func mfa_attention_forward_multihead_internal(
   // Store GPU timing
   let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
   context.lastGPULatency = gpuLatency
+  GlobalContextStore.shared.updateLatency(gpuLatency)
 
   return 0 // MFA_SUCCESS
 }
