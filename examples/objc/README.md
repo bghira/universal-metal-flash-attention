@@ -103,9 +103,9 @@ The original complex `bridge.m` (~250+ lines) tried to reimplement caching manua
 
 ## Requirements
 
-- macOS 14+ with Metal support
-- Xcode 15+
-- Swift 5.10+
+- macOS 15+ with Metal support
+- Xcode 16+
+- Swift 6.0+
 - Universal Metal Flash Attention library built
 
 ## Example Output

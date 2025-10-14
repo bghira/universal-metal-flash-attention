@@ -1,7 +1,15 @@
 import FlashAttention
 import Foundation
-import Metal
-import MetalPerformanceShaders
+@preconcurrency import Metal
+@preconcurrency import MetalPerformanceShaders
+
+private extension NSLock {
+  func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    lock()
+    defer { unlock() }
+    return try body()
+  }
+}
 
 // C FFI defines: FP16=0, BF16=1, FP32=2
 // Swift expects: FP32=0, FP16=1, BF16=2
@@ -405,6 +413,74 @@ final class MFAContext {
   }
 }
 
+private final class GlobalContextStore: @unchecked Sendable {
+  static let shared = GlobalContextStore()
+
+  private let lock = NSLock()
+  let device: MTLDevice?
+  private var cachedContext: MFAContext?
+
+  private init() {
+    device = MTLCreateSystemDefaultDevice()
+  }
+
+  func context() -> MFAContext? {
+    guard let device else { return nil }
+
+    if let existing = lock.withLock({ cachedContext }) {
+      return existing
+    }
+
+    guard let newContext = MFAContext(device: device) else {
+      return nil
+    }
+
+    return lock.withLock {
+      if let existing = cachedContext {
+        return existing
+      }
+      cachedContext = newContext
+      return newContext
+    }
+  }
+
+  func updateLatency(_ latency: CFTimeInterval) {
+    let context = lock.withLock { cachedContext }
+    context?.lastGPULatency = latency
+  }
+}
+
+private final class MLAContextRegistry: @unchecked Sendable {
+  static let shared = MLAContextRegistry()
+
+  private let lock = NSLock()
+  private var contexts: [UnsafeMutableRawPointer: Unmanaged<MLAOptimizedGEMMMFA>] = [:]
+
+  func makeHandle(for context: MLAOptimizedGEMMMFA) -> UnsafeMutableRawPointer {
+    let unmanaged = Unmanaged.passRetained(context)
+    let handle = unmanaged.toOpaque()
+    lock.withLock {
+      contexts[handle] = unmanaged
+    }
+    return handle
+  }
+
+  func context(for handle: UnsafeMutableRawPointer?) -> MLAOptimizedGEMMMFA? {
+    guard let handle else { return nil }
+    return lock.withLock {
+      contexts[handle]?.takeUnretainedValue()
+    }
+  }
+
+  func remove(handle: UnsafeMutableRawPointer?) {
+    guard let handle else { return }
+    let unmanaged = lock.withLock {
+      contexts.removeValue(forKey: handle)
+    }
+    unmanaged?.release()
+  }
+}
+
 final class MFABuffer {
   let buffer: MTLBuffer
   let originalDataPtr: UnsafeMutableRawPointer? // Track original data for copy-back
@@ -467,24 +543,16 @@ private func makeQuantizedTensor(
 
 // MARK: - C Bridge Implementation
 
-// Global Metal device (like MTLContext.global.device in native Swift)
-private let globalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
-private var globalContext: MFAContext?
-
 @_cdecl("mfa_create_context")
 public func mfa_create_context(_ context: UnsafeMutablePointer<UnsafeMutableRawPointer?>?)
   -> Int32
 {
-  guard let device = globalDevice else {
+  guard GlobalContextStore.shared.device != nil else {
     return 3 // MFA_ERROR_DEVICE_NOT_SUPPORTED
   }
 
   // Use singleton pattern for global context like native Swift
-  if globalContext == nil {
-    globalContext = MFAContext(device: device)
-  }
-
-  guard let mfaContext = globalContext else {
+  guard let mfaContext = GlobalContextStore.shared.context() else {
     return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
@@ -1110,7 +1178,7 @@ public func mfa_attention_forward(
 
     // Store GPU timing for zero-overhead measurement (like native Swift)
     let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    globalContext?.lastGPULatency = gpuLatency
+    GlobalContextStore.shared.updateLatency(gpuLatency)
 
     return 0 // MFA_SUCCESS
 
@@ -1490,7 +1558,7 @@ public func mfa_attention_backward_query_quantized_ex(
   }
 
   let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-  globalContext?.lastGPULatency = gpuLatency
+  GlobalContextStore.shared.updateLatency(gpuLatency)
 
   return 0
 }
@@ -1761,7 +1829,7 @@ public func mfa_attention_backward_kv_quantized_ex(
   }
 
   let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-  globalContext?.lastGPULatency = gpuLatency
+  GlobalContextStore.shared.updateLatency(gpuLatency)
 
   return 0
 }
@@ -1929,7 +1997,7 @@ private func dequantizeBuffer(
 
   // Create Metal compute pipeline for dequantization with precision safety
   let compileOptions = MTLCompileOptions()
-  compileOptions.fastMathEnabled = false // Disable fast math for numerical stability with BF16
+  compileOptions.mathMode = .safe // Disable fast math for numerical stability with BF16
 
   guard
     let library = try? device.makeLibrary(source: kernelSource, options: compileOptions),
@@ -2232,28 +2300,18 @@ public func mfa_attention_forward_quantized_enhanced(
 
 // MARK: - Multi-Latent Attention (MLA) Support
 
-/// Opaque handle to MLA context for decompression
-private var globalMLAContexts: [ObjectIdentifier: MLAOptimizedGEMMMFA] = [:]
-private let mlaContextLock = NSLock()
-
 @_cdecl("mfa_mla_create_context")
 public func mfa_mla_create_context(_ context: UnsafeMutablePointer<UnsafeMutableRawPointer?>?)
   -> Int32
 {
-  guard let device = globalDevice else {
+  guard let device = GlobalContextStore.shared.device else {
     return 3 // MFA_ERROR_DEVICE_NOT_SUPPORTED
   }
 
   do {
     let mlaContext = try MLAOptimizedGEMMMFA(device: device)
-    let id = ObjectIdentifier(mlaContext as AnyObject)
-
-    mlaContextLock.lock()
-    globalMLAContexts[id] = mlaContext
-    mlaContextLock.unlock()
-
-    // Return opaque pointer (using the object identifier as the handle)
-    context?.pointee = UnsafeMutableRawPointer(bitPattern: id.hashValue)
+    let handle = MLAContextRegistry.shared.makeHandle(for: mlaContext)
+    context?.pointee = handle
     return 0 // MFA_SUCCESS
   } catch {
     print("MLA context creation failed: \(error)")
@@ -2263,13 +2321,7 @@ public func mfa_mla_create_context(_ context: UnsafeMutablePointer<UnsafeMutable
 
 @_cdecl("mfa_mla_destroy_context")
 public func mfa_mla_destroy_context(_ context: UnsafeMutableRawPointer?) {
-  guard let context else { return }
-
-  let hashValue = Int(bitPattern: context)
-  mlaContextLock.lock()
-  // Find and remove the context
-  globalMLAContexts = globalMLAContexts.filter { $0.key.hashValue != hashValue }
-  mlaContextLock.unlock()
+  MLAContextRegistry.shared.remove(handle: context)
 }
 
 @_cdecl("mfa_mla_init_weights")
@@ -2283,14 +2335,9 @@ public func mfa_mla_init_weights(
 {
   guard let context else { return 1 } // MFA_ERROR_INVALID_ARGS
 
-  let hashValue = Int(bitPattern: context)
-  mlaContextLock.lock()
-  guard let mlaContext = globalMLAContexts.first(where: { $0.key.hashValue == hashValue })?.value
-  else {
-    mlaContextLock.unlock()
+  guard let mlaContext = MLAContextRegistry.shared.context(for: context) else {
     return 1 // MFA_ERROR_INVALID_ARGS
   }
-  mlaContextLock.unlock()
 
   mlaContext.initializeDecompressionWeights(
     numHeads: Int(numHeads),
@@ -2311,14 +2358,9 @@ public func mfa_mla_load_weights(
 {
   guard let context, let wk, let wv else { return 1 } // MFA_ERROR_INVALID_ARGS
 
-  let hashValue = Int(bitPattern: context)
-  mlaContextLock.lock()
-  guard let mlaContext = globalMLAContexts.first(where: { $0.key.hashValue == hashValue })?.value
-  else {
-    mlaContextLock.unlock()
+  guard let mlaContext = MLAContextRegistry.shared.context(for: context) else {
     return 1 // MFA_ERROR_INVALID_ARGS
   }
-  mlaContextLock.unlock()
 
   // Extract MTLBuffer from opaque pointers
   let wkBuffer = Unmanaged<MFABuffer>.fromOpaque(wk).takeUnretainedValue()
@@ -2348,14 +2390,9 @@ public func mfa_mla_forward(
     return 1 // MFA_ERROR_INVALID_ARGS
   }
 
-  let hashValue = Int(bitPattern: context)
-  mlaContextLock.lock()
-  guard let mlaContext = globalMLAContexts.first(where: { $0.key.hashValue == hashValue })?.value
-  else {
-    mlaContextLock.unlock()
+  guard let mlaContext = MLAContextRegistry.shared.context(for: context) else {
     return 1 // MFA_ERROR_INVALID_ARGS
   }
-  mlaContextLock.unlock()
 
   // Get MFA context for command queue
   let ctx = Unmanaged<MFAContext>.fromOpaque(mfaContext).takeUnretainedValue()
@@ -2408,7 +2445,7 @@ public func mfa_mla_forward(
 
     // Store GPU timing
     let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    globalContext?.lastGPULatency = gpuLatency
+    GlobalContextStore.shared.updateLatency(gpuLatency)
 
     return 0 // MFA_SUCCESS
 

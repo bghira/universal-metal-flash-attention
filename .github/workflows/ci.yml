@@ -182,7 +182,7 @@ jobs:
   # Performance benchmarks
   benchmarks:
     name: Performance Benchmarks
-    runs-on: macos-14
+    runs-on: macos-15
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:

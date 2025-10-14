@@ -15,7 +15,7 @@ cd universal-metal-flash-attention
 git submodule update --init --recursive
 ```
 
-> **Prerequisites**: macOS 14+ (or iOS/tvOS/visionOS SDK via Xcode 15+), Swift 5.10+, an Apple GPU with Metal support.
+> **Prerequisites**: macOS 15+ (or iOS/tvOS/visionOS SDK via Xcode 16+), Swift 6.0+, an Apple GPU with Metal support.
 
 ---
 
