@@ -935,22 +935,11 @@ public func mfa_attention_forward(
     return 5
   }
 
-  let supportsOptimizedSingleHead: Bool = {
-    if ProcessInfo.processInfo.environment["MFA_FORCE_MULTIHEAD"] == "1" {
-      return false
-    }
-    if numHeads == 0 {
-      return false
-    }
-    if #available(macOS 15.0, *) {
-      return mfaContext.device.supportsFamily(.apple9)
-    } else {
-      return false
-    }
-  }()
+  let forceMultiHead = ProcessInfo.processInfo.environment["MFA_FORCE_MULTIHEAD"] == "1"
+  let shouldUseMultiHead = numHeads > 1 || forceMultiHead
 
   // Handle multi-head attention using the new MultiHeadAttention implementation
-  if numHeads > 1 || !supportsOptimizedSingleHead {
+  if shouldUseMultiHead {
     return mfa_attention_forward_multihead_internal(
       context: mfaContext,
       qBuffer: qBuffer.buffer,
