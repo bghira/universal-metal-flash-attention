@@ -935,11 +935,19 @@ public func mfa_attention_forward(
     return 5
   }
 
-  let forceMultiHead = ProcessInfo.processInfo.environment["MFA_FORCE_MULTIHEAD"] == "1"
-  let shouldUseMultiHead = numHeads > 1 || forceMultiHead
+  let supportsOptimizedSingleHead: Bool = {
+    if numHeads == 0 {
+      return false
+    }
+    if #available(macOS 15.0, *) {
+      return mfaContext.device.supportsFamily(.apple9)
+    } else {
+      return false
+    }
+  }()
 
   // Handle multi-head attention using the new MultiHeadAttention implementation
-  if shouldUseMultiHead {
+  if numHeads > 1 || !supportsOptimizedSingleHead {
     return mfa_attention_forward_multihead_internal(
       context: mfaContext,
       qBuffer: qBuffer.buffer,
@@ -1863,139 +1871,6 @@ private func mfa_attention_forward_multihead_internal(
 )
   -> Int32
 {
-  func convertFloatBufferToHalf(
-    _ buffer: MTLBuffer,
-    elementCount: Int,
-    device: MTLDevice
-  ) -> MTLBuffer? {
-    guard
-      elementCount >= 0,
-      let halfBuffer = device.makeBuffer(
-        length: elementCount * MemoryLayout<Float16>.stride,
-        options: .storageModeShared
-      )
-    else {
-      return nil
-    }
-
-    let source = buffer.contents().assumingMemoryBound(to: Float.self)
-    let destination = halfBuffer.contents().assumingMemoryBound(to: Float16.self)
-    for index in 0..<elementCount {
-      destination[index] = Float16(source[index])
-    }
-    halfBuffer.didModifyRange(0..<halfBuffer.length)
-    return halfBuffer
-  }
-
-  func copyHalfBufferToFloat(
-    source: MTLBuffer,
-    destination: MTLBuffer,
-    elementCount: Int
-  ) {
-    let sourcePointer = source.contents().assumingMemoryBound(to: Float16.self)
-    let destinationPointer = destination.contents().assumingMemoryBound(to: Float.self)
-    for index in 0..<elementCount {
-      destinationPointer[index] = Float(sourcePointer[index])
-    }
-    destination.didModifyRange(0..<(elementCount * MemoryLayout<Float>.stride))
-  }
-
-  func cpuAttentionForward()
-    -> Int32
-  {
-    let disableCPUFallback = ProcessInfo.processInfo.environment["MFA_DISABLE_CPU_FALLBACK"] == "1"
-    let forceCPUFallback = ProcessInfo.processInfo.environment["MFA_FORCE_CPU_ATTENTION"] == "1"
-    guard !disableCPUFallback else {
-      return 6 // Signal GPU path should be used
-    }
-
-    if !forceCPUFallback && numHeads != 1 {
-      return 6
-    }
-
-    let supportsModernGPU: Bool
-    if #available(macOS 15.0, *) {
-      supportsModernGPU = context.device.supportsFamily(.apple9)
-    } else {
-      supportsModernGPU = false
-    }
-
-    guard forceCPUFallback || !supportsModernGPU else {
-      return 6
-    }
-
-    guard
-      let queryElements = Int(exactly: queryShape.totalElements),
-      let keyElements = Int(exactly: kvShape.totalElements)
-    else {
-      return 1
-    }
-
-    let valueElements = keyElements
-
-    let qPointer = qBuffer.contents().assumingMemoryBound(to: Float.self)
-    let kPointer = kBuffer.contents().assumingMemoryBound(to: Float.self)
-    let vPointer = vBuffer.contents().assumingMemoryBound(to: Float.self)
-    let outPointer = outBuffer.contents().assumingMemoryBound(to: Float.self)
-
-    let sequenceQ = Int(seqLenQ)
-    let sequenceKV = Int(seqLenKV)
-    let dimension = Int(headDim)
-
-    guard queryElements == sequenceQ * dimension,
-      keyElements == sequenceKV * dimension,
-      valueElements == sequenceKV * dimension
-    else {
-      return 1
-    }
-
-    var attentionWeights = [Float](repeating: 0, count: sequenceKV)
-
-    for qIndex in 0..<sequenceQ {
-      var maxScore: Float = -Float.infinity
-      for kIndex in 0..<sequenceKV {
-        var dotProduct: Float = 0
-        for dim in 0..<dimension {
-          let qValue = qPointer[qIndex * dimension + dim]
-          let kValue = kPointer[kIndex * dimension + dim]
-          dotProduct += qValue * kValue
-        }
-        if causal && kIndex > qIndex {
-          attentionWeights[kIndex] = -Float.infinity
-        } else {
-          let scaled = dotProduct * softmaxScale
-          attentionWeights[kIndex] = scaled
-          if scaled > maxScore {
-            maxScore = scaled
-          }
-        }
-      }
-
-      var expSum: Float = 0
-      for kIndex in 0..<sequenceKV {
-        let adjusted = attentionWeights[kIndex] - maxScore
-        let exponent = expf(adjusted)
-        attentionWeights[kIndex] = exponent
-        expSum += exponent
-      }
-
-      let normalization = expSum == 0 ? 0 : 1 / expSum
-      for dim in 0..<dimension {
-        var value: Float = 0
-        for kIndex in 0..<sequenceKV {
-          let weight = attentionWeights[kIndex] * normalization
-          let vValue = vPointer[kIndex * dimension + dim]
-          value += weight * vValue
-        }
-        outPointer[qIndex * dimension + dim] = value
-      }
-    }
-
-    let byteCount = sequenceQ * dimension * MemoryLayout<Float>.stride
-    outBuffer.didModifyRange(0..<byteCount)
-    return 0
-  }
-
   // Create multi-head attention instance
   let multiHeadAttention = MultiHeadAttention(device: context.device)
 
@@ -2008,7 +1883,9 @@ private func mfa_attention_forward_multihead_internal(
   // we must use FP32 inputs to avoid NaN issues from precision mismatch
   // The inputs are always FP32 from the FFI layer
   baseDescriptor.lowPrecisionInputs = false // Always use FP32 inputs from FFI
-  baseDescriptor.lowPrecisionIntermediates = false // Use FP32 intermediates for stability
+  baseDescriptor
+    // Use FP32 intermediates for numerical stability
+    .lowPrecisionIntermediates = false
 
   // Suppress unused parameter warnings - these are part of the API but not used yet
   _ = inputPrecision
@@ -2017,6 +1894,7 @@ private func mfa_attention_forward_multihead_internal(
   baseDescriptor.sparsityPattern = causal ? .causal : .none
   baseDescriptor.softmaxScale = softmaxScale
 
+  // Create tensor shapes
   let queryShape = MultiHeadShape(
     batchSize: batchSize,
     numHeads: numHeads,
@@ -2026,79 +1904,14 @@ private func mfa_attention_forward_multihead_internal(
 
   let kvShape = MultiHeadShape(
     batchSize: batchSize,
-    numHeads: numHeads,
+    numHeads: numHeads, // Standard MHA for now
     sequenceLength: seqLenKV,
     headDimension: headDim
   )
 
-  let cpuStatus = cpuAttentionForward()
-  switch cpuStatus {
-  case 0:
-    return 0
-  case 6:
-    break // Fall through to GPU path
-  default:
-    return cpuStatus
-  }
-
-  let requiresHalfFallback: Bool = {
-    if ProcessInfo.processInfo.environment["MFA_FORCE_FP16_MULTIHEAD"] == "1" {
-      return true
-    }
-    if #available(macOS 15.0, *) {
-      return !context.device.supportsFamily(.apple9) && !baseDescriptor.lowPrecisionInputs
-    } else {
-      return true
-    }
-  }()
-
-  var descriptorForKernel = baseDescriptor
-  var queryBufferForKernel = qBuffer
-  var keyBufferForKernel = kBuffer
-  var valueBufferForKernel = vBuffer
-  var outputBufferForKernel = outBuffer
-  var halfOutputBuffer: MTLBuffer?
-
-  if requiresHalfFallback {
-    descriptorForKernel.lowPrecisionInputs = true
-    descriptorForKernel.lowPrecisionIntermediates = false
-
-    guard
-      let queryElements = Int(exactly: queryShape.totalElements),
-      let keyElements = Int(exactly: kvShape.totalElements),
-      let valueElements = Int(exactly: kvShape.totalElements)
-    else {
-      return 1 // Invalid argument sizes
-    }
-
-    guard
-      let qHalf = convertFloatBufferToHalf(qBuffer, elementCount: queryElements, device: context.device),
-      let kHalf = convertFloatBufferToHalf(kBuffer, elementCount: keyElements, device: context.device),
-      let vHalf = convertFloatBufferToHalf(vBuffer, elementCount: valueElements, device: context.device)
-    else {
-      return 2 // MFA_ERROR_MEMORY_ALLOCATION
-    }
-
-    guard
-      let outHalf = context.device.makeBuffer(
-        length: queryElements * MemoryLayout<Float16>.stride,
-        options: .storageModeShared
-      )
-    else {
-      return 2 // MFA_ERROR_MEMORY_ALLOCATION
-    }
-
-    queryBufferForKernel = qHalf
-    keyBufferForKernel = kHalf
-    valueBufferForKernel = vHalf
-    outputBufferForKernel = outHalf
-    halfOutputBuffer = outHalf
-  }
-
-  // Create tensor shapes
   // Create multi-head descriptor with optimized dispatch strategy
   let multiHeadDescriptor = MultiHeadAttentionDescriptor(
-    baseDescriptor: descriptorForKernel,
+    baseDescriptor: baseDescriptor,
     queryShape: queryShape,
     keyShape: kvShape,
     valueShape: kvShape,
@@ -2110,10 +1923,10 @@ private func mfa_attention_forward_multihead_internal(
   // Execute multi-head attention (no logsumexp for forward-only)
   guard
     let commandBuffer = multiHeadAttention.forward(
-      query: queryBufferForKernel,
-      key: keyBufferForKernel,
-      value: valueBufferForKernel,
-      output: outputBufferForKernel,
+      query: qBuffer,
+      key: kBuffer,
+      value: vBuffer,
+      output: outBuffer,
       logsumexp: nil, // Skip logsumexp for forward-only passes
       descriptor: multiHeadDescriptor,
       maskBuffer: preparedMask?.buffer
@@ -2135,12 +1948,6 @@ private func mfa_attention_forward_multihead_internal(
   let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
   context.lastGPULatency = gpuLatency
   GlobalContextStore.shared.updateLatency(gpuLatency)
-
-  if let halfOutputBuffer,
-    let queryElements = Int(exactly: queryShape.totalElements)
-  {
-    copyHalfBufferToFloat(source: halfOutputBuffer, destination: outBuffer, elementCount: queryElements)
-  }
 
   return 0 // MFA_SUCCESS
 }
