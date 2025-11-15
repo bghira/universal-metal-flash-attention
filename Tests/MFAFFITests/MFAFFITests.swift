@@ -83,6 +83,10 @@ final class MFAFFITests: XCTestCase {
   }
 
   func testAttentionForward() throws {
+    guard TestEnvironment.supportsApple7 else {
+      throw XCTSkip("Attention stress suite requires Apple7+ GPU features")
+    }
+
     var context: UnsafeMutableRawPointer?
     let contextResult = mfa_create_context(&context)
     XCTAssertEqual(contextResult, Int32(MFA_SUCCESS))

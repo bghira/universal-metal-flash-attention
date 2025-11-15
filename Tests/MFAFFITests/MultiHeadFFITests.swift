@@ -449,6 +449,10 @@ final class MultiHeadFFITests: XCTestCase {
   }
 
   func testVariousHeadCounts() throws {
+    guard TestEnvironment.supportsApple7 else {
+      throw XCTSkip("Head-count stress tests require Apple7+ GPU features")
+    }
+
     print("\n🔢 COMPREHENSIVE HEAD COUNT TESTING")
     print(String(repeating: "=", count: 60))
 
