@@ -11,8 +11,34 @@
 #include <cinttypes>  // For PRId64, PRIu32, etc.
 #include <cmath>      // For std::isfinite, std::clamp
 #include <algorithm>  // For std::clamp
+#include <cstdlib>    // For std::getenv
+#include <sstream>
 
 namespace metal_sdpa {
+
+namespace {
+
+bool cpu_fallback_allowed() {
+    static bool allowed = [] {
+        const char* env = std::getenv("METAL_SDPA_ALLOW_CPU_FALLBACK");
+        if (!env) {
+            return false;
+        }
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+        return value == "1" || value == "true" || value == "yes";
+    }();
+    return allowed;
+}
+
+std::string describe_device(const torch::Tensor& tensor) {
+    std::ostringstream oss;
+    auto device = tensor.device();
+    oss << device.str();
+    return oss.str();
+}
+
+} // namespace
 
 // Tensor layout conversion utilities for FLUX compatibility
 // FLUX uses [batch, heads, sequence, dim] while Metal expects [batch, sequence, heads, dim]
@@ -1205,8 +1231,24 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
         try {
             return call_swift_flash_attention_impl(q, k, v, attn_mask, is_causal, softmax_scale, true);
         } catch (const std::exception& ex) {
-            std::cout << "⚠️  MPS fast path unavailable: " << ex.what() << " -- falling back to CPU path" << std::endl;
+            std::ostringstream msg;
+            msg << "Metal SDPA MPS fast path failed: " << ex.what()
+                << ". Set METAL_SDPA_ALLOW_CPU_FALLBACK=1 to permit automatic CPU fallback.";
+            throw std::runtime_error(msg.str());
         }
+    }
+
+    bool inputs_are_cpu = q.device().is_cpu() && k.device().is_cpu() && v.device().is_cpu();
+    if (!inputs_are_cpu && !cpu_fallback_allowed()) {
+        std::ostringstream msg;
+        msg << "Metal SDPA received tensors on " << describe_device(q)
+            << " but GPU execution was unavailable. "
+            << "Set METAL_SDPA_ALLOW_CPU_FALLBACK=1 to force CPU fallback.";
+        throw std::runtime_error(msg.str());
+    }
+
+    if (!inputs_are_cpu) {
+        std::cout << "⚠️  METAL_SDPA_ALLOW_CPU_FALLBACK=1, copying tensors to CPU for fallback path" << std::endl;
     }
 
     auto q_cpu = ensure_contiguous_cpu(q);

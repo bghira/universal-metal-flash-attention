@@ -46,9 +46,8 @@ def index_scoring_kernel(
     Returns:
         scores: Index scores [batch, n_heads, seq_q, seq_k]
     """
-    # Ensure tensors are on MPS device
-    if q.device.type != "mps":
-        raise ValueError("Tensors must be on MPS device for Metal backend")
+    if q.device != k.device:
+        raise ValueError("Q and K tensors must be on the same device")
 
     use_mfa = (
         _MFA_INDEXER_AVAILABLE
@@ -67,7 +66,7 @@ def index_scoring_kernel(
             # Fallback to PyTorch path if the FFI call fails at runtime
             scores = torch.matmul(q, k.transpose(-2, -1)) * scale
     else:
-        # Matrix multiplication: Q @ K^T using PyTorch/MPS backend
+        # Matrix multiplication: Q @ K^T using the current device backend
         scores = torch.matmul(q, k.transpose(-2, -1)) * scale
 
     # Apply ReLU (as in original CUDA kernel)
