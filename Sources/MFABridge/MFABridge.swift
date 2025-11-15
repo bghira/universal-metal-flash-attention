@@ -935,26 +935,22 @@ public func mfa_attention_forward(
     return 5
   }
 
-  let supportsOptimizedSingleHead: Bool = {
-    if numHeads == 0 {
-      return false
-    }
-    if #available(macOS 15.0, *) {
-      return mfaContext.device.supportsFamily(.apple9)
-    } else {
-      return false
-    }
-  }()
+  let forceMultiHead = ProcessInfo.processInfo.environment["MFA_FORCE_MULTIHEAD"] == "1"
+  let deviceSupportsMultiHead: Bool = if #available(macOS 15.0, *) {
+    mfaContext.device.supportsFamily(.apple9)
+  } else {
+    false
+  }
 
-  // Handle multi-head attention using the new MultiHeadAttention implementation
-  if numHeads > 1 || !supportsOptimizedSingleHead {
+  let shouldUseMultiHead = numHeads > 1 && (deviceSupportsMultiHead || forceMultiHead)
+  if shouldUseMultiHead, deviceSupportsMultiHead {
     return mfa_attention_forward_multihead_internal(
       context: mfaContext,
       qBuffer: qBuffer.buffer,
       kBuffer: kBuffer.buffer,
       vBuffer: vBuffer.buffer,
       outBuffer: outBuffer.buffer,
-      batchSize: 1, // For now, assume batch size 1 for FFI compatibility
+      batchSize: 1,
       seqLenQ: seqLenQ,
       seqLenKV: seqLenKV,
       numHeads: numHeads,
@@ -968,6 +964,12 @@ public func mfa_attention_forward(
       transposeV: transposeV,
       transposeO: transposeO,
       preparedMask: preparedMask
+    )
+  }
+
+  if forceMultiHead, !deviceSupportsMultiHead {
+    print(
+      "⚠️  MFA_FORCE_MULTIHEAD=1 requested, but GPU lacks Apple9 features; falling back to per-head execution."
     )
   }
 
