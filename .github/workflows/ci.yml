@@ -199,7 +199,7 @@ jobs:
           swift run -c release AttentionBenchmark --iterations 100 --output results.json
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: benchmark-results
           path: benchmarks/results.json
