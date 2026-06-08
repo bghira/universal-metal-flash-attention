@@ -15,15 +15,15 @@ private func convertCFFIPrecisionToSwift(_ cPrecision: Int32) -> Int32 {
 
 func sourceUsesUnsupportedBFloatTypes(error: Error) -> Bool {
   let description = error.localizedDescription.lowercased()
-  return description.contains("unknown type name 'bfloat'")
+  return description.contains("unknown type name") && description.contains("'bfloat'")
 }
 
 func replacingBFloatWithFloatTypes(in source: String) -> String {
-  source
-    .replacingOccurrences(of: #"\bbfloat4\b"#, with: "float4", options: .regularExpression)
-    .replacingOccurrences(of: #"\bbfloat3\b"#, with: "float3", options: .regularExpression)
-    .replacingOccurrences(of: #"\bbfloat2\b"#, with: "float2", options: .regularExpression)
-    .replacingOccurrences(of: #"\bbfloat\b"#, with: "float", options: .regularExpression)
+  guard let regex = try? NSRegularExpression(pattern: #"\bbfloat([234])?\b"#) else {
+    return source
+  }
+  let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
+  return regex.stringByReplacingMatches(in: source, range: fullRange, withTemplate: "float$1")
 }
 
 private enum MaskType: Int32 {

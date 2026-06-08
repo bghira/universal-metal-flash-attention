@@ -28,4 +28,13 @@ final class KernelSourceFallbackTests: XCTestCase {
     )
     XCTAssertFalse(sourceUsesUnsupportedBFloatTypes(error: error))
   }
+
+  func testIgnoresNonTypeNameBFloatMentions() {
+    let error = NSError(
+      domain: "MTLLibraryErrorDomain",
+      code: 3,
+      userInfo: [NSLocalizedDescriptionKey: "program_source:9: warning: variable named 'bfloat' is unused"]
+    )
+    XCTAssertFalse(sourceUsesUnsupportedBFloatTypes(error: error))
+  }
 }
