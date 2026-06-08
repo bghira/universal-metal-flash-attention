@@ -30,12 +30,19 @@ final class KernelSourceFallbackTests: XCTestCase {
   }
 
   func testDetectsUnsupportedBFloatCompilerError() {
-    let error = NSError(
+    let scalarError = NSError(
       domain: "MTLLibraryErrorDomain",
       code: 3,
       userInfo: [NSLocalizedDescriptionKey: "program_source:327:46: error: unknown type name 'bfloat'"]
     )
-    XCTAssertTrue(sourceUsesUnsupportedBFloatTypes(error: error))
+    XCTAssertTrue(sourceUsesUnsupportedBFloatTypes(error: scalarError))
+
+    let vectorError = NSError(
+      domain: "MTLLibraryErrorDomain",
+      code: 3,
+      userInfo: [NSLocalizedDescriptionKey: "program_source:327:46: error: unknown type name 'bfloat2'"]
+    )
+    XCTAssertTrue(sourceUsesUnsupportedBFloatTypes(error: vectorError))
   }
 
   func testIgnoresUnrelatedCompilerErrors() {
