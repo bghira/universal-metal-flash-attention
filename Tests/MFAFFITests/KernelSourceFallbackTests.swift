@@ -1,0 +1,22 @@
+import XCTest
+@testable import MFABridge
+
+final class KernelSourceFallbackTests: XCTestCase {
+  func testReplacingBFloatWithFloatTypes() {
+    let source = "thread bfloat a; thread bfloat2 b; thread bfloat3 c; thread bfloat4 d;"
+    let replaced = replacingBFloatWithFloatTypes(in: source)
+    XCTAssertEqual(
+      replaced,
+      "thread float a; thread float2 b; thread float3 c; thread float4 d;"
+    )
+  }
+
+  func testDetectsUnsupportedBFloatCompilerError() {
+    let error = NSError(
+      domain: "MTLLibraryErrorDomain",
+      code: 3,
+      userInfo: [NSLocalizedDescriptionKey: "program_source:327:46: error: unknown type name 'bfloat'"]
+    )
+    XCTAssertTrue(sourceUsesUnsupportedBFloatTypes(error: error))
+  }
+}

@@ -13,6 +13,19 @@ private func convertCFFIPrecisionToSwift(_ cPrecision: Int32) -> Int32 {
   }
 }
 
+func sourceUsesUnsupportedBFloatTypes(error: Error) -> Bool {
+  let description = error.localizedDescription.lowercased()
+  return description.contains("unknown type name 'bfloat'")
+}
+
+func replacingBFloatWithFloatTypes(in source: String) -> String {
+  source
+    .replacingOccurrences(of: "bfloat4", with: "float4")
+    .replacingOccurrences(of: "bfloat3", with: "float3")
+    .replacingOccurrences(of: "bfloat2", with: "float2")
+    .replacingOccurrences(of: "bfloat", with: "float")
+}
+
 private enum MaskType: Int32 {
   case none = 0
   case boolean = 1
@@ -888,8 +901,18 @@ public func mfa_attention_forward(
 
       // Get the Metal function using native kernel source (no string replacement!)
       let source = kernel.createSource()
-      let library = try mfaContext.device.makeLibrary(source: source, options: nil)
-      let function = try library.makeFunction(name: "attention", constantValues: constants)
+      let function: MTLFunction
+      do {
+        let library = try mfaContext.device.makeLibrary(source: source, options: nil)
+        function = try library.makeFunction(name: "attention", constantValues: constants)
+      } catch {
+        guard sourceUsesUnsupportedBFloatTypes(error: error) else {
+          throw error
+        }
+        let fallbackSource = replacingBFloatWithFloatTypes(in: source)
+        let fallbackLibrary = try mfaContext.device.makeLibrary(source: fallbackSource, options: nil)
+        function = try fallbackLibrary.makeFunction(name: "attention", constantValues: constants)
+      }
 
       // Create pipeline descriptor with proper settings for Apple Silicon
       let pipelineDesc = MTLComputePipelineDescriptor()
