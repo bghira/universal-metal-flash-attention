@@ -7,7 +7,7 @@ private let mfaErrorKernelCompilation: Int = 4
 private let unsupportedBFloatTypeRegex: NSRegularExpression = {
   guard
     let regex = try? NSRegularExpression(
-      pattern: #"unknown type name\s*'?\s*bfloat\b"#,
+      pattern: #"unknown type name\s*'?\s*bfloat(?:[234])?\b"#,
       options: [.caseInsensitive]
     )
   else {
