@@ -14,8 +14,17 @@ private func convertCFFIPrecisionToSwift(_ cPrecision: Int32) -> Int32 {
 }
 
 func sourceUsesUnsupportedBFloatTypes(error: Error) -> Bool {
-  let description = error.localizedDescription.lowercased()
-  return description.contains("unknown type name") && description.contains("'bfloat'")
+  let description = error.localizedDescription
+  guard
+    let regex = try? NSRegularExpression(
+      pattern: #"unknown type name\s*'?\s*bfloat\b"#,
+      options: [.caseInsensitive]
+    )
+  else {
+    return false
+  }
+  let fullRange = NSRange(description.startIndex..<description.endIndex, in: description)
+  return regex.firstMatch(in: description, range: fullRange) != nil
 }
 
 func replacingBFloatWithFloatTypes(in source: String) -> String {
@@ -919,7 +928,8 @@ public func mfa_attention_forward(
             code: 4,
             userInfo: [
               NSLocalizedDescriptionKey:
-                "Kernel compilation failed after bfloat fallback attempt: \(error.localizedDescription)"
+                "Kernel compilation failed after bfloat fallback attempt: \(error.localizedDescription). "
+                + "This may indicate Metal shader compatibility limits on the current platform."
             ]
           )
         }
