@@ -6,6 +6,7 @@ private let unsupportedBFloatTypeRegex = try! NSRegularExpression(
   pattern: #"unknown type name\s*'?\s*bfloat\b"#,
   options: [.caseInsensitive]
 )
+private let bfloatTypeReplacementRegex = try! NSRegularExpression(pattern: #"\bbfloat([234])?\b"#)
 
 // C FFI defines: FP16=0, BF16=1, FP32=2
 // Swift expects: FP32=0, FP16=1, BF16=2
@@ -25,11 +26,12 @@ func sourceUsesUnsupportedBFloatTypes(error: Error) -> Bool {
 }
 
 func replacingBFloatWithFloatTypes(in source: String) -> String {
-  guard let regex = try? NSRegularExpression(pattern: #"\bbfloat([234])?\b"#) else {
-    return source
-  }
   let fullRange = NSRange(source.startIndex..<source.endIndex, in: source)
-  return regex.stringByReplacingMatches(in: source, range: fullRange, withTemplate: "float$1")
+  return bfloatTypeReplacementRegex.stringByReplacingMatches(
+    in: source,
+    range: fullRange,
+    withTemplate: "float$1"
+  )
 }
 
 private enum MaskType: Int32 {

@@ -11,6 +11,12 @@ final class KernelSourceFallbackTests: XCTestCase {
     )
   }
 
+  func testReplacingStandaloneBFloatType() {
+    let source = "device bfloat* values;"
+    let replaced = replacingBFloatWithFloatTypes(in: source)
+    XCTAssertEqual(replaced, "device float* values;")
+  }
+
   func testDetectsUnsupportedBFloatCompilerError() {
     let error = NSError(
       domain: "MTLLibraryErrorDomain",
