@@ -20,10 +20,10 @@ func sourceUsesUnsupportedBFloatTypes(error: Error) -> Bool {
 
 func replacingBFloatWithFloatTypes(in source: String) -> String {
   source
-    .replacingOccurrences(of: "bfloat4", with: "float4")
-    .replacingOccurrences(of: "bfloat3", with: "float3")
-    .replacingOccurrences(of: "bfloat2", with: "float2")
-    .replacingOccurrences(of: "bfloat", with: "float")
+    .replacingOccurrences(of: #"\bbfloat4\b"#, with: "float4", options: .regularExpression)
+    .replacingOccurrences(of: #"\bbfloat3\b"#, with: "float3", options: .regularExpression)
+    .replacingOccurrences(of: #"\bbfloat2\b"#, with: "float2", options: .regularExpression)
+    .replacingOccurrences(of: #"\bbfloat\b"#, with: "float", options: .regularExpression)
 }
 
 private enum MaskType: Int32 {
@@ -910,8 +910,19 @@ public func mfa_attention_forward(
           throw error
         }
         let fallbackSource = replacingBFloatWithFloatTypes(in: source)
-        let fallbackLibrary = try mfaContext.device.makeLibrary(source: fallbackSource, options: nil)
-        function = try fallbackLibrary.makeFunction(name: "attention", constantValues: constants)
+        do {
+          let fallbackLibrary = try mfaContext.device.makeLibrary(source: fallbackSource, options: nil)
+          function = try fallbackLibrary.makeFunction(name: "attention", constantValues: constants)
+        } catch {
+          throw NSError(
+            domain: "MFABridge",
+            code: 4,
+            userInfo: [
+              NSLocalizedDescriptionKey:
+                "Kernel compilation failed after bfloat fallback attempt: \(error.localizedDescription)"
+            ]
+          )
+        }
       }
 
       // Create pipeline descriptor with proper settings for Apple Silicon
