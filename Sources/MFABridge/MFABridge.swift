@@ -2,11 +2,24 @@ import FlashAttention
 import Foundation
 import Metal
 
-private let unsupportedBFloatTypeRegex = try! NSRegularExpression(
-  pattern: #"unknown type name\s*'?\s*bfloat\b"#,
-  options: [.caseInsensitive]
-)
-private let bfloatTypeReplacementRegex = try! NSRegularExpression(pattern: #"\bbfloat([234])?\b"#)
+private let unsupportedBFloatTypeRegex: NSRegularExpression = {
+  guard
+    let regex = try? NSRegularExpression(
+      pattern: #"unknown type name\s*'?\s*bfloat\b"#,
+      options: [.caseInsensitive]
+    )
+  else {
+    fatalError("Invalid regex pattern for bfloat compile error detection.")
+  }
+  return regex
+}()
+
+private let bfloatTypeReplacementRegex: NSRegularExpression = {
+  guard let regex = try? NSRegularExpression(pattern: #"\bbfloat([234])?\b"#) else {
+    fatalError("Invalid regex pattern for bfloat type replacement.")
+  }
+  return regex
+}()
 
 // C FFI defines: FP16=0, BF16=1, FP32=2
 // Swift expects: FP32=0, FP16=1, BF16=2
@@ -914,8 +927,9 @@ public func mfa_attention_forward(
         let library = try mfaContext.device.makeLibrary(source: source, options: nil)
         function = try library.makeFunction(name: "attention", constantValues: constants)
       } catch {
-        guard sourceUsesUnsupportedBFloatTypes(error: error) else {
-          throw error
+        let originalCompileError = error
+        guard sourceUsesUnsupportedBFloatTypes(error: originalCompileError) else {
+          throw originalCompileError
         }
         let fallbackSource = replacingBFloatWithFloatTypes(in: source)
         do {
@@ -927,9 +941,10 @@ public func mfa_attention_forward(
             code: 4,
             userInfo: [
               NSLocalizedDescriptionKey:
-                "Kernel compilation failed after a compatibility fallback attempt. "
+                "Kernel compilation failed after attempting a bfloat-to-float compatibility fallback. "
                 + "Please verify that your Metal toolchain and runtime support this kernel source.",
               NSUnderlyingErrorKey: error,
+              "originalCompileError": originalCompileError,
             ]
           )
         }
