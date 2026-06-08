@@ -9,14 +9,14 @@ private let unsupportedBFloatTypeRegex: NSRegularExpression = {
       options: [.caseInsensitive]
     )
   else {
-    fatalError("Invalid regex pattern for bfloat compile error detection.")
+    fatalError("Failed to compile regex for bfloat error detection.")
   }
   return regex
 }()
 
 private let bfloatTypeReplacementRegex: NSRegularExpression = {
   guard let regex = try? NSRegularExpression(pattern: #"\bbfloat([234])?\b"#) else {
-    fatalError("Invalid regex pattern for bfloat type replacement.")
+    fatalError("Failed to compile regex for bfloat type replacement.")
   }
   return regex
 }()
@@ -942,7 +942,8 @@ public func mfa_attention_forward(
             userInfo: [
               NSLocalizedDescriptionKey:
                 "Kernel compilation failed after attempting a bfloat-to-float compatibility fallback. "
-                + "Please verify that your Metal toolchain and runtime support this kernel source.",
+                + "Please verify that your Metal toolchain and runtime support this kernel source. "
+                + "See underlying errors for details.",
               NSUnderlyingErrorKey: error,
               "originalCompileError": originalCompileError,
             ]
