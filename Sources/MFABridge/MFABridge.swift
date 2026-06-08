@@ -2,6 +2,8 @@ import FlashAttention
 import Foundation
 import Metal
 
+private let mfaErrorKernelCompilation: Int = 4
+
 private let unsupportedBFloatTypeRegex: NSRegularExpression = {
   guard
     let regex = try? NSRegularExpression(
@@ -938,14 +940,14 @@ public func mfa_attention_forward(
         } catch {
           throw NSError(
             domain: "MFABridge",
-            code: 4,
+            code: mfaErrorKernelCompilation,
             userInfo: [
               NSLocalizedDescriptionKey:
                 "Kernel compilation failed after attempting a bfloat-to-float compatibility fallback. "
                 + "Please verify that your Metal toolchain and runtime support this kernel source. "
                 + "See underlying errors for details.",
               NSUnderlyingErrorKey: error,
-              "originalCompileError": originalCompileError,
+              "primaryCompileError": originalCompileError,
             ]
           )
         }

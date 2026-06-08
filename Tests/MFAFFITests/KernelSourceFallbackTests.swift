@@ -3,11 +3,23 @@ import XCTest
 
 final class KernelSourceFallbackTests: XCTestCase {
   func testReplacingBFloatWithFloatTypes() {
-    let source = "thread bfloat a; thread bfloat2 b; thread bfloat3 c; thread bfloat4 d; int my_bfloat_identifier = 1;"
+    let source = """
+      thread bfloat a;
+      thread bfloat2 b;
+      thread bfloat3 c;
+      thread bfloat4 d;
+      int my_bfloat_identifier = 1;
+      """
     let replaced = replacingBFloatWithFloatTypes(in: source)
     XCTAssertEqual(
       replaced,
-      "thread float a; thread float2 b; thread float3 c; thread float4 d; int my_bfloat_identifier = 1;"
+      """
+      thread float a;
+      thread float2 b;
+      thread float3 c;
+      thread float4 d;
+      int my_bfloat_identifier = 1;
+      """
     )
   }
 
