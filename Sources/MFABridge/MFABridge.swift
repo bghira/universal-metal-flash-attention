@@ -1289,6 +1289,33 @@ public func mfa_is_device_supported() -> Bool {
   MTLCreateSystemDefaultDevice() != nil
 }
 
+/// Returns 1 if the runtime Metal compiler provides native bfloat support
+/// (i.e. `__HAVE_BFLOAT__` is defined when compiling a Metal source), else 0.
+/// Used by Python tests to skip bfloat16-data tests on toolchains that lack
+/// native bfloat (where the half-precision fallback would corrupt bf16 data).
+@_cdecl("mfa_has_native_bfloat")
+public func mfa_has_native_bfloat() -> Int32 {
+  guard let device = MTLCreateSystemDefaultDevice() else { return 0 }
+  let source = """
+  #include <metal_stdlib>
+  using namespace metal;
+
+  #if !defined(__HAVE_BFLOAT__)
+  #error "NO_NATIVE_BFLOAT"
+  #endif
+
+  kernel void __bfloat_probe(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+    x[i] = 0;
+  }
+  """
+  do {
+    _ = try device.makeLibrary(source: source, options: nil)
+    return 1
+  } catch {
+    return 0
+  }
+}
+
 @_cdecl("mfa_get_version")
 public func mfa_get_version(
   _ major: UnsafeMutablePointer<Int32>?,

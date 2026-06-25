@@ -6,6 +6,7 @@
 // Forward declarations from the header
 extern "C" {
     bool mfa_is_device_supported(void);
+    int32_t mfa_has_native_bfloat(void);
     void mfa_get_version(int* major, int* minor, int* patch);
 }
 
@@ -256,6 +257,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // Utility functions
     m.def("is_metal_available", []() { return mfa_is_device_supported(); },
           "Check if Metal is available on this device");
+
+    m.def("has_native_bfloat", []() { return mfa_has_native_bfloat() != 0; },
+          "True if the runtime Metal compiler provides native bfloat16 support");
 
     m.def("get_version", []() {
         int major, minor, patch;

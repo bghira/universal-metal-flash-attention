@@ -304,6 +304,7 @@ class TestStrideAwareAttention:
             except Exception as e:
                 print(f"  ❌ Failed: {e}")
 
+    @pytest.mark.slow
     def test_performance_comparison(self):
         """Compare performance of stride-aware vs contiguous approaches."""
         print("\n" + "=" * 80)

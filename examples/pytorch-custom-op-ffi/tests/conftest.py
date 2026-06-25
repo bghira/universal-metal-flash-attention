@@ -20,6 +20,17 @@ try:
 except ImportError:
     METAL_EXTENSION_AVAILABLE = False
 
+# Detect native bfloat16 support once per session. The generated Metal source
+# always emits bfloat paths; on toolchains without native bfloat a half-precision
+# fallback lets kernels compile but would corrupt actual bfloat16 *data*, so
+# tests that feed BFloat16 tensors must be skipped there.
+NATIVE_BFLOAT_AVAILABLE = False
+if METAL_EXTENSION_AVAILABLE and torch.backends.mps.is_available():
+    try:
+        NATIVE_BFLOAT_AVAILABLE = bool(metal_sdpa_extension.has_native_bfloat())
+    except Exception:
+        NATIVE_BFLOAT_AVAILABLE = False
+
 
 @pytest.fixture(scope="session")
 def metal_available():
@@ -45,6 +56,15 @@ def cleanup_metal():
     if torch.backends.mps.is_available():
         torch.mps.empty_cache()
     gc.collect()
+
+
+@pytest.fixture(autouse=True)
+def skip_bfloat_tests_without_native_bfloat(request):
+    """Skip @pytest.mark.requires_bfloat tests on toolchains lacking native
+    bfloat (the half fallback compiles but would corrupt bf16 data)."""
+    marker = request.node.get_closest_marker("requires_bfloat")
+    if marker is not None and not NATIVE_BFLOAT_AVAILABLE:
+        pytest.skip("native bfloat16 unavailable on this Metal toolchain")
 
 
 @pytest.fixture
@@ -230,6 +250,10 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers",
         "gpu: Tests requiring a working Metal GPU (excluded on CI via -m 'not gpu')",
+    )
+    config.addinivalue_line(
+        "markers",
+        "requires_bfloat: Tests feeding BFloat16 data; skipped when native bfloat is unavailable",
     )
     config.addinivalue_line("markers", "dtype: Tests for dtype compatibility")
     config.addinivalue_line("markers", "layout: Tests for layout conversions")

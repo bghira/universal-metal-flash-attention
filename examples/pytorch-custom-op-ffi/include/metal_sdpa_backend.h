@@ -443,6 +443,7 @@ extern "C" {
     );
 
     bool mfa_is_device_supported(void);
+    int32_t mfa_has_native_bfloat(void);
     void mfa_get_version(int* major, int* minor, int* patch);
 
     // =============================================================================

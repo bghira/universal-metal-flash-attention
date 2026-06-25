@@ -14,6 +14,7 @@ import torch.nn.functional as F
 @pytest.mark.metal
 @pytest.mark.flux
 @pytest.mark.integration
+@pytest.mark.requires_bfloat
 class TestFLUXIntegration:
     """Test real FLUX model integration scenarios."""
 

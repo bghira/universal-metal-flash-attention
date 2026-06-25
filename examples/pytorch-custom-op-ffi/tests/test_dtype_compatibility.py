@@ -16,6 +16,7 @@ import torch
 class TestDtypeCompatibility:
     """Test dtype handling and compatibility."""
 
+    @pytest.mark.requires_bfloat
     def test_bfloat16_compatibility(self, metal_device, create_test_tensors):
         """Test BFloat16 tensor processing - critical for FLUX."""
         if not hasattr(torch, "bfloat16"):
@@ -94,8 +95,8 @@ class TestDtypeCompatibility:
     @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])
     def test_dtype_preservation(self, metal_device, dtype):
         """Test that output dtype matches input dtype."""
-        if dtype == torch.bfloat16 and not hasattr(torch, "bfloat16"):
-            pytest.skip("BFloat16 not available")
+        if dtype == torch.bfloat16 and not metal_sdpa_extension.has_native_bfloat():
+            pytest.skip("native bfloat16 unavailable on this Metal toolchain")
 
         # Small tensors for quick testing
         q = torch.randn(1, 1, 32, 32, dtype=dtype, device=metal_device) * 0.1
@@ -141,7 +142,7 @@ class TestDtypeCompatibility:
         ]
 
         for batch, heads, seq_len, head_dim, dtype in configurations:
-            if dtype == torch.bfloat16 and not hasattr(torch, "bfloat16"):
+            if dtype == torch.bfloat16 and not metal_sdpa_extension.has_native_bfloat():
                 continue
 
             q, k, v = create_test_tensors(
@@ -189,7 +190,7 @@ class TestDtypeCompatibility:
         ]
 
         for dtype, name in configs:
-            if dtype == torch.bfloat16 and not hasattr(torch, "bfloat16"):
+            if dtype == torch.bfloat16 and not metal_sdpa_extension.has_native_bfloat():
                 continue
 
             # Create tensors that require accumulation
@@ -240,8 +241,8 @@ class TestDtypeCompatibility:
     def test_query_key_value_dtype_mixing(self, metal_device, q_dtype, kv_dtype):
         """Test different dtype combinations for Q, K, V."""
         if q_dtype == torch.bfloat16 or kv_dtype == torch.bfloat16:
-            if not hasattr(torch, "bfloat16"):
-                pytest.skip("BFloat16 not available")
+            if not metal_sdpa_extension.has_native_bfloat():
+                pytest.skip("native bfloat16 unavailable on this Metal toolchain")
 
         q = torch.randn(1, 4, 64, 32, dtype=q_dtype, device=metal_device) * 0.1
         k = torch.randn(1, 4, 64, 32, dtype=kv_dtype, device=metal_device) * 0.1
@@ -275,7 +276,7 @@ class TestDtypeConversions:
     def test_cpu_to_mps_dtype_preservation(self, metal_device):
         """Test that dtypes are preserved when moving from CPU to MPS."""
         dtypes = [torch.float32, torch.float16]
-        if hasattr(torch, "bfloat16"):
+        if hasattr(torch, "bfloat16") and metal_sdpa_extension.has_native_bfloat():
             dtypes.append(torch.bfloat16)
 
         for dtype in dtypes:
