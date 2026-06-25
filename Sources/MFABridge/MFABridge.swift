@@ -11,8 +11,8 @@ private extension NSLock {
   }
 }
 
-// C FFI defines: FP16=0, BF16=1, FP32=2
-// Swift expects: FP32=0, FP16=1, BF16=2
+/// C FFI defines: FP16=0, BF16=1, FP32=2
+/// Swift expects: FP32=0, FP16=1, BF16=2
 private func convertCFFIPrecisionToSwift(_ cPrecision: Int32) -> Int32 {
   switch cPrecision {
   case 0: 1 // FP16: C=0 -> Swift=1
@@ -59,7 +59,7 @@ private struct PreparedMask {
 
 // MARK: - Internal Types
 
-// Pipeline cache key for deduplicating compiled kernels
+/// Pipeline cache key for deduplicating compiled kernels
 struct PipelineCacheKey: Hashable {
   let seqLenQ: UInt32
   let seqLenKV: UInt32
@@ -87,7 +87,7 @@ final class MFAContext {
   private var lBufferCache: [UInt32: MTLBuffer] = [:]
   private var dBufferCache: [UInt32: MTLBuffer] = [:]
 
-  // Store GPU timing for zero-overhead measurement
+  /// Store GPU timing for zero-overhead measurement
   var lastGPULatency: CFTimeInterval = 0.0
 
   // Scale arrays for row-wise and block-wise quantization
@@ -1317,6 +1317,7 @@ public func mfa_attention_backward_query_quantized(
   _ q: UnsafeMutableRawPointer?,
   _ k: UnsafeMutableRawPointer?,
   _ v: UnsafeMutableRawPointer?,
+  _ output: UnsafeMutableRawPointer?,
   _ gradOutput: UnsafeMutableRawPointer?,
   _ logsumexp: UnsafeMutableRawPointer?,
   _ gradQuery: UnsafeMutableRawPointer?,
@@ -1348,6 +1349,7 @@ public func mfa_attention_backward_query_quantized(
     q,
     k,
     v,
+    output,
     gradOutput,
     logsumexp,
     gradQuery,
@@ -1391,6 +1393,7 @@ public func mfa_attention_backward_query_quantized_ex(
   _ q: UnsafeMutableRawPointer?,
   _ k: UnsafeMutableRawPointer?,
   _ v: UnsafeMutableRawPointer?,
+  _ output: UnsafeMutableRawPointer?,
   _ gradOutput: UnsafeMutableRawPointer?,
   _ logsumexp: UnsafeMutableRawPointer?,
   _ gradQuery: UnsafeMutableRawPointer?,
@@ -1431,6 +1434,7 @@ public func mfa_attention_backward_query_quantized_ex(
   guard
     let context,
     let q, let k, let v,
+    let output,
     let gradOutput,
     let logsumexp,
     let gradQuery,
@@ -1447,6 +1451,7 @@ public func mfa_attention_backward_query_quantized_ex(
   let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
   let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
   let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
+  let outputBuffer = Unmanaged<MFABuffer>.fromOpaque(output).takeUnretainedValue()
   let gradOutputBuffer = Unmanaged<MFABuffer>.fromOpaque(gradOutput).takeUnretainedValue()
   let logsumexpBuffer = Unmanaged<MFABuffer>.fromOpaque(logsumexp).takeUnretainedValue()
   let gradQueryBuffer = Unmanaged<MFABuffer>.fromOpaque(gradQuery).takeUnretainedValue()
@@ -1552,6 +1557,7 @@ public func mfa_attention_backward_query_quantized_ex(
       query: qTensor,
       key: kTensor,
       value: vTensor,
+      output: outputBuffer.buffer,
       gradOutput: gradOutputBuffer.buffer,
       logsumexp: logsumexpBuffer.buffer,
       gradQuery: gradQueryBuffer.buffer,
@@ -1954,7 +1960,7 @@ private func mfa_attention_forward_multihead_internal(
   return 0 // MFA_SUCCESS
 }
 
-// Helper function to dequantize buffers for MultiHeadAttention processing
+/// Helper function to dequantize buffers for MultiHeadAttention processing
 private func dequantizeBuffer(
   buffer: MTLBuffer,
   params: QuantizationParameters,
@@ -2419,9 +2425,21 @@ public func mfa_mla_forward(
     return 5 // MFA_ERROR_EXECUTION_FAILED
   }
 
-  // Output buffers (will be allocated by forward if needed)
-  var outK: MTLBuffer?
-  var outV: MTLBuffer?
+  // Output buffers are in/out: an incoming handle is an MTLBuffer to write the
+  // decompressed K/V into (e.g. an MPS tensor's backing buffer, readable from
+  // the host). When the caller passes nil, forward allocates and we return a
+  // new wrapped handle. This fixes the previous bug where forward wrote into
+  // its own private buffers and the caller's (never-written) tensors were
+  // returned.
+  var outK: MTLBuffer? = nil
+  var outV: MTLBuffer? = nil
+  if let kHandle = decompressedK?.pointee {
+    outK = Unmanaged<MFABuffer>.fromOpaque(kHandle).takeUnretainedValue().buffer
+  }
+  if let vHandle = decompressedV?.pointee {
+    outV = Unmanaged<MFABuffer>.fromOpaque(vHandle).takeUnretainedValue().buffer
+  }
+  let callerProvidedOutputs = (outK != nil && outV != nil)
 
   do {
     try mlaContext.forward(
@@ -2445,16 +2463,17 @@ public func mfa_mla_forward(
       return 5 // MFA_ERROR_EXECUTION_FAILED
     }
 
-    // Wrap output buffers and return
-    if let outK, let outV {
-      let kBuffer = MFABuffer(buffer: outK)
-      let vBuffer = MFABuffer(buffer: outV)
-
-      let kOpaque = Unmanaged.passRetained(kBuffer).toOpaque()
-      let vOpaque = Unmanaged.passRetained(vBuffer).toOpaque()
-
-      decompressedK?.pointee = kOpaque
-      decompressedV?.pointee = vOpaque
+    // Only hand back a freshly-wrapped handle when forward had to allocate the
+    // buffer itself (caller didn't provide one). When the caller provided the
+    // buffer, the data was written in place and the caller already owns the
+    // handle — leave it untouched.
+    if !callerProvidedOutputs {
+      if let outK {
+        decompressedK?.pointee = Unmanaged.passRetained(MFABuffer(buffer: outK)).toOpaque()
+      }
+      if let outV {
+        decompressedV?.pointee = Unmanaged.passRetained(MFABuffer(buffer: outV)).toOpaque()
+      }
     }
 
     // Store GPU timing

@@ -1,6 +1,7 @@
 #include "metal_sdpa_backend.h"
 #include "mps_utils.h"
 #include <torch/torch.h>
+#include <torch/mps.h>
 #include <stdexcept>
 #include <iostream>
 
@@ -51,15 +52,37 @@ void MlaContextWrapper::init_random_weights(uint32_t num_heads, uint32_t head_di
 }
 
 void MlaContextWrapper::load_weights(const torch::Tensor& wk, const torch::Tensor& wv) {
-    if (!mla_context_) {
+    if (!mla_context_ || !mfa_context_) {
         throw std::runtime_error("MLA context not initialized");
     }
 
-    // Get Metal buffers from tensors
-    auto wk_buffer = mps_utils::get_mtl_buffer_handle(wk);
-    auto wv_buffer = mps_utils::get_mtl_buffer_handle(wv);
+    // MPS writes tensor data lazily on its own command queue; the MFA GEMM
+    // commits on a separate queue. Flush pending MPS work so the GEMM reads
+    // committed weight bytes, not stale pool memory.
+    if (torch::mps::is_available()) {
+        torch::mps::synchronize();
+    }
 
-    mfa_error_t result = mfa_mla_load_weights(mla_context_, wk_buffer, wv_buffer);
+    // The Swift bridge expects MFABuffer-wrapped handles, not raw id<MTLBuffer>.
+    // Wrap consistently with forward() so mfa_mla_load_weights can unwrap them.
+    auto wk_raw = mps_utils::get_mtl_buffer_handle(wk);
+    auto wv_raw = mps_utils::get_mtl_buffer_handle(wv);
+
+    mfa_buffer_t wk_mfa = nullptr;
+    mfa_buffer_t wv_mfa = nullptr;
+    mfa_error_t r1 = mfa_buffer_from_mtl_buffer(mfa_context_, wk_raw, wk.nbytes(), &wk_mfa);
+    mfa_error_t r2 = mfa_buffer_from_mtl_buffer(mfa_context_, wv_raw, wv.nbytes(), &wv_mfa);
+    if (r1 != MFA_SUCCESS || r2 != MFA_SUCCESS) {
+        if (wk_mfa) mfa_destroy_buffer(wk_mfa);
+        if (wv_mfa) mfa_destroy_buffer(wv_mfa);
+        throw std::runtime_error("Failed to wrap MLA weight buffers");
+    }
+
+    // MLAContext retains the underlying MTLBuffers via loadWeights, so the
+    // wrappers can be released now without freeing the weight data.
+    mfa_error_t result = mfa_mla_load_weights(mla_context_, wk_mfa, wv_mfa);
+    mfa_destroy_buffer(wk_mfa);
+    mfa_destroy_buffer(wv_mfa);
     if (result != 0) {
         throw std::runtime_error("Failed to load MLA weights");
     }
@@ -75,6 +98,12 @@ std::tuple<torch::Tensor, torch::Tensor> MlaContextWrapper::forward(
 ) {
     if (!mla_context_ || !mfa_context_) {
         throw std::runtime_error("MLA/MFA context not initialized");
+    }
+
+    // Same MPS→external-queue sync as load_weights: ensure the kv_latent bytes
+    // written by PyTorch are committed before the MFA GEMM reads them.
+    if (torch::mps::is_available()) {
+        torch::mps::synchronize();
     }
 
     // Create output tensors on the same device as input

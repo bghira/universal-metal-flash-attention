@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 try:
-    from python.metal_sdpa_ffi import MlaContext, is_metal_available
+    from pytorch_custom_op_ffi.metal_sdpa_ffi import MlaContext, is_metal_available
 
     EXTENSION_AVAILABLE = True
 except ImportError as e:

@@ -32,31 +32,38 @@ else
 fi
 
 echo
-echo -e "${YELLOW}Step 2: Running MLA Performance Tests...${NC}"
+echo -e "${YELLOW}Step 2: Running MLA Swift correctness + performance tests...${NC}"
 echo "----------------------------------------"
 
-# Run the specific MLA performance test
-swift test -c release --filter MLAPerformanceTests
+# Runs MLAMFAUsageExample (testMLADecompressionCorrectness + testMLAPerformanceTFLOPS,
+# which prints GPU-timed TFLOPS per shape).
+swift test -c release --filter MLAMFAUsageExample
 
 if [ $? -eq 0 ]; then
-    echo -e "${GREEN}✓ MLA tests completed${NC}"
+    echo -e "${GREEN}✓ MLA Swift tests completed${NC}"
 else
-    echo -e "${RED}✗ MLA tests failed${NC}"
+    echo -e "${RED}✗ MLA Swift tests failed${NC}"
     # Don't exit - try to run other benchmarks
 fi
 
 echo
-echo -e "${YELLOW}Step 3: Running Memory Footprint Analysis...${NC}"
+echo -e "${YELLOW}Step 3: Running MLA Python benchmark (MFA vs MPS)...${NC}"
 echo "----------------------------------------"
 
-swift test -c release --filter testMemoryFootprint
+PYTHON=${PYTHON:-python3}
+EXT_DIR="$PROJECT_ROOT/examples/pytorch-custom-op-ffi"
+if [ -f "$EXT_DIR/metal_sdpa_extension.so" ] || [ -d "$EXT_DIR/pytorch_metal_sdpa_backend.egg-info" ]; then
+    (cd "$EXT_DIR" && $PYTHON bench_mla_vs_mps.py) || echo -e "${RED}✗ Python MLA benchmark failed${NC}"
+else
+    echo -e "${YELLOW}Skipping Python MLA benchmark (extension not built in $EXT_DIR)${NC}"
+fi
 
 echo
 echo -e "${YELLOW}Step 4: Running All Performance Tests...${NC}"
 echo "----------------------------------------"
 
 # Run all performance tests for comparison
-swift test -c release --filter PerformanceTests
+swift test -c release --filter PerformanceTests || true
 
 echo
 echo -e "${YELLOW}Step 5: Generating Summary Report...${NC}"
@@ -70,17 +77,18 @@ mkdir -p "$RESULTS_DIR"
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 RESULTS_FILE="$RESULTS_DIR/mla_benchmark_results_$TIMESTAMP.txt"
 
-# Capture all test output to results file
+# Capture MLA Swift + Python benchmark output to results file
 {
     echo "=== MLA Benchmark Results ==="
     echo "Generated: $(date)"
     echo "Platform: $(uname -m) $(sw_vers -productVersion)"
     echo "Device: $(system_profiler SPDisplaysDataType | grep "Chipset Model" | head -1)"
     echo
-    echo "Running comprehensive benchmarks..."
+    echo "--- Swift (MLAMFAUsageExample, GPU-timed) ---"
+    swift test -c release --filter MLAMFAUsageExample 2>&1
     echo
-
-    swift test -c release --filter MLAPerformanceTests 2>&1
+    echo "--- Python (MFA vs MPS) ---"
+    (cd "$EXT_DIR" && $PYTHON bench_mla_vs_mps.py 2>&1)
 
 } | tee "$RESULTS_FILE"
 
@@ -89,10 +97,10 @@ echo -e "${GREEN}=== Benchmark Complete ===${NC}"
 echo -e "Results saved to: ${YELLOW}$RESULTS_FILE${NC}"
 echo
 
-# Quick summary extraction
+# Quick summary extraction: capture TFLOPS lines from both runners.
 echo "Quick Summary:"
 echo "-------------"
-grep -E "(Standard FP16:|INT8 Quantized:|MLA Compressed:|Memory savings:)" "$RESULTS_FILE" | tail -20
+grep -E "(TFLOPS|→ [0-9]+\.[0-9]+ TFLOPS|seq=)" "$RESULTS_FILE" | tail -30
 
 echo
 echo "To view full results:"

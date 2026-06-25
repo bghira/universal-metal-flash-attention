@@ -1014,6 +1014,21 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
         throw std::runtime_error("Unsupported tensor dimensions. Expected 2D (seq_len, head_dim) or 4D (batch, seq_len, num_heads, head_dim)");
     }
 
+    bool cpu_binding = !use_mps_buffers;
+    bool promoted_precision = false;
+    auto original_input_dtype = q_tensor.scalar_type();
+
+    auto promote_to_fp32 = [&](torch::Tensor& tensor) {
+        if (tensor.scalar_type() == torch::kFloat16 || tensor.scalar_type() == torch::kBFloat16) {
+            tensor = tensor.to(torch::kFloat32);
+            promoted_precision = true;
+        }
+    };
+
+    promote_to_fp32(q_tensor);
+    promote_to_fp32(k_tensor);
+    promote_to_fp32(v_tensor);
+
     auto output = torch::empty_like(q_tensor);
     auto describe_shape = [](const torch::Tensor& t) {
         std::string s = "[";
@@ -1058,6 +1073,12 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
 
     if (attn_mask.has_value() && attn_mask.value().defined()) {
         mask_cpu = ensure_contiguous_cpu(attn_mask.value());
+        if (promoted_precision) {
+            auto mask_dtype_for_conversion = mask_cpu.scalar_type();
+            if (mask_dtype_for_conversion == torch::kFloat16 || mask_dtype_for_conversion == torch::kBFloat16) {
+                mask_cpu = mask_cpu.to(torch::kFloat32);
+            }
+        }
 
         auto mask_dtype = mask_cpu.scalar_type();
         if (mask_dtype == torch::kBool) {
@@ -1215,6 +1236,10 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
         output = convert_metal_to_flux_layout(output);
     }
 
+    if (promoted_precision) {
+        output = output.to(original_input_dtype);
+    }
+
     return output;
 }
 
@@ -1251,12 +1276,16 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
         std::cout << "⚠️  METAL_SDPA_ALLOW_CPU_FALLBACK=1, copying tensors to CPU for fallback path" << std::endl;
     }
 
-    auto q_cpu = ensure_contiguous_cpu(q);
-    auto k_cpu = ensure_contiguous_cpu(k);
-    auto v_cpu = ensure_contiguous_cpu(v);
+    auto q_cpu = ensure_contiguous_cpu(q).to(torch::kFloat32);
+    auto k_cpu = ensure_contiguous_cpu(k).to(torch::kFloat32);
+    auto v_cpu = ensure_contiguous_cpu(v).to(torch::kFloat32);
     c10::optional<torch::Tensor> mask_cpu;
     if (attn_mask.has_value()) {
         mask_cpu = ensure_contiguous_cpu(attn_mask.value());
+        auto mask_dtype = mask_cpu->scalar_type();
+        if (mask_dtype == torch::kFloat16 || mask_dtype == torch::kBFloat16) {
+            mask_cpu = mask_cpu->to(torch::kFloat32);
+        }
     }
     return call_swift_flash_attention_impl(q_cpu, k_cpu, v_cpu, mask_cpu, is_causal, softmax_scale, false);
 }

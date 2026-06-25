@@ -192,42 +192,41 @@ class TestDtypeCompatibility:
             if dtype == torch.bfloat16 and not hasattr(torch, "bfloat16"):
                 continue
 
-            with self.subTest(dtype=name):
-                # Create tensors that require accumulation
-                q = torch.randn(1, 8, 256, 64, dtype=dtype, device=metal_device) * 0.1
-                k = torch.randn(1, 8, 256, 64, dtype=dtype, device=metal_device) * 0.1
-                v = torch.randn(1, 8, 256, 64, dtype=dtype, device=metal_device) * 0.1
+            # Create tensors that require accumulation
+            q = torch.randn(1, 8, 256, 64, dtype=dtype, device=metal_device) * 0.1
+            k = torch.randn(1, 8, 256, 64, dtype=dtype, device=metal_device) * 0.1
+            v = torch.randn(1, 8, 256, 64, dtype=dtype, device=metal_device) * 0.1
 
-                try:
-                    output = metal_sdpa_extension.metal_scaled_dot_product_attention(
-                        q, k, v
+            try:
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
+
+                # Successful execution means accumulator dtype was handled correctly
+                assert (
+                    output.dtype == dtype
+                ), f"[{name}] Output dtype {output.dtype} doesn't match input {dtype}"
+
+                # Additional sanity checks
+                assert output.shape == q.shape
+                assert torch.isfinite(
+                    output
+                ).all(), f"[{name}] Output contains non-finite values"
+
+            except RuntimeError as e:
+                error_str = str(e)
+                if (
+                    "Destination NDArray and Accumulator NDArray cannot have different datatype"
+                    in error_str
+                ):
+                    pytest.fail(
+                        f"Accumulator dtype mismatch for {name}: {error_str}\n"
+                        f"This indicates the Metal kernel is using a different dtype for "
+                        f"accumulation than the output tensor."
                     )
-
-                    # Successful execution means accumulator dtype was handled correctly
-                    assert (
-                        output.dtype == dtype
-                    ), f"Output dtype {output.dtype} doesn't match input {dtype}"
-
-                    # Additional sanity checks
-                    assert output.shape == q.shape
-                    assert torch.isfinite(
-                        output
-                    ).all(), "Output contains non-finite values"
-
-                except RuntimeError as e:
-                    error_str = str(e)
-                    if (
-                        "Destination NDArray and Accumulator NDArray cannot have different datatype"
-                        in error_str
-                    ):
-                        pytest.fail(
-                            f"Accumulator dtype mismatch for {name}: {error_str}\n"
-                            f"This indicates the Metal kernel is using a different dtype for "
-                            f"accumulation than the output tensor."
-                        )
-                    else:
-                        # Re-raise other errors
-                        raise
+                else:
+                    # Re-raise other errors
+                    raise
 
     @pytest.mark.parametrize(
         "q_dtype,kv_dtype",
