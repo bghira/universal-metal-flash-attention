@@ -227,6 +227,10 @@ def check_numerical_accuracy():
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "metal: Tests requiring Metal/MPS device")
+    config.addinivalue_line(
+        "markers",
+        "gpu: Tests requiring a working Metal GPU (excluded on CI via -m 'not gpu')",
+    )
     config.addinivalue_line("markers", "dtype: Tests for dtype compatibility")
     config.addinivalue_line("markers", "layout: Tests for layout conversions")
     config.addinivalue_line("markers", "quantization: Tests for quantization features")

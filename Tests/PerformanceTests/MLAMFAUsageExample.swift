@@ -128,7 +128,7 @@ final class MLAMFAUsageExample: XCTestCase {
 
     // Execute GEMM
     let commandBuffer = try XCTUnwrap(commandQueue.makeCommandBuffer())
-    mfaGemm.encodeGEMM(
+    try mfaGemm.encodeGEMM(
       commandBuffer: commandBuffer,
       A: A,
       B: B,

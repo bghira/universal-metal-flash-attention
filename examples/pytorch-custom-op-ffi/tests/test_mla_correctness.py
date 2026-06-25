@@ -22,6 +22,7 @@ MLA_SHAPES = [
 ]
 
 
+@pytest.mark.gpu
 @pytest.mark.metal
 @pytest.mark.parametrize("batch,seq,heads,head_dim,kv_latent_dim", MLA_SHAPES)
 def test_mla_decompression_matches_reference(
@@ -69,6 +70,7 @@ def test_mla_decompression_matches_reference(
     torch.testing.assert_close(v.cpu(), v_ref.cpu(), rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.gpu
 @pytest.mark.metal
 def test_mla_output_is_written_in_place(metal_device):
     """Regression for the bug where the FFI returned the caller's never-written
@@ -111,6 +113,7 @@ def test_mla_output_is_written_in_place(metal_device):
     torch.testing.assert_close(k.cpu(), k_ref.cpu(), rtol=2e-2, atol=2e-2)
 
 
+@pytest.mark.gpu
 @pytest.mark.metal
 def test_mla_context_load_vs_random_weights(metal_device):
     """load_weights must override any prior random init with the supplied weights."""

@@ -47,7 +47,7 @@ let package = Package(
       name: "MFAFFITests",
       dependencies: ["MFAFFI"],
       swiftSettings: [
-        .enableUpcomingFeature("StrictConcurrency")
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
     .testTarget(
@@ -57,7 +57,7 @@ let package = Package(
         .product(name: "FlashAttention", package: "metal-flash-attention"),
       ],
       swiftSettings: [
-        .enableUpcomingFeature("StrictConcurrency")
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
     .testTarget(
@@ -67,7 +67,7 @@ let package = Package(
         .product(name: "FlashAttention", package: "metal-flash-attention"),
       ],
       swiftSettings: [
-        .enableUpcomingFeature("StrictConcurrency")
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
     .testTarget(
@@ -77,7 +77,7 @@ let package = Package(
         .product(name: "FlashAttention", package: "metal-flash-attention"),
       ],
       swiftSettings: [
-        .enableUpcomingFeature("StrictConcurrency")
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
   ]
