@@ -24,6 +24,7 @@ ext_modules = [
             str(CURRENT_DIR / "src" / "metal_sdpa_backend.cpp"),
             str(CURRENT_DIR / "src" / "python_bindings.cpp"),
             str(CURRENT_DIR / "src" / "mps_utils.mm"),
+            str(CURRENT_DIR / "src" / "mla_wrappers.cpp"),
         ],
         include_dirs=[
             str(CURRENT_DIR / "include"),
@@ -171,7 +172,7 @@ def main():
         long_description_content_type="text/markdown",
         url="https://github.com/bghira/universal-metal-flash-attention",
         packages=["pytorch_custom_op_ffi"],
-        package_dir={"pytorch_custom_op_ffi": "python"},
+        package_dir={"pytorch_custom_op_ffi": "python/pytorch_custom_op_ffi"},
         ext_modules=ext_modules,
         cmdclass={"build_ext": CustomBuildExt},
         install_requires=[

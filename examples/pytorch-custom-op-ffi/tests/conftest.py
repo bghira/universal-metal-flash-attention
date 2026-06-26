@@ -15,9 +15,21 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 # Try to import the extension
 try:
     import metal_sdpa_extension
+
     METAL_EXTENSION_AVAILABLE = True
 except ImportError:
     METAL_EXTENSION_AVAILABLE = False
+
+# Detect native bfloat16 support once per session. The generated Metal source
+# always emits bfloat paths; on toolchains without native bfloat a half-precision
+# fallback lets kernels compile but would corrupt actual bfloat16 *data*, so
+# tests that feed BFloat16 tensors must be skipped there.
+NATIVE_BFLOAT_AVAILABLE = False
+if METAL_EXTENSION_AVAILABLE and torch.backends.mps.is_available():
+    try:
+        NATIVE_BFLOAT_AVAILABLE = bool(metal_sdpa_extension.has_native_bfloat())
+    except Exception:
+        NATIVE_BFLOAT_AVAILABLE = False
 
 
 @pytest.fixture(scope="session")
@@ -46,6 +58,15 @@ def cleanup_metal():
     gc.collect()
 
 
+@pytest.fixture(autouse=True)
+def skip_bfloat_tests_without_native_bfloat(request):
+    """Skip @pytest.mark.requires_bfloat tests on toolchains lacking native
+    bfloat (the half fallback compiles but would corrupt bf16 data)."""
+    marker = request.node.get_closest_marker("requires_bfloat")
+    if marker is not None and not NATIVE_BFLOAT_AVAILABLE:
+        pytest.skip("native bfloat16 unavailable on this Metal toolchain")
+
+
 @pytest.fixture
 def dtype_combinations():
     """Generate all valid dtype combinations for testing."""
@@ -53,10 +74,12 @@ def dtype_combinations():
 
     # Basic dtypes
     if torch.backends.mps.is_available():
-        dtypes.extend([
-            torch.float32,
-            torch.float16,
-        ])
+        dtypes.extend(
+            [
+                torch.float32,
+                torch.float16,
+            ]
+        )
 
         # BFloat16 support check
         try:
@@ -73,11 +96,11 @@ def flux_tensor_shapes():
     """Common FLUX model tensor shapes for testing."""
     return [
         # (batch, heads, seq_len, head_dim)
-        (1, 12, 77, 64),      # FLUX text encoder typical shape
-        (1, 24, 1536, 128),   # FLUX main transformer shape
-        (2, 24, 1536, 128),   # Batched FLUX
-        (1, 24, 4096, 128),   # Larger sequence length
-        (1, 48, 2048, 64),    # Different head configuration
+        (1, 12, 77, 64),  # FLUX text encoder typical shape
+        (1, 24, 1536, 128),  # FLUX main transformer shape
+        (2, 24, 1536, 128),  # Batched FLUX
+        (1, 24, 4096, 128),  # Larger sequence length
+        (1, 48, 2048, 64),  # Different head configuration
     ]
 
 
@@ -86,18 +109,26 @@ def basic_tensor_shapes():
     """Basic tensor shapes for quick testing."""
     return [
         # (batch, heads, seq_len, head_dim)
-        (1, 1, 64, 64),       # Simplest case
-        (1, 4, 128, 64),      # Multi-head
-        (2, 8, 256, 64),      # Batched multi-head
-        (1, 1, 512, 128),     # Larger dimensions
+        (1, 1, 64, 64),  # Simplest case
+        (1, 4, 128, 64),  # Multi-head
+        (2, 8, 256, 64),  # Batched multi-head
+        (1, 1, 512, 128),  # Larger dimensions
     ]
 
 
 @pytest.fixture
 def create_test_tensors():
     """Factory fixture to create test tensors with specified properties."""
-    def _create(batch_size=1, num_heads=1, seq_len=64, head_dim=64,
-                dtype=torch.float32, device="mps", layout="flux"):
+
+    def _create(
+        batch_size=1,
+        num_heads=1,
+        seq_len=64,
+        head_dim=64,
+        dtype=torch.float32,
+        device="mps",
+        layout="flux",
+    ):
         """
         Create Q, K, V tensors for testing.
 
@@ -128,22 +159,27 @@ def create_test_tensors():
 @pytest.fixture
 def reference_attention():
     """Compute reference attention using PyTorch's implementation."""
+
     def _compute(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
         """Compute attention using PyTorch's F.scaled_dot_product_attention."""
         with torch.inference_mode():
             return torch.nn.functional.scaled_dot_product_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 attn_mask=attn_mask,
                 dropout_p=dropout_p,
                 is_causal=is_causal,
-                scale=scale
+                scale=scale,
             )
+
     return _compute
 
 
 @pytest.fixture
 def tolerance_for_dtype():
     """Get appropriate tolerance values for different dtypes."""
+
     def _get_tolerance(dtype):
         if dtype == torch.float32:
             return {"rtol": 1e-5, "atol": 1e-6}
@@ -153,12 +189,14 @@ def tolerance_for_dtype():
             return {"rtol": 1e-2, "atol": 1e-2}
         else:
             return {"rtol": 1e-4, "atol": 1e-4}
+
     return _get_tolerance
 
 
 @pytest.fixture
 def check_numerical_accuracy():
     """Helper to check numerical accuracy between two tensors."""
+
     def _check(actual, expected, dtype=None, name="Output"):
         """
         Check if actual matches expected within tolerance.
@@ -199,7 +237,7 @@ def check_numerical_accuracy():
             "rtol": rtol,
             "atol": atol,
             "dtype": str(dtype),
-            "name": name
+            "name": name,
         }
 
     return _check
@@ -209,6 +247,14 @@ def check_numerical_accuracy():
 def pytest_configure(config):
     """Register custom markers."""
     config.addinivalue_line("markers", "metal: Tests requiring Metal/MPS device")
+    config.addinivalue_line(
+        "markers",
+        "gpu: Tests requiring a working Metal GPU (excluded on CI via -m 'not gpu')",
+    )
+    config.addinivalue_line(
+        "markers",
+        "requires_bfloat: Tests feeding BFloat16 data; skipped when native bfloat is unavailable",
+    )
     config.addinivalue_line("markers", "dtype: Tests for dtype compatibility")
     config.addinivalue_line("markers", "layout: Tests for layout conversions")
     config.addinivalue_line("markers", "quantization: Tests for quantization features")

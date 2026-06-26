@@ -14,10 +14,11 @@ Usage:
     python test_bf16_fix_validation.py
 """
 
-import torch
-import numpy as np
-import sys
 import os
+import sys
+
+import numpy as np
+import torch
 
 # Add the project path to sys.path to import our modules
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -26,10 +27,12 @@ sys.path.insert(0, current_dir)
 try:
     # Try to import via the correct package structure
     from pytorch_custom_op_ffi import metal_sdpa_ffi
+
     print("✅ Successfully imported metal_sdpa_ffi from pytorch_custom_op_ffi")
 except ImportError as e:
     try:
         import metal_sdpa_ffi
+
         print("✅ Successfully imported metal_sdpa_ffi directly")
     except ImportError as e2:
         print(f"❌ Failed to import metal_sdpa_ffi: {e}")
@@ -43,7 +46,7 @@ class BF16FixValidator:
 
     def __init__(self):
         self.test_results = []
-        self.device = torch.device('cpu')  # Tests focus on CPU->Metal boundary
+        self.device = torch.device("cpu")  # Tests focus on CPU->Metal boundary
 
     def log_result(self, test_name, passed, message=""):
         """Log a test result."""
@@ -53,14 +56,21 @@ class BF16FixValidator:
         if message:
             print(f"    {message}")
 
-    def create_test_tensors(self, dtype=torch.bfloat16, batch_size=2, seq_len=128,
-                           num_heads=8, head_dim=64):
+    def create_test_tensors(
+        self, dtype=torch.bfloat16, batch_size=2, seq_len=128, num_heads=8, head_dim=64
+    ):
         """Create test tensors with specific patterns for validation."""
 
         # Create tensors with known patterns for validation
-        q = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device)
-        k = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device)
-        v = torch.randn(batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device)
+        q = torch.randn(
+            batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device
+        )
+        k = torch.randn(
+            batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device
+        )
+        v = torch.randn(
+            batch_size, seq_len, num_heads, head_dim, dtype=dtype, device=self.device
+        )
 
         # Add some specific values we can check for corruption
         q[0, 0, 0, 0] = 1.5  # Known value
@@ -72,7 +82,10 @@ class BF16FixValidator:
     def validate_tensor_dtype(self, tensor, expected_dtype, tensor_name):
         """Validate that a tensor has the expected dtype."""
         if tensor.dtype != expected_dtype:
-            return False, f"{tensor_name} dtype mismatch: expected {expected_dtype}, got {tensor.dtype}"
+            return (
+                False,
+                f"{tensor_name} dtype mismatch: expected {expected_dtype}, got {tensor.dtype}",
+            )
         return True, f"{tensor_name} dtype correct: {tensor.dtype}"
 
     def validate_tensor_values(self, original, processed, tensor_name, tolerance=1e-6):
@@ -83,18 +96,30 @@ class BF16FixValidator:
 
         # Check if shapes match
         if orig_float.shape != proc_float.shape:
-            return False, f"{tensor_name} shape mismatch: {orig_float.shape} vs {proc_float.shape}"
+            return (
+                False,
+                f"{tensor_name} shape mismatch: {orig_float.shape} vs {proc_float.shape}",
+            )
 
         # Check specific known values
-        if abs(float(orig_float[0, 0, 0, 0]) - float(proc_float[0, 0, 0, 0])) > tolerance:
-            return False, f"{tensor_name} value corruption detected: {float(orig_float[0, 0, 0, 0])} vs {float(proc_float[0, 0, 0, 0])}"
+        if (
+            abs(float(orig_float[0, 0, 0, 0]) - float(proc_float[0, 0, 0, 0]))
+            > tolerance
+        ):
+            return (
+                False,
+                f"{tensor_name} value corruption detected: {float(orig_float[0, 0, 0, 0])} vs {float(proc_float[0, 0, 0, 0])}",
+            )
 
         # Check overall similarity
         diff = torch.abs(orig_float - proc_float)
         max_diff = torch.max(diff).item()
 
         if max_diff > tolerance:
-            return False, f"{tensor_name} max difference {max_diff} > tolerance {tolerance}"
+            return (
+                False,
+                f"{tensor_name} max difference {max_diff} > tolerance {tolerance}",
+            )
 
         return True, f"{tensor_name} values preserved (max diff: {max_diff})"
 
@@ -144,7 +169,9 @@ class BF16FixValidator:
                 new_q_val = float(q[0, 0, 0, 0])
                 if abs(orig_q_val - new_q_val) > 1e-6:
                     passed = False
-                    message += f", but input tensor was corrupted: {orig_q_val} -> {new_q_val}"
+                    message += (
+                        f", but input tensor was corrupted: {orig_q_val} -> {new_q_val}"
+                    )
 
             self.log_result(test_name, passed, message)
 
@@ -180,7 +207,7 @@ class BF16FixValidator:
             test_cases = [
                 (torch.bfloat16, "bf16 input"),
                 (torch.float16, "fp16 input"),
-                (torch.float32, "fp32 input")
+                (torch.float32, "fp32 input"),
             ]
 
             all_passed = True
@@ -210,9 +237,13 @@ class BF16FixValidator:
 
         try:
             # Create a larger tensor to test buffer handling
-            q, k, v = self.create_test_tensors(dtype=torch.bfloat16,
-                                             batch_size=4, seq_len=512,
-                                             num_heads=16, head_dim=64)
+            q, k, v = self.create_test_tensors(
+                dtype=torch.bfloat16,
+                batch_size=4,
+                seq_len=512,
+                num_heads=16,
+                head_dim=64,
+            )
 
             result = metal_sdpa_ffi.scaled_dot_product_attention(q, k, v)
 
@@ -258,7 +289,7 @@ class BF16FixValidator:
             q, k, v = self.create_test_tensors(dtype=torch.bfloat16)
 
             # Test quantized attention if available
-            if hasattr(metal_sdpa_ffi, 'quantized_scaled_dot_product_attention'):
+            if hasattr(metal_sdpa_ffi, "quantized_scaled_dot_product_attention"):
                 result = metal_sdpa_ffi.quantized_scaled_dot_product_attention(q, k, v)
                 passed = result is not None and result.numel() > 0
                 message = f"Quantized attention with bf16 successful: {result.shape}"

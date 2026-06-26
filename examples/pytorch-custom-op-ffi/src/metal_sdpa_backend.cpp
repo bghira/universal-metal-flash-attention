@@ -11,8 +11,34 @@
 #include <cinttypes>  // For PRId64, PRIu32, etc.
 #include <cmath>      // For std::isfinite, std::clamp
 #include <algorithm>  // For std::clamp
+#include <cstdlib>    // For std::getenv
+#include <sstream>
 
 namespace metal_sdpa {
+
+namespace {
+
+bool cpu_fallback_allowed() {
+    static bool allowed = [] {
+        const char* env = std::getenv("METAL_SDPA_ALLOW_CPU_FALLBACK");
+        if (!env) {
+            return false;
+        }
+        std::string value(env);
+        std::transform(value.begin(), value.end(), value.begin(), ::tolower);
+        return value == "1" || value == "true" || value == "yes";
+    }();
+    return allowed;
+}
+
+std::string describe_device(const torch::Tensor& tensor) {
+    std::ostringstream oss;
+    auto device = tensor.device();
+    oss << device.str();
+    return oss.str();
+}
+
+} // namespace
 
 // Tensor layout conversion utilities for FLUX compatibility
 // FLUX uses [batch, heads, sequence, dim] while Metal expects [batch, sequence, heads, dim]
@@ -988,6 +1014,21 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
         throw std::runtime_error("Unsupported tensor dimensions. Expected 2D (seq_len, head_dim) or 4D (batch, seq_len, num_heads, head_dim)");
     }
 
+    bool cpu_binding = !use_mps_buffers;
+    bool promoted_precision = false;
+    auto original_input_dtype = q_tensor.scalar_type();
+
+    auto promote_to_fp32 = [&](torch::Tensor& tensor) {
+        if (tensor.scalar_type() == torch::kFloat16 || tensor.scalar_type() == torch::kBFloat16) {
+            tensor = tensor.to(torch::kFloat32);
+            promoted_precision = true;
+        }
+    };
+
+    promote_to_fp32(q_tensor);
+    promote_to_fp32(k_tensor);
+    promote_to_fp32(v_tensor);
+
     auto output = torch::empty_like(q_tensor);
     auto describe_shape = [](const torch::Tensor& t) {
         std::string s = "[";
@@ -1032,6 +1073,12 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
 
     if (attn_mask.has_value() && attn_mask.value().defined()) {
         mask_cpu = ensure_contiguous_cpu(attn_mask.value());
+        if (promoted_precision) {
+            auto mask_dtype_for_conversion = mask_cpu.scalar_type();
+            if (mask_dtype_for_conversion == torch::kFloat16 || mask_dtype_for_conversion == torch::kBFloat16) {
+                mask_cpu = mask_cpu.to(torch::kFloat32);
+            }
+        }
 
         auto mask_dtype = mask_cpu.scalar_type();
         if (mask_dtype == torch::kBool) {
@@ -1189,6 +1236,10 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
         output = convert_metal_to_flux_layout(output);
     }
 
+    if (promoted_precision) {
+        output = output.to(original_input_dtype);
+    }
+
     return output;
 }
 
@@ -1205,16 +1256,36 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
         try {
             return call_swift_flash_attention_impl(q, k, v, attn_mask, is_causal, softmax_scale, true);
         } catch (const std::exception& ex) {
-            std::cout << "⚠️  MPS fast path unavailable: " << ex.what() << " -- falling back to CPU path" << std::endl;
+            std::ostringstream msg;
+            msg << "Metal SDPA MPS fast path failed: " << ex.what()
+                << ". Set METAL_SDPA_ALLOW_CPU_FALLBACK=1 to permit automatic CPU fallback.";
+            throw std::runtime_error(msg.str());
         }
     }
 
-    auto q_cpu = ensure_contiguous_cpu(q);
-    auto k_cpu = ensure_contiguous_cpu(k);
-    auto v_cpu = ensure_contiguous_cpu(v);
+    bool inputs_are_cpu = q.device().is_cpu() && k.device().is_cpu() && v.device().is_cpu();
+    if (!inputs_are_cpu && !cpu_fallback_allowed()) {
+        std::ostringstream msg;
+        msg << "Metal SDPA received tensors on " << describe_device(q)
+            << " but GPU execution was unavailable. "
+            << "Set METAL_SDPA_ALLOW_CPU_FALLBACK=1 to force CPU fallback.";
+        throw std::runtime_error(msg.str());
+    }
+
+    if (!inputs_are_cpu) {
+        std::cout << "⚠️  METAL_SDPA_ALLOW_CPU_FALLBACK=1, copying tensors to CPU for fallback path" << std::endl;
+    }
+
+    auto q_cpu = ensure_contiguous_cpu(q).to(torch::kFloat32);
+    auto k_cpu = ensure_contiguous_cpu(k).to(torch::kFloat32);
+    auto v_cpu = ensure_contiguous_cpu(v).to(torch::kFloat32);
     c10::optional<torch::Tensor> mask_cpu;
     if (attn_mask.has_value()) {
         mask_cpu = ensure_contiguous_cpu(attn_mask.value());
+        auto mask_dtype = mask_cpu->scalar_type();
+        if (mask_dtype == torch::kFloat16 || mask_dtype == torch::kBFloat16) {
+            mask_cpu = mask_cpu->to(torch::kFloat32);
+        }
     }
     return call_swift_flash_attention_impl(q_cpu, k_cpu, v_cpu, mask_cpu, is_causal, softmax_scale, false);
 }
@@ -1590,6 +1661,109 @@ size_t calculate_expected_buffer_size(const torch::Tensor& reference_tensor,
 }
 
 } // namespace metal_sdpa (nested)
+
+torch::Tensor MetalSDPABackend::sparse_indexer_scores(
+    const torch::Tensor& q_tensor,
+    const torch::Tensor& k_tensor,
+    double scale
+) {
+    ensure_initialized();
+
+    TORCH_CHECK(mps_utils::is_mps_tensor(q_tensor), "Sparse indexer expects Q tensor on MPS device");
+    TORCH_CHECK(mps_utils::is_mps_tensor(k_tensor), "Sparse indexer expects K tensor on MPS device");
+    TORCH_CHECK(q_tensor.scalar_type() == torch::kFloat16,
+                "Sparse indexer currently supports float16 tensors");
+    TORCH_CHECK(k_tensor.scalar_type() == torch::kFloat16,
+                "Sparse indexer currently supports float16 tensors");
+    TORCH_CHECK(q_tensor.dim() == 4 && k_tensor.dim() == 4,
+                "Sparse indexer expects tensors with shape [batch, heads, seq, head_dim]");
+
+    auto batch = q_tensor.size(0);
+    auto heads = q_tensor.size(1);
+    auto seq_q = q_tensor.size(2);
+    auto head_dim = q_tensor.size(3);
+
+    TORCH_CHECK(k_tensor.size(0) == batch,
+                "Key tensor batch dimension must match query tensor batch dimension");
+    TORCH_CHECK(k_tensor.size(1) == heads,
+                "Key tensor head count must match query tensor head count");
+    TORCH_CHECK(k_tensor.size(3) == head_dim,
+                "Key tensor head dimension must match query tensor head dimension");
+
+    auto seq_k = k_tensor.size(2);
+
+    TORCH_CHECK(batch > 0 && heads > 0 && seq_q > 0 && seq_k > 0 && head_dim > 0,
+                "Sparse indexer received invalid tensor dimensions");
+
+    auto q = q_tensor.contiguous();
+    auto k = k_tensor.contiguous();
+    auto scores = torch::empty({batch, heads, seq_q, seq_k}, q.options());
+
+    auto make_shape_vector = [](const torch::Tensor& tensor) {
+        return std::vector<int64_t>(tensor.sizes().begin(), tensor.sizes().end());
+    };
+
+    auto make_stride_vector = [](const torch::Tensor& tensor) {
+        return std::vector<int64_t>(tensor.strides().begin(), tensor.strides().end());
+    };
+
+    auto wrap_tensor = [&](const char* name, const torch::Tensor& tensor, mfa_buffer_t& buffer) {
+        size_t bytes = tensor.numel() * tensor.element_size();
+        mfa_error_t result = MFA_SUCCESS;
+
+        if (tensor.is_contiguous()) {
+            void* handle = mps_utils::get_mtl_buffer_handle(tensor);
+            TORCH_CHECK(handle, "Failed to acquire MTLBuffer for ", name);
+            result = mfa_buffer_from_mtl_buffer(swift_context_, handle, bytes, &buffer);
+        } else {
+            void* handle = mps_utils::get_mtl_buffer_handle(tensor);
+            TORCH_CHECK(handle, "Failed to acquire strided MTLBuffer for ", name);
+            auto shape_vec = make_shape_vector(tensor);
+            auto stride_vec = make_stride_vector(tensor);
+            result = mfa_buffer_from_mtl_buffer_with_strides(
+                swift_context_, handle, bytes,
+                shape_vec.data(), stride_vec.data(),
+                static_cast<uint32_t>(shape_vec.size()),
+                &buffer
+            );
+        }
+
+        TORCH_CHECK(result == MFA_SUCCESS,
+                    "Failed to create MFA buffer for ", name,
+                    " (error code ", result, ")");
+    };
+
+    mfa_buffer_t q_buffer = nullptr;
+    mfa_buffer_t k_buffer = nullptr;
+    mfa_buffer_t out_buffer = nullptr;
+
+    wrap_tensor("Q", q, q_buffer);
+    wrap_tensor("K", k, k_buffer);
+    wrap_tensor("scores", scores, out_buffer);
+
+    mfa_error_t status = mfa_sparse_indexer_scores(
+        swift_context_,
+        q_buffer,
+        k_buffer,
+        static_cast<uint32_t>(batch),
+        static_cast<uint32_t>(heads),
+        static_cast<uint32_t>(seq_q),
+        static_cast<uint32_t>(seq_k),
+        static_cast<uint16_t>(head_dim),
+        static_cast<float>(scale),
+        out_buffer,
+        nullptr
+    );
+
+    mfa_destroy_buffer(q_buffer);
+    mfa_destroy_buffer(k_buffer);
+    mfa_destroy_buffer(out_buffer);
+
+    TORCH_CHECK(status == MFA_SUCCESS,
+                "Sparse indexer kernel failed with error code ", status);
+
+    return scores;
+}
 
 // UNIFIED QUANTIZED ATTENTION IMPLEMENTATION
 // This function replaces both quantized_scaled_dot_product_attention and quantized_scaled_dot_product_attention_enhanced

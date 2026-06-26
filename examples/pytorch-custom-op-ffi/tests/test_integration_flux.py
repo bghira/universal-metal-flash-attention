@@ -5,16 +5,16 @@ These tests reproduce real FLUX scenarios to catch issues that only
 appear in production workloads.
 """
 
+import metal_sdpa_extension
 import pytest
 import torch
 import torch.nn.functional as F
-
-import metal_sdpa_extension
 
 
 @pytest.mark.metal
 @pytest.mark.flux
 @pytest.mark.integration
+@pytest.mark.requires_bfloat
 class TestFLUXIntegration:
     """Test real FLUX model integration scenarios."""
 
@@ -29,16 +29,43 @@ class TestFLUXIntegration:
 
         # Create tensors matching FLUX text encoder
         torch.manual_seed(42)
-        q = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.1
-        k = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.1
-        v = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.1
+        q = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.1
+        )
+        k = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.1
+        )
+        v = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.1
+        )
 
         # Apply causal mask like FLUX does
         causal_mask = torch.ones(seq_len, seq_len, device=metal_device, dtype=dtype)
-        causal_mask = torch.triu(causal_mask, diagonal=1) * -float('inf')
+        causal_mask = torch.triu(causal_mask, diagonal=1) * -float("inf")
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
 
         # Run through Metal SDPA
@@ -54,7 +81,9 @@ class TestFLUXIntegration:
 
             # Compare with PyTorch reference
             with torch.inference_mode():
-                ref_output = F.scaled_dot_product_attention(q, k, v, attn_mask=causal_mask)
+                ref_output = F.scaled_dot_product_attention(
+                    q, k, v, attn_mask=causal_mask
+                )
 
             # Should be close to reference (with tolerance for BF16)
             max_diff = (output - ref_output).abs().max().item()
@@ -76,12 +105,39 @@ class TestFLUXIntegration:
 
         # Create tensors
         torch.manual_seed(42)
-        q = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.01
-        k = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.01
-        v = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.01
+        q = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.01
+        )
+        k = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.01
+        )
+        v = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.01
+        )
 
         # FLUX doesn't use causal mask for image transformer
         try:
@@ -111,14 +167,26 @@ class TestFLUXIntegration:
         dtype = torch.bfloat16
 
         # Image queries
-        q = torch.randn(batch_size, num_heads, 1536, 128,
-                       dtype=dtype, device=metal_device) * 0.01
+        q = (
+            torch.randn(
+                batch_size, num_heads, 1536, 128, dtype=dtype, device=metal_device
+            )
+            * 0.01
+        )
 
         # Text keys/values
-        k = torch.randn(batch_size, num_heads, 77, 128,
-                       dtype=dtype, device=metal_device) * 0.01
-        v = torch.randn(batch_size, num_heads, 77, 128,
-                       dtype=dtype, device=metal_device) * 0.01
+        k = (
+            torch.randn(
+                batch_size, num_heads, 77, 128, dtype=dtype, device=metal_device
+            )
+            * 0.01
+        )
+        v = (
+            torch.randn(
+                batch_size, num_heads, 77, 128, dtype=dtype, device=metal_device
+            )
+            * 0.01
+        )
 
         try:
             output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
@@ -141,43 +209,65 @@ class TestFLUXIntegration:
         # Simulate 4 denoising steps (FLUX-schnell typical)
         for step in range(4):
             # Text encoder attention
-            q_text = torch.randn(batch_size, 12, 77, 64,
-                                dtype=dtype, device=metal_device) * 0.1
-            k_text = torch.randn(batch_size, 12, 77, 64,
-                                dtype=dtype, device=metal_device) * 0.1
-            v_text = torch.randn(batch_size, 12, 77, 64,
-                                dtype=dtype, device=metal_device) * 0.1
+            q_text = (
+                torch.randn(batch_size, 12, 77, 64, dtype=dtype, device=metal_device)
+                * 0.1
+            )
+            k_text = (
+                torch.randn(batch_size, 12, 77, 64, dtype=dtype, device=metal_device)
+                * 0.1
+            )
+            v_text = (
+                torch.randn(batch_size, 12, 77, 64, dtype=dtype, device=metal_device)
+                * 0.1
+            )
 
             output_text = metal_sdpa_extension.metal_scaled_dot_product_attention(
                 q_text, k_text, v_text, is_causal=True
             )
 
             # Image self-attention
-            q_img = torch.randn(batch_size, 24, 1536, 128,
-                               dtype=dtype, device=metal_device) * 0.01
-            k_img = torch.randn(batch_size, 24, 1536, 128,
-                               dtype=dtype, device=metal_device) * 0.01
-            v_img = torch.randn(batch_size, 24, 1536, 128,
-                               dtype=dtype, device=metal_device) * 0.01
+            q_img = (
+                torch.randn(batch_size, 24, 1536, 128, dtype=dtype, device=metal_device)
+                * 0.01
+            )
+            k_img = (
+                torch.randn(batch_size, 24, 1536, 128, dtype=dtype, device=metal_device)
+                * 0.01
+            )
+            v_img = (
+                torch.randn(batch_size, 24, 1536, 128, dtype=dtype, device=metal_device)
+                * 0.01
+            )
 
             output_img_self = metal_sdpa_extension.metal_scaled_dot_product_attention(
                 q_img, k_img, v_img
             )
 
             # Cross-attention
-            k_cross = torch.randn(batch_size, 24, 77, 128,
-                                 dtype=dtype, device=metal_device) * 0.01
-            v_cross = torch.randn(batch_size, 24, 77, 128,
-                                 dtype=dtype, device=metal_device) * 0.01
+            k_cross = (
+                torch.randn(batch_size, 24, 77, 128, dtype=dtype, device=metal_device)
+                * 0.01
+            )
+            v_cross = (
+                torch.randn(batch_size, 24, 77, 128, dtype=dtype, device=metal_device)
+                * 0.01
+            )
 
             output_cross = metal_sdpa_extension.metal_scaled_dot_product_attention(
                 q_img, k_cross, v_cross
             )
 
             # Validate all outputs
-            assert torch.isfinite(output_text).all(), f"NaN in text attention at step {step}"
-            assert torch.isfinite(output_img_self).all(), f"NaN in image self-attention at step {step}"
-            assert torch.isfinite(output_cross).all(), f"NaN in cross-attention at step {step}"
+            assert torch.isfinite(
+                output_text
+            ).all(), f"NaN in text attention at step {step}"
+            assert torch.isfinite(
+                output_img_self
+            ).all(), f"NaN in image self-attention at step {step}"
+            assert torch.isfinite(
+                output_cross
+            ).all(), f"NaN in cross-attention at step {step}"
 
     def test_flux_batch_processing(self, metal_device):
         """Test FLUX with batch processing."""
@@ -188,15 +278,44 @@ class TestFLUXIntegration:
         dtype = torch.bfloat16
 
         for batch_size in batch_sizes:
-            q = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                           dtype=dtype, device=metal_device) * 0.01
-            k = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                           dtype=dtype, device=metal_device) * 0.01
-            v = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                           dtype=dtype, device=metal_device) * 0.01
+            q = (
+                torch.randn(
+                    batch_size,
+                    num_heads,
+                    seq_len,
+                    head_dim,
+                    dtype=dtype,
+                    device=metal_device,
+                )
+                * 0.01
+            )
+            k = (
+                torch.randn(
+                    batch_size,
+                    num_heads,
+                    seq_len,
+                    head_dim,
+                    dtype=dtype,
+                    device=metal_device,
+                )
+                * 0.01
+            )
+            v = (
+                torch.randn(
+                    batch_size,
+                    num_heads,
+                    seq_len,
+                    head_dim,
+                    dtype=dtype,
+                    device=metal_device,
+                )
+                * 0.01
+            )
 
             try:
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
 
                 assert output.shape[0] == batch_size, f"Batch size not preserved"
                 assert torch.isfinite(output).all(), f"NaN with batch_size={batch_size}"
@@ -206,12 +325,15 @@ class TestFLUXIntegration:
                     pytest.skip(f"Not enough memory for batch_size={batch_size}")
                 raise
 
-    @pytest.mark.parametrize("resolution", [
-        (256, 256),
-        (512, 512),
-        (768, 768),
-        (1024, 1024),
-    ])
+    @pytest.mark.parametrize(
+        "resolution",
+        [
+            (256, 256),
+            (512, 512),
+            (768, 768),
+            (1024, 1024),
+        ],
+    )
     def test_flux_resolution_scaling(self, metal_device, resolution):
         """Test FLUX attention at different resolutions."""
         width, height = resolution
@@ -228,12 +350,39 @@ class TestFLUXIntegration:
         if seq_len > 4096:
             pytest.skip(f"Sequence length {seq_len} too large for testing")
 
-        q = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.01
-        k = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.01
-        v = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.01
+        q = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.01
+        )
+        k = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.01
+        )
+        v = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.01
+        )
 
         try:
             output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
@@ -267,23 +416,46 @@ class TestFLUXErrorScenarios:
         dtype = torch.bfloat16
 
         # Create tensors
-        q = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.1
-        k = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.1
-        v = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                       dtype=dtype, device=metal_device) * 0.1
+        q = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.1
+        )
+        k = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.1
+        )
+        v = (
+            torch.randn(
+                batch_size,
+                num_heads,
+                seq_len,
+                head_dim,
+                dtype=dtype,
+                device=metal_device,
+            )
+            * 0.1
+        )
 
         # This specific call pattern triggered the error
         try:
             # The error occurred during the conversion back to FLUX layout
             # after Metal computation with potentially different accumulator dtype
             output = metal_sdpa_extension.metal_scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=None,
-                dropout_p=0.0,
-                is_causal=False,
-                scale=None
+                q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None
             )
 
             # If we reach here, the issue is fixed
@@ -295,7 +467,10 @@ class TestFLUXErrorScenarios:
 
         except RuntimeError as e:
             error_msg = str(e)
-            if "Destination NDArray and Accumulator NDArray cannot have different datatype" in error_msg:
+            if (
+                "Destination NDArray and Accumulator NDArray cannot have different datatype"
+                in error_msg
+            ):
                 pytest.fail(
                     f"MPS dtype mismatch NOT fixed!\n"
                     f"Error: {error_msg}\n"
@@ -316,20 +491,49 @@ class TestFLUXErrorScenarios:
         dtype = torch.bfloat16
 
         try:
-            q = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                           dtype=dtype, device=metal_device) * 0.01
-            k = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                           dtype=dtype, device=metal_device) * 0.01
-            v = torch.randn(batch_size, num_heads, seq_len, head_dim,
-                           dtype=dtype, device=metal_device) * 0.01
+            q = (
+                torch.randn(
+                    batch_size,
+                    num_heads,
+                    seq_len,
+                    head_dim,
+                    dtype=dtype,
+                    device=metal_device,
+                )
+                * 0.01
+            )
+            k = (
+                torch.randn(
+                    batch_size,
+                    num_heads,
+                    seq_len,
+                    head_dim,
+                    dtype=dtype,
+                    device=metal_device,
+                )
+                * 0.01
+            )
+            v = (
+                torch.randn(
+                    batch_size,
+                    num_heads,
+                    seq_len,
+                    head_dim,
+                    dtype=dtype,
+                    device=metal_device,
+                )
+                * 0.01
+            )
 
             output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
 
         except RuntimeError as e:
             # Should give clear memory error, not internal MPS error
             error_msg = str(e).lower()
-            assert ("memory" in error_msg or "allocation" in error_msg), \
-                f"Expected memory error, got: {e}"
+            assert (
+                "memory" in error_msg or "allocation" in error_msg
+            ), f"Expected memory error, got: {e}"
             # Should NOT be accumulator dtype error
-            assert "accumulator" not in error_msg, \
-                f"Memory exhaustion triggered dtype error: {e}"
+            assert (
+                "accumulator" not in error_msg
+            ), f"Memory exhaustion triggered dtype error: {e}"

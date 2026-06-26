@@ -4,9 +4,9 @@ This folder demonstrates end-to-end image generation with the Flux diffusion mod
 
 ## Prerequisites
 
-- macOS 14+ with Apple Silicon GPU
+- macOS 15+ with Apple Silicon GPU
 - Python 3.11 or 3.12 (matching the PyTorch wheel you install)
-- Xcode 15+ / Swift 5.10+
+- Xcode 16+ / Swift 6.0+
 - The Swift package built at the repository root (`swift build`)
 
 ## Setup

@@ -166,9 +166,11 @@ jobs:
       - name: Run Python tests
         run: |
           cd examples/pytorch-custom-op-ffi
-          # Skip GPU tests on CI runners (no proper Metal support)
-          # Only run unit tests and integration tests that don't require GPU
-          python -m pytest tests/ -v --cov=. --cov-report=xml -m "not gpu"
+          # Skip gpu tests (no proper Metal on CI), slow/memory-heavy tests
+          # (the ~8 GiB runner OOMs on large FLUX/stress shapes), and let the
+          # conftest autouse hook skip requires_bfloat tests (no native bfloat
+          # on this toolchain).
+          python -m pytest tests/ -v --cov=. --cov-report=xml -m "not gpu and not slow"
         env:
           PYTORCH_ENABLE_MPS_FALLBACK: 1
 
@@ -182,7 +184,7 @@ jobs:
   # Performance benchmarks
   benchmarks:
     name: Performance Benchmarks
-    runs-on: macos-14
+    runs-on: macos-15
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:

@@ -1,15 +1,24 @@
 import FlashAttention
 import Foundation
-import Metal
+@preconcurrency import Metal
+@preconcurrency import MetalPerformanceShaders
 
-// C FFI defines: FP16=0, BF16=1, FP32=2
-// Swift expects: FP32=0, FP16=1, BF16=2
+private extension NSLock {
+  func withLock<T>(_ body: () throws -> T) rethrows -> T {
+    lock()
+    defer { unlock() }
+    return try body()
+  }
+}
+
+/// C FFI defines: FP16=0, BF16=1, FP32=2
+/// Swift expects: FP32=0, FP16=1, BF16=2
 private func convertCFFIPrecisionToSwift(_ cPrecision: Int32) -> Int32 {
   switch cPrecision {
-  case 0: return 1  // FP16: C=0 -> Swift=1
-  case 1: return 2  // BF16: C=1 -> Swift=2
-  case 2: return 0  // FP32: C=2 -> Swift=0
-  default: return cPrecision  // INT8=3, INT4=4 remain the same
+  case 0: 1 // FP16: C=0 -> Swift=1
+  case 1: 2 // BF16: C=1 -> Swift=2
+  case 2: 0 // FP32: C=2 -> Swift=0
+  default: cPrecision // INT8=3, INT4=4 remain the same
   }
 }
 
@@ -34,7 +43,7 @@ private enum MaskScalarType: Int32 {
   }
 }
 
-fileprivate struct MaskArguments {
+private struct MaskArguments {
   let pointer: UnsafeMutableRawPointer
   let sizeBytes: Int
   let shape: [Int64]
@@ -44,13 +53,13 @@ fileprivate struct MaskArguments {
   let scalarType: MaskScalarType
 }
 
-fileprivate struct PreparedMask {
+private struct PreparedMask {
   let buffer: MTLBuffer
 }
 
 // MARK: - Internal Types
 
-// Pipeline cache key for deduplicating compiled kernels
+/// Pipeline cache key for deduplicating compiled kernels
 struct PipelineCacheKey: Hashable {
   let seqLenQ: UInt32
   let seqLenKV: UInt32
@@ -78,7 +87,7 @@ final class MFAContext {
   private var lBufferCache: [UInt32: MTLBuffer] = [:]
   private var dBufferCache: [UInt32: MTLBuffer] = [:]
 
-  // Store GPU timing for zero-overhead measurement
+  /// Store GPU timing for zero-overhead measurement
   var lastGPULatency: CFTimeInterval = 0.0
 
   // Scale arrays for row-wise and block-wise quantization
@@ -93,96 +102,96 @@ final class MFAContext {
   private var maskStrideBuffer: MTLBuffer?
 
   private static let maskKernelSource = """
-#include <metal_stdlib>
-using namespace metal;
+  #include <metal_stdlib>
+  using namespace metal;
 
-kernel void mfa_prepare_mask(
-    device const uchar* mask_raw [[buffer(0)]],
-    device float* out_scores [[buffer(1)]],
-    constant uint &mask_type [[buffer(2)]],
-    constant uint &mask_scalar [[buffer(3)]],
-    constant uint4 &bhqk_shape [[buffer(4)]],
-    constant uint &element_count [[buffer(5)]],
-    constant uint &mask_dims [[buffer(6)]],
-    constant int64_t* mask_shape [[buffer(7)]],
-    constant int64_t* mask_strides [[buffer(8)]],
-    uint gid [[thread_position_in_grid]]) {
-  if (gid >= element_count) {
-    return;
-  }
+  kernel void mfa_prepare_mask(
+      device const uchar* mask_raw [[buffer(0)]],
+      device float* out_scores [[buffer(1)]],
+      constant uint &mask_type [[buffer(2)]],
+      constant uint &mask_scalar [[buffer(3)]],
+      constant uint4 &bhqk_shape [[buffer(4)]],
+      constant uint &element_count [[buffer(5)]],
+      constant uint &mask_dims [[buffer(6)]],
+      constant int64_t* mask_shape [[buffer(7)]],
+      constant int64_t* mask_strides [[buffer(8)]],
+      uint gid [[thread_position_in_grid]]) {
+    if (gid >= element_count) {
+      return;
+    }
 
-  uint cols = bhqk_shape.w;
-  uint rows = bhqk_shape.z;
-  uint heads = bhqk_shape.y;
-  uint batches = bhqk_shape.x;
+    uint cols = bhqk_shape.w;
+    uint rows = bhqk_shape.z;
+    uint heads = bhqk_shape.y;
+    uint batches = bhqk_shape.x;
 
-  uint idx = gid;
-  uint col = idx % cols;
-  idx /= cols;
-  uint row = idx % rows;
-  idx /= rows;
-  uint head = idx % heads;
-  uint batch = idx / heads;
+    uint idx = gid;
+    uint col = idx % cols;
+    idx /= cols;
+    uint row = idx % rows;
+    idx /= rows;
+    uint head = idx % heads;
+    uint batch = idx / heads;
 
-  float mask_value = 0.0f;
-  if (mask_type != 0u && mask_raw != nullptr && mask_shape != nullptr && mask_strides != nullptr) {
-    if (mask_dims <= 4u) {
-      uint coords[4] = {batch, head, row, col};
-      int64_t linear_index = 0;
-      for (uint i = 0; i < mask_dims; ++i) {
-        uint coord_index = 4u - mask_dims + i;
-        uint coord = coords[coord_index];
-        int64_t dim = mask_shape[i];
-        if (dim == 1) {
-          coord = 0;
+    float mask_value = 0.0f;
+    if (mask_type != 0u && mask_raw != nullptr && mask_shape != nullptr && mask_strides != nullptr) {
+      if (mask_dims <= 4u) {
+        uint coords[4] = {batch, head, row, col};
+        int64_t linear_index = 0;
+        for (uint i = 0; i < mask_dims; ++i) {
+          uint coord_index = 4u - mask_dims + i;
+          uint coord = coords[coord_index];
+          int64_t dim = mask_shape[i];
+          if (dim == 1) {
+            coord = 0;
+          }
+          linear_index += int64_t(coord) * mask_strides[i];
         }
-        linear_index += int64_t(coord) * mask_strides[i];
-      }
 
-      switch (mask_type) {
-      case 1u: {
-        const device uchar* bool_ptr = mask_raw;
-        bool masked = bool_ptr[linear_index] != 0;
-        mask_value = masked ? -INFINITY : 0.0f;
-        break;
-      }
-      case 2u: {
-        switch (mask_scalar) {
-        case 3u: {
-          const device float* fp32_ptr = reinterpret_cast<const device float*>(mask_raw);
-          mask_value = fp32_ptr[linear_index];
-          break;
-        }
+        switch (mask_type) {
         case 1u: {
-          const device half* fp16_ptr = reinterpret_cast<const device half*>(mask_raw);
-          mask_value = float(fp16_ptr[linear_index]);
+          const device uchar* bool_ptr = mask_raw;
+          bool masked = bool_ptr[linear_index] != 0;
+          mask_value = masked ? -INFINITY : 0.0f;
           break;
         }
         case 2u: {
-          const device ushort* bf16_ptr = reinterpret_cast<const device ushort*>(mask_raw);
-          ushort raw = bf16_ptr[linear_index];
-          uint32_t expanded = uint32_t(raw) << 16;
-          mask_value = as_type<float>(expanded);
+          switch (mask_scalar) {
+          case 3u: {
+            const device float* fp32_ptr = reinterpret_cast<const device float*>(mask_raw);
+            mask_value = fp32_ptr[linear_index];
+            break;
+          }
+          case 1u: {
+            const device half* fp16_ptr = reinterpret_cast<const device half*>(mask_raw);
+            mask_value = float(fp16_ptr[linear_index]);
+            break;
+          }
+          case 2u: {
+            const device ushort* bf16_ptr = reinterpret_cast<const device ushort*>(mask_raw);
+            ushort raw = bf16_ptr[linear_index];
+            uint32_t expanded = uint32_t(raw) << 16;
+            mask_value = as_type<float>(expanded);
+            break;
+          }
+          default:
+            mask_value = 0.0f;
+            break;
+          }
           break;
         }
         default:
           mask_value = 0.0f;
           break;
         }
-        break;
-      }
-      default:
+      } else {
         mask_value = 0.0f;
-        break;
       }
-    } else {
-      mask_value = 0.0f;
     }
-  }
 
-  out_scores[gid] = mask_value;
-}
-"""
+    out_scores[gid] = mask_value;
+  }
+  """
 
   init?(device: MTLDevice) {
     self.device = device
@@ -224,14 +233,17 @@ kernel void mfa_prepare_mask(
     numHeads: UInt32,
     seqLenQ: UInt32,
     seqLenKV: UInt32
-  ) throws -> PreparedMask? {
+  ) throws
+    -> PreparedMask?
+  {
     guard let arguments else {
       return nil
     }
 
-    guard !arguments.shape.isEmpty,
-          arguments.shape.count == arguments.strides.count,
-          arguments.shape.count == Int(arguments.ndim)
+    guard
+      !arguments.shape.isEmpty,
+      arguments.shape.count == arguments.strides.count,
+      arguments.shape.count == Int(arguments.ndim)
     else {
       throw MaskPreparationError.invalidMetadata
     }
@@ -251,6 +263,8 @@ kernel void mfa_prepare_mask(
     else {
       throw MaskPreparationError.bufferAllocationFailed
     }
+
+    maskInputBuffer.didModifyRange(0..<arguments.sizeBytes)
 
     let requiredBytes = totalElements * MemoryLayout<Float>.size
     if maskOutputBuffer == nil || maskOutputBuffer!.length < requiredBytes {
@@ -300,7 +314,7 @@ kernel void mfa_prepare_mask(
     var maskScalarValue = UInt32(arguments.scalarType.rawValue)
     encoder.setBytes(&maskScalarValue, length: MemoryLayout<UInt32>.size, index: 3)
 
-    var shapeVector: [UInt32] = [batchSize, numHeads, seqLenQ, seqLenKV]
+    let shapeVector: [UInt32] = [batchSize, numHeads, seqLenQ, seqLenKV]
     shapeVector.withUnsafeBytes { bytes in
       if let baseAddress = bytes.baseAddress {
         encoder.setBytes(baseAddress, length: bytes.count, index: 4)
@@ -399,6 +413,74 @@ kernel void mfa_prepare_mask(
   }
 }
 
+private final class GlobalContextStore: @unchecked Sendable {
+  static let shared = GlobalContextStore()
+
+  private let lock = NSLock()
+  let device: MTLDevice?
+  private var cachedContext: MFAContext?
+
+  private init() {
+    device = MTLCreateSystemDefaultDevice()
+  }
+
+  func context() -> MFAContext? {
+    guard let device else { return nil }
+
+    if let existing = lock.withLock({ cachedContext }) {
+      return existing
+    }
+
+    guard let newContext = MFAContext(device: device) else {
+      return nil
+    }
+
+    return lock.withLock {
+      if let existing = cachedContext {
+        return existing
+      }
+      cachedContext = newContext
+      return newContext
+    }
+  }
+
+  func updateLatency(_ latency: CFTimeInterval) {
+    let context = lock.withLock { cachedContext }
+    context?.lastGPULatency = latency
+  }
+}
+
+private final class MLAContextRegistry: @unchecked Sendable {
+  static let shared = MLAContextRegistry()
+
+  private let lock = NSLock()
+  private var contexts: [UnsafeMutableRawPointer: Unmanaged<MLAOptimizedGEMMMFA>] = [:]
+
+  func makeHandle(for context: MLAOptimizedGEMMMFA) -> UnsafeMutableRawPointer {
+    let unmanaged = Unmanaged.passRetained(context)
+    let handle = unmanaged.toOpaque()
+    lock.withLock {
+      contexts[handle] = unmanaged
+    }
+    return handle
+  }
+
+  func context(for handle: UnsafeMutableRawPointer?) -> MLAOptimizedGEMMMFA? {
+    guard let handle else { return nil }
+    return lock.withLock {
+      contexts[handle]?.takeUnretainedValue()
+    }
+  }
+
+  func remove(handle: UnsafeMutableRawPointer?) {
+    guard let handle else { return }
+    let unmanaged = lock.withLock {
+      contexts.removeValue(forKey: handle)
+    }
+    unmanaged?.release()
+  }
+}
+
 final class MFABuffer {
   let buffer: MTLBuffer
   let originalDataPtr: UnsafeMutableRawPointer? // Track original data for copy-back
@@ -410,36 +492,67 @@ final class MFABuffer {
   let ndim: UInt32
   let isStrided: Bool
 
-  init(buffer: MTLBuffer, originalDataPtr: UnsafeMutableRawPointer? = nil, dataSize: Int = 0,
-       shape: [Int64]? = nil, strides: [Int64]? = nil, ndim: UInt32 = 0) {
+  init(
+    buffer: MTLBuffer,
+    originalDataPtr: UnsafeMutableRawPointer? = nil,
+    dataSize: Int = 0,
+    shape: [Int64]? = nil,
+    strides: [Int64]? = nil,
+    ndim: UInt32 = 0
+  ) {
     self.buffer = buffer
     self.originalDataPtr = originalDataPtr
     self.dataSize = dataSize
     self.shape = shape
     self.strides = strides
     self.ndim = ndim
-    self.isStrided = (shape != nil && strides != nil && ndim > 0)
+    isStrided = (shape != nil && strides != nil && ndim > 0)
   }
+}
+
+private func makeQuantizedTensor(
+  device: MTLDevice,
+  buffer: MFABuffer,
+  parameters: QuantizationParameters,
+  shape: [Int],
+  blockScales: MFABuffer?,
+  blockZeroPoints: MFABuffer?,
+  blockSize: UInt32
+)
+  -> QuantizedTensor
+{
+  var quantParams = parameters
+  if blockSize > 0, blockScales != nil {
+    quantParams.mode = .blockwise(blockSizeK: Int(blockSize), bothOperands: false)
+  }
+
+  let elementCount = shape.reduce(1, *)
+
+  return QuantizedTensor(
+    device: device,
+    data: buffer.buffer,
+    parameters: quantParams,
+    elementCount: elementCount,
+    shape: shape,
+    blockScales: blockScales?.buffer,
+    blockZeroPoints: blockZeroPoints?.buffer,
+    blockSizeK: blockSize > 0 ? Int(blockSize) : nil,
+    precomputedSums: nil
+  )
 }
 
 // MARK: - C Bridge Implementation
 
-// Global Metal device (like MTLContext.global.device in native Swift)
-private let globalDevice: MTLDevice? = MTLCreateSystemDefaultDevice()
-private var globalContext: MFAContext?
-
 @_cdecl("mfa_create_context")
-public func mfa_create_context(_ context: UnsafeMutablePointer<UnsafeMutableRawPointer?>?) -> Int32 {
-  guard let device = globalDevice else {
+public func mfa_create_context(_ context: UnsafeMutablePointer<UnsafeMutableRawPointer?>?)
+  -> Int32
+{
+  guard GlobalContextStore.shared.device != nil else {
     return 3 // MFA_ERROR_DEVICE_NOT_SUPPORTED
   }
 
   // Use singleton pattern for global context like native Swift
-  if globalContext == nil {
-    globalContext = MFAContext(device: device)
-  }
-
-  guard let mfaContext = globalContext else {
+  guard let mfaContext = GlobalContextStore.shared.context() else {
     return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
@@ -464,13 +577,15 @@ public func mfa_set_scale_arrays(
   _ kScalesCount: UInt32,
   _ vScales: UnsafePointer<Float>?,
   _ vScalesCount: UInt32
-) -> Int32 {
+)
+  -> Int32
+{
   guard let context else { return 1 } // MFA_ERROR_INVALID_ARGS
 
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
 
   // Set Q scales
-  if let qScales = qScales, qScalesCount > 0 {
+  if let qScales, qScalesCount > 0 {
     mfaContext.qScales = Array(UnsafeBufferPointer(start: qScales, count: Int(qScalesCount)))
     print("🔧 Set Q scales: \(mfaContext.qScales.count) scales")
   } else {
@@ -478,7 +593,7 @@ public func mfa_set_scale_arrays(
   }
 
   // Set K scales
-  if let kScales = kScales, kScalesCount > 0 {
+  if let kScales, kScalesCount > 0 {
     mfaContext.kScales = Array(UnsafeBufferPointer(start: kScales, count: Int(kScalesCount)))
     print("🔧 Set K scales: \(mfaContext.kScales.count) scales")
   } else {
@@ -486,7 +601,7 @@ public func mfa_set_scale_arrays(
   }
 
   // Set V scales
-  if let vScales = vScales, vScalesCount > 0 {
+  if let vScales, vScalesCount > 0 {
     mfaContext.vScales = Array(UnsafeBufferPointer(start: vScales, count: Int(vScalesCount)))
     print("🔧 Set V scales: \(mfaContext.vScales.count) scales")
   } else {
@@ -549,6 +664,9 @@ public func mfa_buffer_from_ptr(
     return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
+  // Notify Metal that the CPU has populated the backing memory so GPU reads see the latest data.
+  mtlBuffer.didModifyRange(0..<sizeBytes)
+
   let mfaBuffer = MFABuffer(
     buffer: mtlBuffer,
     originalDataPtr: nil,
@@ -599,6 +717,9 @@ public func mfa_buffer_from_ptr_with_strides(
     return 2 // MFA_ERROR_MEMORY_ALLOCATION
   }
 
+  // Ensure GPU observers pick up the CPU-written contents before execution.
+  mtlBuffer.didModifyRange(0..<sizeBytes)
+
   let mfaBuffer = MFABuffer(
     buffer: mtlBuffer,
     originalDataPtr: nil,
@@ -634,7 +755,7 @@ public func mfa_buffer_from_mtl_buffer(
     return 1 // MFA_ERROR_INVALID_ARGS
   }
 
-  if sizeBytes > 0 && mtlBuffer.length < sizeBytes {
+  if sizeBytes > 0, mtlBuffer.length < sizeBytes {
     return 1 // Requested size exceeds buffer length
   }
 
@@ -676,7 +797,7 @@ public func mfa_buffer_from_mtl_buffer_with_strides(
     return 1 // MFA_ERROR_INVALID_ARGS
   }
 
-  if sizeBytes > 0 && mtlBuffer.length < sizeBytes {
+  if sizeBytes > 0, mtlBuffer.length < sizeBytes {
     return 1 // Requested size exceeds buffer length
   }
 
@@ -762,12 +883,13 @@ public func mfa_attention_forward(
   let resolvedMaskType = MaskType(rawValue: maskTypeRaw) ?? .none
   let resolvedMaskScalar = MaskScalarType(rawValue: maskScalarTypeRaw) ?? .byte
   let maskArguments: MaskArguments?
-  if resolvedMaskType != .none,
-     let maskPtr,
-     maskSizeBytes > 0,
-     let maskShape,
-     let maskStrides,
-     maskNDim > 0
+  if
+    resolvedMaskType != .none,
+    let maskPtr,
+    maskSizeBytes > 0,
+    let maskShape,
+    let maskStrides,
+    maskNDim > 0
   {
     let shape = Array(UnsafeBufferPointer(start: maskShape, count: Int(maskNDim)))
     let strides = Array(UnsafeBufferPointer(start: maskStrides, count: Int(maskNDim)))
@@ -813,15 +935,22 @@ public func mfa_attention_forward(
     return 5
   }
 
-  // Handle multi-head attention using the new MultiHeadAttention implementation
-  if numHeads > 1 {
+  let forceMultiHead = ProcessInfo.processInfo.environment["MFA_FORCE_MULTIHEAD"] == "1"
+  let deviceSupportsMultiHead: Bool = if #available(macOS 15.0, *) {
+    mfaContext.device.supportsFamily(.apple9)
+  } else {
+    false
+  }
+
+  let shouldUseMultiHead = numHeads > 1 && (deviceSupportsMultiHead || forceMultiHead)
+  if shouldUseMultiHead, deviceSupportsMultiHead {
     return mfa_attention_forward_multihead_internal(
       context: mfaContext,
       qBuffer: qBuffer.buffer,
       kBuffer: kBuffer.buffer,
       vBuffer: vBuffer.buffer,
       outBuffer: outBuffer.buffer,
-      batchSize: 1, // For now, assume batch size 1 for FFI compatibility
+      batchSize: 1,
       seqLenQ: seqLenQ,
       seqLenKV: seqLenKV,
       numHeads: numHeads,
@@ -835,6 +964,12 @@ public func mfa_attention_forward(
       transposeV: transposeV,
       transposeO: transposeO,
       preparedMask: preparedMask
+    )
+  }
+
+  if forceMultiHead, !deviceSupportsMultiHead {
+    print(
+      "⚠️  MFA_FORCE_MULTIHEAD=1 requested, but GPU lacks Apple9 features; falling back to per-head execution."
     )
   }
 
@@ -867,16 +1002,18 @@ public func mfa_attention_forward(
       descriptor.softmaxScale = softmaxScale
 
       // Set precision based on input parameters
-      // Convert C FFI enum values to Swift values
-      let swiftInputPrecision = convertCFFIPrecisionToSwift(inputPrecision)
-      let swiftIntermediatePrecision = convertCFFIPrecisionToSwift(intermediatePrecision)
-
+      // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently
+      // used
       // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
       // we must use FP32 inputs to avoid NaN issues from precision mismatch
       // The inputs are always FP32 from the FFI layer
       descriptor.lowPrecisionInputs = false
       // Use FP32 intermediates for numerical stability
       descriptor.lowPrecisionIntermediates = false
+
+      // Suppress unused parameter warnings - these are part of the API but not used yet
+      _ = inputPrecision
+      _ = intermediatePrecision
 
       // Create kernel descriptor
       let kernelDescriptor = descriptor.kernelDescriptor(type: .forward)
@@ -923,6 +1060,21 @@ public func mfa_attention_forward(
     else {
       return 2 // MFA_ERROR_MEMORY_ALLOCATION
     }
+
+    // Ensure cached statistics buffers are reset before each dispatch.
+    let statsByteCount = Int(seqLenQ) * MemoryLayout<Float>.size
+    guard lBuffer.length >= statsByteCount, dBuffer.length >= statsByteCount else {
+      return 2 // MFA_ERROR_MEMORY_ALLOCATION
+    }
+    let elementCount = Int(seqLenQ)
+    lBuffer.contents()
+      .assumingMemoryBound(to: Float.self)
+      .update(repeating: 0, count: elementCount)
+    dBuffer.contents()
+      .assumingMemoryBound(to: Float.self)
+      .update(repeating: 0, count: elementCount)
+    lBuffer.didModifyRange(0..<statsByteCount)
+    dBuffer.didModifyRange(0..<statsByteCount)
 
     // Note: Debug output removed - buffer copying now verified to work
 
@@ -1001,14 +1153,10 @@ public func mfa_attention_forward(
 
     if let mask = preparedMask {
       encoder.setBuffer(mask.buffer, offset: 0, index: bufferIndex)
-      var hasMask: UInt32 = 1
-      encoder.setBytes(&hasMask, length: MemoryLayout<UInt32>.size, index: bufferIndex + 1)
     } else {
       encoder.setBuffer(nil, offset: 0, index: bufferIndex)
-      var hasMask: UInt32 = 0
-      encoder.setBytes(&hasMask, length: MemoryLayout<UInt32>.size, index: bufferIndex + 1)
     }
-    bufferIndex += 2
+    bufferIndex += 1
 
     // Buffers set: Q, K, V, O, L, D following MFA pattern
 
@@ -1043,7 +1191,7 @@ public func mfa_attention_forward(
 
     // Store GPU timing for zero-overhead measurement (like native Swift)
     let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    globalContext?.lastGPULatency = gpuLatency
+    GlobalContextStore.shared.updateLatency(gpuLatency)
 
     return 0 // MFA_SUCCESS
 
@@ -1062,11 +1210,11 @@ private func parsePrecisionString(_ precisionStr: UnsafePointer<CChar>?) -> Int3
 
   // Return C FFI enum values that match mfa_ffi.h
   switch swiftStr {
-  case "fp16", "float16": return 0  // MFA_PRECISION_FP16 = 0
-  case "bf16", "bfloat16": return 1  // MFA_PRECISION_BF16 = 1
-  case "fp32", "float32": return 2   // MFA_PRECISION_FP32 = 2
-  case "int8": return 3              // MFA_PRECISION_INT8 = 3
-  case "int4": return 4              // MFA_PRECISION_INT4 = 4
+  case "fp16", "float16": return 0 // MFA_PRECISION_FP16 = 0
+  case "bf16", "bfloat16": return 1 // MFA_PRECISION_BF16 = 1
+  case "fp32", "float32": return 2 // MFA_PRECISION_FP32 = 2
+  case "int8": return 3 // MFA_PRECISION_INT8 = 3
+  case "int4": return 4 // MFA_PRECISION_INT4 = 4
   default: return 2 // Default to FP32 (C FFI value = 2)
   }
 }
@@ -1099,7 +1247,9 @@ public func mfa_attention_forward_str(
   _ maskNDim: UInt32,
   _ maskTypeRaw: Int32,
   _ maskScalarTypeRaw: Int32
-) -> Int32 {
+)
+  -> Int32
+{
   // Convert string precisions to Swift integers
   let inputPrecision = parsePrecisionString(inputPrecisionStr)
   let intermediatePrecision = parsePrecisionString(intermediatePrecisionStr)
@@ -1139,6 +1289,33 @@ public func mfa_is_device_supported() -> Bool {
   MTLCreateSystemDefaultDevice() != nil
 }
 
+/// Returns 1 if the runtime Metal compiler provides native bfloat support
+/// (i.e. `__HAVE_BFLOAT__` is defined when compiling a Metal source), else 0.
+/// Used by Python tests to skip bfloat16-data tests on toolchains that lack
+/// native bfloat (where the half-precision fallback would corrupt bf16 data).
+@_cdecl("mfa_has_native_bfloat")
+public func mfa_has_native_bfloat() -> Int32 {
+  guard let device = MTLCreateSystemDefaultDevice() else { return 0 }
+  let source = """
+  #include <metal_stdlib>
+  using namespace metal;
+
+  #if !defined(__HAVE_BFLOAT__)
+  #error "NO_NATIVE_BFLOAT"
+  #endif
+
+  kernel void __bfloat_probe(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+    x[i] = 0;
+  }
+  """
+  do {
+    _ = try device.makeLibrary(source: source, options: nil)
+    return 1
+  } catch {
+    return 0
+  }
+}
+
 @_cdecl("mfa_get_version")
 public func mfa_get_version(
   _ major: UnsafeMutablePointer<Int32>?,
@@ -1167,6 +1344,7 @@ public func mfa_attention_backward_query_quantized(
   _ q: UnsafeMutableRawPointer?,
   _ k: UnsafeMutableRawPointer?,
   _ v: UnsafeMutableRawPointer?,
+  _ output: UnsafeMutableRawPointer?,
   _ gradOutput: UnsafeMutableRawPointer?,
   _ logsumexp: UnsafeMutableRawPointer?,
   _ gradQuery: UnsafeMutableRawPointer?,
@@ -1193,91 +1371,220 @@ public func mfa_attention_backward_query_quantized(
 )
   -> Int32
 {
+  mfa_attention_backward_query_quantized_ex(
+    context,
+    q,
+    k,
+    v,
+    output,
+    gradOutput,
+    logsumexp,
+    gradQuery,
+    dValues,
+    batchSize,
+    seqLenQ,
+    seqLenKV,
+    numHeads,
+    numHeads,
+    headDim,
+    qScale,
+    qZeroPoint,
+    kScale,
+    kZeroPoint,
+    vScale,
+    vZeroPoint,
+    qPrecision,
+    kPrecision,
+    vPrecision,
+    causal,
+    transposeQ,
+    transposeK,
+    transposeV,
+    transposeO,
+    nil,
+    nil,
+    nil,
+    nil,
+    nil,
+    nil,
+    0,
+    0,
+    0,
+    0
+  )
+}
+
+@_cdecl("mfa_attention_backward_query_quantized_ex")
+public func mfa_attention_backward_query_quantized_ex(
+  _ context: UnsafeMutableRawPointer?,
+  _ q: UnsafeMutableRawPointer?,
+  _ k: UnsafeMutableRawPointer?,
+  _ v: UnsafeMutableRawPointer?,
+  _ output: UnsafeMutableRawPointer?,
+  _ gradOutput: UnsafeMutableRawPointer?,
+  _ logsumexp: UnsafeMutableRawPointer?,
+  _ gradQuery: UnsafeMutableRawPointer?,
+  _ dValues: UnsafeMutableRawPointer?,
+  _ batchSize: UInt32,
+  _ seqLenQ: UInt32,
+  _ seqLenKV: UInt32,
+  _ numHeads: UInt32,
+  _ numKVHeads: UInt32,
+  _ headDim: UInt16,
+  _ qScale: Float,
+  _ qZeroPoint: Int32,
+  _ kScale: Float,
+  _ kZeroPoint: Int32,
+  _ vScale: Float,
+  _ vZeroPoint: Int32,
+  _ qPrecision: Int32,
+  _ kPrecision: Int32,
+  _ vPrecision: Int32,
+  _ causal: Bool,
+  _ transposeQ: Bool,
+  _ transposeK: Bool,
+  _ transposeV: Bool,
+  _ transposeO: Bool,
+  _ qBlockScales: UnsafeMutableRawPointer?,
+  _ qBlockZeroPoints: UnsafeMutableRawPointer?,
+  _ kBlockScales: UnsafeMutableRawPointer?,
+  _ kBlockZeroPoints: UnsafeMutableRawPointer?,
+  _ vBlockScales: UnsafeMutableRawPointer?,
+  _ vBlockZeroPoints: UnsafeMutableRawPointer?,
+  _ qBlockSize: UInt32,
+  _ kBlockSize: UInt32,
+  _ vBlockSize: UInt32,
+  _ options: UInt32
+)
+  -> Int32
+{
   guard
     let context,
-    let q, let k, let v, let gradOutput,
-    let logsumexp, let gradQuery, let dValues
+    let q, let k, let v,
+    let output,
+    let gradOutput,
+    let logsumexp,
+    let gradQuery,
+    let dValues
   else {
-    return 1 // MFA_ERROR_INVALID_ARGS
+    return 1
   }
 
-  // Extract context and buffers
+  _ = options
+
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  let device = mfaContext.device
+
   let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
   let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
   let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
+  let outputBuffer = Unmanaged<MFABuffer>.fromOpaque(output).takeUnretainedValue()
   let gradOutputBuffer = Unmanaged<MFABuffer>.fromOpaque(gradOutput).takeUnretainedValue()
   let logsumexpBuffer = Unmanaged<MFABuffer>.fromOpaque(logsumexp).takeUnretainedValue()
   let gradQueryBuffer = Unmanaged<MFABuffer>.fromOpaque(gradQuery).takeUnretainedValue()
   let dValuesBuffer = Unmanaged<MFABuffer>.fromOpaque(dValues).takeUnretainedValue()
 
-  // For now, handle single-head case
-  if numHeads != 1 {
-    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
+  let effectiveHeads = max(numHeads, 1)
+  let effectiveKVHeads = numKVHeads == 0 ? effectiveHeads : numKVHeads
+  let headDimension = Int(headDim)
+
+  if headDimension <= 0 {
+    return 1
   }
 
-  // Create quantized attention descriptor
+  let batchCount = Int(batchSize)
+  let sequenceQ = Int(seqLenQ)
+  let sequenceKV = Int(seqLenKV)
+
+  let qShape = [batchCount, Int(effectiveHeads), sequenceQ, headDimension]
+  let kvShape = [batchCount, Int(effectiveKVHeads), sequenceKV, headDimension]
+
+  func bufferFromHandle(_ handle: UnsafeMutableRawPointer?) -> MFABuffer? {
+    guard let handle else { return nil }
+    return Unmanaged<MFABuffer>.fromOpaque(handle).takeUnretainedValue()
+  }
+
+  let qBlockScalesBuffer = bufferFromHandle(qBlockScales)
+  let qBlockZeroPointsBuffer = bufferFromHandle(qBlockZeroPoints)
+  let kBlockScalesBuffer = bufferFromHandle(kBlockScales)
+  let kBlockZeroPointsBuffer = bufferFromHandle(kBlockZeroPoints)
+  let vBlockScalesBuffer = bufferFromHandle(vBlockScales)
+  let vBlockZeroPointsBuffer = bufferFromHandle(vBlockZeroPoints)
+
+  let qParams = QuantizationParameters(
+    scale: qScale,
+    zeroPoint: qZeroPoint,
+    precision: GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16,
+    strategy: .legacy
+  )
+
+  let kParams = QuantizationParameters(
+    scale: kScale,
+    zeroPoint: kZeroPoint,
+    precision: GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8,
+    strategy: .legacy
+  )
+
+  let vParams = QuantizationParameters(
+    scale: vScale,
+    zeroPoint: vZeroPoint,
+    precision: GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8,
+    strategy: .legacy
+  )
+
+  let qTensor = makeQuantizedTensor(
+    device: device,
+    buffer: qBuffer,
+    parameters: qParams,
+    shape: qShape,
+    blockScales: qBlockScalesBuffer,
+    blockZeroPoints: qBlockZeroPointsBuffer,
+    blockSize: qBlockSize
+  )
+
+  let kTensor = makeQuantizedTensor(
+    device: device,
+    buffer: kBuffer,
+    parameters: kParams,
+    shape: kvShape,
+    blockScales: kBlockScalesBuffer,
+    blockZeroPoints: kBlockZeroPointsBuffer,
+    blockSize: kBlockSize
+  )
+
+  let vTensor = makeQuantizedTensor(
+    device: device,
+    buffer: vBuffer,
+    parameters: vParams,
+    shape: kvShape,
+    blockScales: vBlockScalesBuffer,
+    blockZeroPoints: vBlockZeroPointsBuffer,
+    blockSize: vBlockSize
+  )
+
   var baseDescriptor = AttentionDescriptor()
   baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
   baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
   baseDescriptor.sparsityPattern = causal ? .causal : .none
 
-  // Create quantization configuration
   var quantConfig = QuantizedAttention.Configuration()
-  quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
-  quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
-  quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
+  quantConfig.queryPrecision = qTensor.parameters.precision
+  quantConfig.keyPrecision = kTensor.parameters.precision
+  quantConfig.valuePrecision = vTensor.parameters.precision
 
   let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
     baseDescriptor: baseDescriptor,
     quantizationConfig: quantConfig
   )
 
-  // Create quantized attention instance
-  let quantizedAttention = QuantizedAttention(device: mfaContext.device)
+  let quantizedAttention = QuantizedAttention(device: device)
 
-  // Create quantized tensors from buffers
-  let qParams = QuantizationParameters(
-    scale: qScale,
-    zeroPoint: qZeroPoint,
-    precision: quantConfig.queryPrecision,
-    strategy: quantConfig.queryStrategy
-  )
-  let kParams = QuantizationParameters(
-    scale: kScale,
-    zeroPoint: kZeroPoint,
-    precision: quantConfig.keyPrecision,
-    strategy: quantConfig.keyStrategy
-  )
-  let vParams = QuantizationParameters(
-    scale: vScale,
-    zeroPoint: vZeroPoint,
-    precision: quantConfig.valuePrecision,
-    strategy: quantConfig.valueStrategy
-  )
-
-  let elementCount = Int(batchSize * seqLenQ * UInt32(headDim))
-  let shape = [Int(batchSize), Int(seqLenQ), Int(headDim)]
-
-  let qTensor = QuantizedTensor(
-    device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-    elementCount: elementCount, shape: shape
-  )
-  let kTensor = QuantizedTensor(
-    device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-    elementCount: elementCount, shape: shape
-  )
-  let vTensor = QuantizedTensor(
-    device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-    elementCount: elementCount, shape: shape
-  )
-
-  // Execute quantized backward query pass
   guard
     let commandBuffer = quantizedAttention.backwardQuery(
       query: qTensor,
       key: kTensor,
       value: vTensor,
+      output: outputBuffer.buffer,
       gradOutput: gradOutputBuffer.buffer,
       logsumexp: logsumexpBuffer.buffer,
       gradQuery: gradQueryBuffer.buffer,
@@ -1285,23 +1592,21 @@ public func mfa_attention_backward_query_quantized(
       descriptor: quantDescriptor
     )
   else {
-    return 5 // MFA_ERROR_EXECUTION_FAILED
+    return 5
   }
 
-  // Execute and wait for completion
   commandBuffer.commit()
   commandBuffer.waitUntilCompleted()
 
   if let error = commandBuffer.error {
     print("Metal execution error: \(error)")
-    return 5 // MFA_ERROR_EXECUTION_FAILED
+    return 5
   }
 
-  // Store GPU timing
   let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-  globalContext?.lastGPULatency = gpuLatency
+  GlobalContextStore.shared.updateLatency(gpuLatency)
 
-  return 0 // MFA_SUCCESS
+  return 0
 }
 
 @_cdecl("mfa_attention_backward_kv_quantized")
@@ -1337,17 +1642,110 @@ public func mfa_attention_backward_kv_quantized(
 )
   -> Int32
 {
+  mfa_attention_backward_kv_quantized_ex(
+    context,
+    q,
+    k,
+    v,
+    gradOutput,
+    logsumexp,
+    dValues,
+    gradKey,
+    gradValue,
+    batchSize,
+    seqLenQ,
+    seqLenKV,
+    numHeads,
+    numHeads,
+    headDim,
+    qScale,
+    qZeroPoint,
+    kScale,
+    kZeroPoint,
+    vScale,
+    vZeroPoint,
+    qPrecision,
+    kPrecision,
+    vPrecision,
+    causal,
+    transposeQ,
+    transposeK,
+    transposeV,
+    transposeO,
+    nil,
+    nil,
+    nil,
+    nil,
+    nil,
+    nil,
+    0,
+    0,
+    0,
+    0
+  )
+}
+
+@_cdecl("mfa_attention_backward_kv_quantized_ex")
+public func mfa_attention_backward_kv_quantized_ex(
+  _ context: UnsafeMutableRawPointer?,
+  _ q: UnsafeMutableRawPointer?,
+  _ k: UnsafeMutableRawPointer?,
+  _ v: UnsafeMutableRawPointer?,
+  _ gradOutput: UnsafeMutableRawPointer?,
+  _ logsumexp: UnsafeMutableRawPointer?,
+  _ dValues: UnsafeMutableRawPointer?,
+  _ gradKey: UnsafeMutableRawPointer?,
+  _ gradValue: UnsafeMutableRawPointer?,
+  _ batchSize: UInt32,
+  _ seqLenQ: UInt32,
+  _ seqLenKV: UInt32,
+  _ numHeads: UInt32,
+  _ numKVHeads: UInt32,
+  _ headDim: UInt16,
+  _ qScale: Float,
+  _ qZeroPoint: Int32,
+  _ kScale: Float,
+  _ kZeroPoint: Int32,
+  _ vScale: Float,
+  _ vZeroPoint: Int32,
+  _ qPrecision: Int32,
+  _ kPrecision: Int32,
+  _ vPrecision: Int32,
+  _ causal: Bool,
+  _ transposeQ: Bool,
+  _ transposeK: Bool,
+  _ transposeV: Bool,
+  _ transposeO: Bool,
+  _ qBlockScales: UnsafeMutableRawPointer?,
+  _ qBlockZeroPoints: UnsafeMutableRawPointer?,
+  _ kBlockScales: UnsafeMutableRawPointer?,
+  _ kBlockZeroPoints: UnsafeMutableRawPointer?,
+  _ vBlockScales: UnsafeMutableRawPointer?,
+  _ vBlockZeroPoints: UnsafeMutableRawPointer?,
+  _ qBlockSize: UInt32,
+  _ kBlockSize: UInt32,
+  _ vBlockSize: UInt32,
+  _ options: UInt32
+)
+  -> Int32
+{
   guard
     let context,
-    let q, let k, let v, let gradOutput,
-    let logsumexp, let dValues,
-    let gradKey, let gradValue
+    let q, let k, let v,
+    let gradOutput,
+    let logsumexp,
+    let dValues,
+    let gradKey,
+    let gradValue
   else {
-    return 1 // MFA_ERROR_INVALID_ARGS
+    return 1
   }
 
-  // Extract context and buffers
+  _ = options
+
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  let device = mfaContext.device
+
   let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
   let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
   let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
@@ -1357,69 +1755,101 @@ public func mfa_attention_backward_kv_quantized(
   let gradKeyBuffer = Unmanaged<MFABuffer>.fromOpaque(gradKey).takeUnretainedValue()
   let gradValueBuffer = Unmanaged<MFABuffer>.fromOpaque(gradValue).takeUnretainedValue()
 
-  // For now, handle single-head case
-  if numHeads != 1 {
-    return 1 // MFA_ERROR_INVALID_ARGS - Multi-head not yet supported
+  let effectiveHeads = max(numHeads, 1)
+  let effectiveKVHeads = numKVHeads == 0 ? effectiveHeads : numKVHeads
+  let headDimension = Int(headDim)
+
+  if headDimension <= 0 {
+    return 1
   }
 
-  // Create quantized attention descriptor
+  let batchCount = Int(batchSize)
+  let sequenceQ = Int(seqLenQ)
+  let sequenceKV = Int(seqLenKV)
+
+  let qShape = [batchCount, Int(effectiveHeads), sequenceQ, headDimension]
+  let kvShape = [batchCount, Int(effectiveKVHeads), sequenceKV, headDimension]
+
+  func bufferFromHandle(_ handle: UnsafeMutableRawPointer?) -> MFABuffer? {
+    guard let handle else { return nil }
+    return Unmanaged<MFABuffer>.fromOpaque(handle).takeUnretainedValue()
+  }
+
+  let qBlockScalesBuffer = bufferFromHandle(qBlockScales)
+  let qBlockZeroPointsBuffer = bufferFromHandle(qBlockZeroPoints)
+  let kBlockScalesBuffer = bufferFromHandle(kBlockScales)
+  let kBlockZeroPointsBuffer = bufferFromHandle(kBlockZeroPoints)
+  let vBlockScalesBuffer = bufferFromHandle(vBlockScales)
+  let vBlockZeroPointsBuffer = bufferFromHandle(vBlockZeroPoints)
+
+  let qParams = QuantizationParameters(
+    scale: qScale,
+    zeroPoint: qZeroPoint,
+    precision: GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16,
+    strategy: .legacy
+  )
+
+  let kParams = QuantizationParameters(
+    scale: kScale,
+    zeroPoint: kZeroPoint,
+    precision: GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8,
+    strategy: .legacy
+  )
+
+  let vParams = QuantizationParameters(
+    scale: vScale,
+    zeroPoint: vZeroPoint,
+    precision: GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8,
+    strategy: .legacy
+  )
+
+  let qTensor = makeQuantizedTensor(
+    device: device,
+    buffer: qBuffer,
+    parameters: qParams,
+    shape: qShape,
+    blockScales: qBlockScalesBuffer,
+    blockZeroPoints: qBlockZeroPointsBuffer,
+    blockSize: qBlockSize
+  )
+
+  let kTensor = makeQuantizedTensor(
+    device: device,
+    buffer: kBuffer,
+    parameters: kParams,
+    shape: kvShape,
+    blockScales: kBlockScalesBuffer,
+    blockZeroPoints: kBlockZeroPointsBuffer,
+    blockSize: kBlockSize
+  )
+
+  let vTensor = makeQuantizedTensor(
+    device: device,
+    buffer: vBuffer,
+    parameters: vParams,
+    shape: kvShape,
+    blockScales: vBlockScalesBuffer,
+    blockZeroPoints: vBlockZeroPointsBuffer,
+    blockSize: vBlockSize
+  )
+
   var baseDescriptor = AttentionDescriptor()
   baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
   baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
   baseDescriptor.sparsityPattern = causal ? .causal : .none
 
-  // Create quantization configuration
   var quantConfig = QuantizedAttention.Configuration()
-  quantConfig.queryPrecision = GEMMOperandPrecision(rawValue: UInt16(qPrecision)) ?? .FP16
-  quantConfig.keyPrecision = GEMMOperandPrecision(rawValue: UInt16(kPrecision)) ?? .INT8
-  quantConfig.valuePrecision = GEMMOperandPrecision(rawValue: UInt16(vPrecision)) ?? .INT8
+  quantConfig.queryPrecision = qTensor.parameters.precision
+  quantConfig.keyPrecision = kTensor.parameters.precision
+  quantConfig.valuePrecision = vTensor.parameters.precision
 
   let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
     baseDescriptor: baseDescriptor,
     quantizationConfig: quantConfig
   )
 
-  // Create quantized attention instance
-  let quantizedAttention = QuantizedAttention(device: mfaContext.device)
+  let quantizedAttention = QuantizedAttention(device: device)
 
-  // Create quantized tensors from buffers
-  let qParams = QuantizationParameters(
-    scale: qScale,
-    zeroPoint: qZeroPoint,
-    precision: quantConfig.queryPrecision,
-    strategy: quantConfig.queryStrategy
-  )
-  let kParams = QuantizationParameters(
-    scale: kScale,
-    zeroPoint: kZeroPoint,
-    precision: quantConfig.keyPrecision,
-    strategy: quantConfig.keyStrategy
-  )
-  let vParams = QuantizationParameters(
-    scale: vScale,
-    zeroPoint: vZeroPoint,
-    precision: quantConfig.valuePrecision,
-    strategy: quantConfig.valueStrategy
-  )
-
-  let elementCount = Int(batchSize * seqLenKV * UInt32(headDim))
-  let shape = [Int(batchSize), Int(seqLenKV), Int(headDim)]
-
-  let qTensor = QuantizedTensor(
-    device: mfaContext.device, data: qBuffer.buffer, parameters: qParams,
-    elementCount: Int(batchSize * seqLenQ * UInt32(headDim)),
-    shape: [Int(batchSize), Int(seqLenQ), Int(headDim)]
-  )
-  let kTensor = QuantizedTensor(
-    device: mfaContext.device, data: kBuffer.buffer, parameters: kParams,
-    elementCount: elementCount, shape: shape
-  )
-  let vTensor = QuantizedTensor(
-    device: mfaContext.device, data: vBuffer.buffer, parameters: vParams,
-    elementCount: elementCount, shape: shape
-  )
-
-  // Execute quantized backward key-value pass
   guard
     let commandBuffer = quantizedAttention.backwardKeyValue(
       query: qTensor,
@@ -1433,23 +1863,21 @@ public func mfa_attention_backward_kv_quantized(
       descriptor: quantDescriptor
     )
   else {
-    return 5 // MFA_ERROR_EXECUTION_FAILED
+    return 5
   }
 
-  // Execute and wait for completion
   commandBuffer.commit()
   commandBuffer.waitUntilCompleted()
 
   if let error = commandBuffer.error {
     print("Metal execution error: \(error)")
-    return 5 // MFA_ERROR_EXECUTION_FAILED
+    return 5
   }
 
-  // Store GPU timing
   let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-  globalContext?.lastGPULatency = gpuLatency
+  GlobalContextStore.shared.updateLatency(gpuLatency)
 
-  return 0 // MFA_SUCCESS
+  return 0
 }
 
 // MARK: - Multi-Head Attention Internal Implementation
@@ -1478,91 +1906,88 @@ private func mfa_attention_forward_multihead_internal(
 )
   -> Int32
 {
-  do {
-    // Create multi-head attention instance
-    let multiHeadAttention = MultiHeadAttention(device: context.device)
+  // Create multi-head attention instance
+  let multiHeadAttention = MultiHeadAttention(device: context.device)
 
-    // Create base attention descriptor
-    var baseDescriptor = AttentionDescriptor()
-    baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
-    // Convert C FFI enum values to Swift values
-    let swiftInputPrecision = convertCFFIPrecisionToSwift(inputPrecision)
-    let swiftIntermediatePrecision = convertCFFIPrecisionToSwift(intermediatePrecision)
+  // Create base attention descriptor
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
 
-    // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
-    // we must use FP32 inputs to avoid NaN issues from precision mismatch
-    // The inputs are always FP32 from the FFI layer
-    baseDescriptor.lowPrecisionInputs = false  // Always use FP32 inputs from FFI
-    baseDescriptor
-      // Use FP32 intermediates for numerical stability
-      .lowPrecisionIntermediates = false
-    baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
-    baseDescriptor.sparsityPattern = causal ? .causal : .none
-    baseDescriptor.softmaxScale = softmaxScale
+  // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently used
+  // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
+  // we must use FP32 inputs to avoid NaN issues from precision mismatch
+  // The inputs are always FP32 from the FFI layer
+  baseDescriptor.lowPrecisionInputs = false // Always use FP32 inputs from FFI
+  baseDescriptor
+    // Use FP32 intermediates for numerical stability
+    .lowPrecisionIntermediates = false
 
-    // Create tensor shapes
-    let queryShape = MultiHeadShape(
-      batchSize: batchSize,
-      numHeads: numHeads,
-      sequenceLength: seqLenQ,
-      headDimension: headDim
+  // Suppress unused parameter warnings - these are part of the API but not used yet
+  _ = inputPrecision
+  _ = intermediatePrecision
+  baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
+  baseDescriptor.softmaxScale = softmaxScale
+
+  // Create tensor shapes
+  let queryShape = MultiHeadShape(
+    batchSize: batchSize,
+    numHeads: numHeads,
+    sequenceLength: seqLenQ,
+    headDimension: headDim
+  )
+
+  let kvShape = MultiHeadShape(
+    batchSize: batchSize,
+    numHeads: numHeads, // Standard MHA for now
+    sequenceLength: seqLenKV,
+    headDimension: headDim
+  )
+
+  // Create multi-head descriptor with optimized dispatch strategy
+  let multiHeadDescriptor = MultiHeadAttentionDescriptor(
+    baseDescriptor: baseDescriptor,
+    queryShape: queryShape,
+    keyShape: kvShape,
+    valueShape: kvShape,
+    broadcastMode: .standard, // Standard MHA mode
+    dispatchStrategy: .perBatch // Use per-batch dispatch for better performance with small head
+    // counts
+  )
+
+  // Execute multi-head attention (no logsumexp for forward-only)
+  guard
+    let commandBuffer = multiHeadAttention.forward(
+      query: qBuffer,
+      key: kBuffer,
+      value: vBuffer,
+      output: outBuffer,
+      logsumexp: nil, // Skip logsumexp for forward-only passes
+      descriptor: multiHeadDescriptor,
+      maskBuffer: preparedMask?.buffer
     )
-
-    let kvShape = MultiHeadShape(
-      batchSize: batchSize,
-      numHeads: numHeads, // Standard MHA for now
-      sequenceLength: seqLenKV,
-      headDimension: headDim
-    )
-
-    // Create multi-head descriptor with optimized dispatch strategy
-    let multiHeadDescriptor = MultiHeadAttentionDescriptor(
-      baseDescriptor: baseDescriptor,
-      queryShape: queryShape,
-      keyShape: kvShape,
-      valueShape: kvShape,
-      broadcastMode: .standard, // Standard MHA mode
-      dispatchStrategy: .perBatch // Use per-batch dispatch for better performance with small head
-      // counts
-    )
-
-    // Execute multi-head attention (no logsumexp for forward-only)
-    guard
-      let commandBuffer = multiHeadAttention.forward(
-        query: qBuffer,
-        key: kBuffer,
-        value: vBuffer,
-        output: outBuffer,
-        logsumexp: nil, // Skip logsumexp for forward-only passes
-        descriptor: multiHeadDescriptor,
-        maskBuffer: preparedMask?.buffer
-      )
-    else {
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Execute and wait for completion
-    commandBuffer.commit()
-    commandBuffer.waitUntilCompleted()
-
-    if let error = commandBuffer.error {
-      print("Multi-head attention execution error: \(error)")
-      return 5 // MFA_ERROR_EXECUTION_FAILED
-    }
-
-    // Store GPU timing
-    let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
-    context.lastGPULatency = gpuLatency
-
-    return 0 // MFA_SUCCESS
-
-  } catch {
-    print("Multi-head attention error: \(error)")
-    return 4 // MFA_ERROR_KERNEL_COMPILATION
+  else {
+    return 5 // MFA_ERROR_EXECUTION_FAILED
   }
+
+  // Execute and wait for completion
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Multi-head attention execution error: \(error)")
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  // Store GPU timing
+  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+  context.lastGPULatency = gpuLatency
+  GlobalContextStore.shared.updateLatency(gpuLatency)
+
+  return 0 // MFA_SUCCESS
 }
 
-// Helper function to dequantize buffers for MultiHeadAttention processing
+/// Helper function to dequantize buffers for MultiHeadAttention processing
 private func dequantizeBuffer(
   buffer: MTLBuffer,
   params: QuantizationParameters,
@@ -1619,7 +2044,7 @@ private func dequantizeBuffer(
 
   // Create Metal compute pipeline for dequantization with precision safety
   let compileOptions = MTLCompileOptions()
-  compileOptions.fastMathEnabled = false // Disable fast math for numerical stability with BF16
+  compileOptions.mathMode = .safe // Disable fast math for numerical stability with BF16
 
   guard
     let library = try? device.makeLibrary(source: kernelSource, options: compileOptions),
@@ -1681,8 +2106,11 @@ private func dequantizeBuffer(
 // MARK: - Enhanced Multi-Head Quantized Attention Implementation
 
 // MARK: - UNIFIED QUANTIZED ATTENTION IMPLEMENTATION
-// This function replaces both mfa_attention_forward_quantized and mfa_attention_forward_quantized_enhanced
-// It supports all quantization granularities, precision options, and advanced features in a single unified codebase
+
+// This function replaces both mfa_attention_forward_quantized and
+// mfa_attention_forward_quantized_enhanced
+// It supports all quantization granularities, precision options, and advanced features in a single
+// unified codebase
 
 @_cdecl("mfa_attention_forward_quantized_unified")
 public func mfa_attention_forward_quantized_unified(
@@ -1712,8 +2140,8 @@ public func mfa_attention_forward_quantized_unified(
   _ qBlockSize: UInt32,
   _ kBlockSize: UInt32,
   _ vBlockSize: UInt32,
-  _ enableMixedPrecision: Bool,
-  _ forceSymmetricQuantization: Bool,
+  _: Bool,
+  _: Bool,
   _ transposeQ: Bool,
   _ transposeK: Bool,
   _ transposeV: Bool,
@@ -1722,7 +2150,9 @@ public func mfa_attention_forward_quantized_unified(
   -> Int32
 {
   print("🚨 ENTERING unified quantized attention with granularity \(granularity)")
-  print("   Dimensions: batch=\(batchSize), seqQ=\(seqLenQ), seqKV=\(seqLenKV), heads=\(numHeads), dim=\(headDim)")
+  print(
+    "   Dimensions: batch=\(batchSize), seqQ=\(seqLenQ), seqKV=\(seqLenKV), heads=\(numHeads), dim=\(headDim)"
+  )
   print("   Granularity: \(granularity) (0=tensor, 1=row, 2=block, 3=hybrid)")
   print("   Block sizes: Q=\(qBlockSize), K=\(kBlockSize), V=\(vBlockSize)")
   print("   Precisions: Q=\(qPrecision), K=\(kPrecision), V=\(vPrecision), Out=\(outputPrecision)")
@@ -1802,7 +2232,9 @@ public func mfa_attention_forward_quantized_unified(
 }
 
 // MARK: - BACKWARD COMPATIBILITY WRAPPERS
-// These functions provide backward compatibility for existing code while routing through the unified implementation
+
+// These functions provide backward compatibility for existing code while routing through the
+// unified implementation
 
 @_cdecl("mfa_attention_forward_quantized")
 public func mfa_attention_forward_quantized(
@@ -1890,7 +2322,9 @@ public func mfa_attention_forward_quantized_enhanced(
 )
   -> Int32
 {
-  print("🔀 COMPATIBILITY: Routing mfa_attention_forward_quantized_enhanced to unified implementation")
+  print(
+    "🔀 COMPATIBILITY: Routing mfa_attention_forward_quantized_enhanced to unified implementation"
+  )
 
   // Route directly to unified implementation (same signature)
   return mfa_attention_forward_quantized_unified(
@@ -1908,8 +2342,320 @@ public func mfa_attention_forward_quantized_enhanced(
   )
 }
 
-
-
-
 // BACKWARD COMPATIBILITY WRAPPERS FOR DEQUANTIZATION
 // These functions provide backward compatibility while routing through the unified implementation
+
+// MARK: - Multi-Latent Attention (MLA) Support
+
+@_cdecl("mfa_mla_create_context")
+public func mfa_mla_create_context(_ context: UnsafeMutablePointer<UnsafeMutableRawPointer?>?)
+  -> Int32
+{
+  guard let device = GlobalContextStore.shared.device else {
+    return 3 // MFA_ERROR_DEVICE_NOT_SUPPORTED
+  }
+
+  do {
+    let mlaContext = try MLAOptimizedGEMMMFA(device: device)
+    let handle = MLAContextRegistry.shared.makeHandle(for: mlaContext)
+    context?.pointee = handle
+    return 0 // MFA_SUCCESS
+  } catch {
+    print("MLA context creation failed: \(error)")
+    return 2 // MFA_ERROR_MEMORY_ALLOCATION
+  }
+}
+
+@_cdecl("mfa_mla_destroy_context")
+public func mfa_mla_destroy_context(_ context: UnsafeMutableRawPointer?) {
+  MLAContextRegistry.shared.remove(handle: context)
+}
+
+@_cdecl("mfa_mla_init_weights")
+public func mfa_mla_init_weights(
+  _ context: UnsafeMutableRawPointer?,
+  _ numHeads: UInt32,
+  _ headDim: UInt32,
+  _ kvLatentDim: UInt32
+)
+  -> Int32
+{
+  guard let context else { return 1 } // MFA_ERROR_INVALID_ARGS
+
+  guard let mlaContext = MLAContextRegistry.shared.context(for: context) else {
+    return 1 // MFA_ERROR_INVALID_ARGS
+  }
+
+  mlaContext.initializeDecompressionWeights(
+    numHeads: Int(numHeads),
+    headDim: Int(headDim),
+    kvLatentDim: Int(kvLatentDim)
+  )
+
+  return 0 // MFA_SUCCESS
+}
+
+@_cdecl("mfa_mla_load_weights")
+public func mfa_mla_load_weights(
+  _ context: UnsafeMutableRawPointer?,
+  _ wk: UnsafeMutableRawPointer?,
+  _ wv: UnsafeMutableRawPointer?
+)
+  -> Int32
+{
+  guard let context, let wk, let wv else { return 1 } // MFA_ERROR_INVALID_ARGS
+
+  guard let mlaContext = MLAContextRegistry.shared.context(for: context) else {
+    return 1 // MFA_ERROR_INVALID_ARGS
+  }
+
+  // Extract MTLBuffer from opaque pointers
+  let wkBuffer = Unmanaged<MFABuffer>.fromOpaque(wk).takeUnretainedValue()
+  let wvBuffer = Unmanaged<MFABuffer>.fromOpaque(wv).takeUnretainedValue()
+
+  mlaContext.loadWeights(wk: wkBuffer.buffer, wv: wvBuffer.buffer)
+
+  return 0 // MFA_SUCCESS
+}
+
+@_cdecl("mfa_mla_forward")
+public func mfa_mla_forward(
+  _ context: UnsafeMutableRawPointer?,
+  _ mfaContext: UnsafeMutableRawPointer?,
+  _ kvLatent: UnsafeMutableRawPointer?,
+  _ decompressedK: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+  _ decompressedV: UnsafeMutablePointer<UnsafeMutableRawPointer?>?,
+  _ batchSize: UInt32,
+  _ numHeads: UInt32,
+  _ sequenceLength: UInt32,
+  _ headDim: UInt32,
+  _ kvLatentDim: UInt32
+)
+  -> Int32
+{
+  guard let context, let mfaContext, let kvLatent else {
+    return 1 // MFA_ERROR_INVALID_ARGS
+  }
+
+  guard let mlaContext = MLAContextRegistry.shared.context(for: context) else {
+    return 1 // MFA_ERROR_INVALID_ARGS
+  }
+
+  // Get MFA context for command queue
+  let ctx = Unmanaged<MFAContext>.fromOpaque(mfaContext).takeUnretainedValue()
+
+  // Extract input buffer
+  let kvLatentBuffer = Unmanaged<MFABuffer>.fromOpaque(kvLatent).takeUnretainedValue()
+
+  // Create command buffer
+  guard let commandBuffer = ctx.commandQueue.makeCommandBuffer() else {
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  // Output buffers are in/out: an incoming handle is an MTLBuffer to write the
+  // decompressed K/V into (e.g. an MPS tensor's backing buffer, readable from
+  // the host). When the caller passes nil, forward allocates and we return a
+  // new wrapped handle. This fixes the previous bug where forward wrote into
+  // its own private buffers and the caller's (never-written) tensors were
+  // returned.
+  var outK: MTLBuffer? = nil
+  var outV: MTLBuffer? = nil
+  if let kHandle = decompressedK?.pointee {
+    outK = Unmanaged<MFABuffer>.fromOpaque(kHandle).takeUnretainedValue().buffer
+  }
+  if let vHandle = decompressedV?.pointee {
+    outV = Unmanaged<MFABuffer>.fromOpaque(vHandle).takeUnretainedValue().buffer
+  }
+  let callerProvidedOutputs = (outK != nil && outV != nil)
+
+  do {
+    try mlaContext.forward(
+      commandBuffer: commandBuffer,
+      kvLatent: kvLatentBuffer.buffer,
+      decompressedK: &outK,
+      decompressedV: &outV,
+      batchSize: Int(batchSize),
+      numHeads: Int(numHeads),
+      sequenceLength: Int(sequenceLength),
+      headDim: Int(headDim),
+      kvLatentDim: Int(kvLatentDim)
+    )
+
+    // Execute
+    commandBuffer.commit()
+    commandBuffer.waitUntilCompleted()
+
+    if let error = commandBuffer.error {
+      print("MLA decompression error: \(error)")
+      return 5 // MFA_ERROR_EXECUTION_FAILED
+    }
+
+    // Only hand back a freshly-wrapped handle when forward had to allocate the
+    // buffer itself (caller didn't provide one). When the caller provided the
+    // buffer, the data was written in place and the caller already owns the
+    // handle — leave it untouched.
+    if !callerProvidedOutputs {
+      if let outK {
+        decompressedK?.pointee = Unmanaged.passRetained(MFABuffer(buffer: outK)).toOpaque()
+      }
+      if let outV {
+        decompressedV?.pointee = Unmanaged.passRetained(MFABuffer(buffer: outV)).toOpaque()
+      }
+    }
+
+    // Store GPU timing
+    let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+    GlobalContextStore.shared.updateLatency(gpuLatency)
+
+    return 0 // MFA_SUCCESS
+
+  } catch {
+    print("MLA forward failed: \(error)")
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+}
+
+// MARK: - Sparse Indexer Operations
+
+@_cdecl("mfa_sparse_indexer_scores")
+public func mfa_sparse_indexer_scores(
+  _ contextPtr: UnsafeMutableRawPointer?,
+  _ qPtr: UnsafeMutableRawPointer?,
+  _ kPtr: UnsafeMutableRawPointer?,
+  _ batchSize: UInt32,
+  _ numHeads: UInt32,
+  _ seqLenQ: UInt32,
+  _ seqLenK: UInt32,
+  _ headDim: UInt16,
+  _ scale: Float,
+  _ existingOutPtr: UnsafeMutableRawPointer?,
+  _ outScoresPtr: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+)
+  -> Int32
+{
+  guard
+    let contextPtr,
+    let qPtr,
+    let kPtr,
+    batchSize > 0,
+    numHeads > 0,
+    seqLenQ > 0,
+    seqLenK > 0,
+    headDim > 0
+  else {
+    return 1 // MFA_ERROR_INVALID_ARGS
+  }
+
+  let ctx = Unmanaged<MFAContext>.fromOpaque(contextPtr).takeUnretainedValue()
+  let qBuffer = Unmanaged<MFABuffer>.fromOpaque(qPtr).takeUnretainedValue()
+  let kBuffer = Unmanaged<MFABuffer>.fromOpaque(kPtr).takeUnretainedValue()
+
+  let elementSize = MemoryLayout<UInt16>.size
+  let groupCount = Int(batchSize) * Int(numHeads)
+  let rows = Int(seqLenQ)
+  let cols = Int(seqLenK)
+  let depth = Int(headDim)
+
+  guard groupCount > 0 else { return 1 }
+
+  let expectedQBytes = groupCount * rows * depth * elementSize
+  let expectedKBytes = groupCount * cols * depth * elementSize
+
+  guard qBuffer.buffer.length >= expectedQBytes else { return 1 }
+  guard kBuffer.buffer.length >= expectedKBytes else { return 1 }
+
+  let outputBytes = groupCount * rows * cols * elementSize
+
+  let existingOutput: MFABuffer? = existingOutPtr.map {
+    Unmanaged<MFABuffer>.fromOpaque($0).takeUnretainedValue()
+  }
+
+  let resultBuffer: MTLBuffer
+
+  if let existingOutput {
+    guard existingOutput.buffer.length >= outputBytes else {
+      return 1 // Provided buffer too small
+    }
+    resultBuffer = existingOutput.buffer
+  } else {
+    guard let newBuffer = ctx.device.makeBuffer(length: outputBytes, options: .storageModeShared)
+    else {
+      return 2 // MFA_ERROR_MEMORY_ALLOCATION
+    }
+    resultBuffer = newBuffer
+  }
+
+  guard let commandBuffer = ctx.commandQueue.makeCommandBuffer() else {
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  let matmul = MPSMatrixMultiplication(
+    device: ctx.device,
+    transposeLeft: false,
+    transposeRight: true,
+    resultRows: rows,
+    resultColumns: cols,
+    interiorColumns: depth,
+    alpha: Double(scale),
+    beta: 0.0
+  )
+
+  let aDescriptor = MPSMatrixDescriptor(
+    rows: rows,
+    columns: depth,
+    rowBytes: depth * elementSize,
+    dataType: .float16
+  )
+
+  let bDescriptor = MPSMatrixDescriptor(
+    rows: cols,
+    columns: depth,
+    rowBytes: depth * elementSize,
+    dataType: .float16
+  )
+
+  let cDescriptor = MPSMatrixDescriptor(
+    rows: rows,
+    columns: cols,
+    rowBytes: cols * elementSize,
+    dataType: .float16
+  )
+
+  let qStride = rows * depth * elementSize
+  let kStride = cols * depth * elementSize
+  let cStride = rows * cols * elementSize
+
+  for groupIndex in 0..<groupCount {
+    let qOffset = groupIndex * qStride
+    let kOffset = groupIndex * kStride
+    let cOffset = groupIndex * cStride
+
+    let qMatrix = MPSMatrix(buffer: qBuffer.buffer, offset: qOffset, descriptor: aDescriptor)
+    let kMatrix = MPSMatrix(buffer: kBuffer.buffer, offset: kOffset, descriptor: bDescriptor)
+    let cMatrix = MPSMatrix(buffer: resultBuffer, offset: cOffset, descriptor: cDescriptor)
+
+    matmul.encode(
+      commandBuffer: commandBuffer,
+      leftMatrix: qMatrix,
+      rightMatrix: kMatrix,
+      resultMatrix: cMatrix
+    )
+  }
+
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Sparse indexer scores error: \(error)")
+    return 5 // MFA_ERROR_EXECUTION_FAILED
+  }
+
+  ctx.lastGPULatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+
+  if existingOutput == nil {
+    let wrapped = MFABuffer(buffer: resultBuffer)
+    outScoresPtr?.pointee = Unmanaged.passRetained(wrapped).toOpaque()
+  }
+
+  return 0
+}

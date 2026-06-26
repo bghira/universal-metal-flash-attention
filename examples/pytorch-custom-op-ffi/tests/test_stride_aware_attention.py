@@ -11,16 +11,17 @@ The memory corruption issue occurs when:
 3. Metal kernels assume contiguous memory and calculate incorrect offsets
 """
 
-import pytest
-import torch
-import numpy as np
 import gc
-import time
-from typing import Tuple, Optional
+import os
 
 # Try to import the Metal SDPA extension
 import sys
-import os
+import time
+from typing import Optional, Tuple
+
+import numpy as np
+import pytest
+import torch
 
 # Add parent directory to path to find the extension
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -28,6 +29,7 @@ sys.path.insert(0, parent_dir)
 
 try:
     import metal_sdpa_extension
+
     HAS_METAL = True
 except ImportError as e:
     HAS_METAL = False
@@ -42,7 +44,7 @@ def create_test_tensors(
     layout: str = "flux",
     dtype: torch.dtype = torch.float16,
     device: str = "mps",
-    contiguous: bool = True
+    contiguous: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Create test tensors for attention computation.
@@ -122,9 +124,9 @@ class TestStrideAwareAttention:
         non-contiguous tensors from permute operations are passed to
         Metal kernels that assume contiguous memory layout.
         """
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("MRE: Memory Corruption with Non-Contiguous Tensors")
-        print("="*80)
+        print("=" * 80)
 
         # Create FLUX layout tensors
         batch, heads, seq_len, dim = 1, 12, 77, 64
@@ -136,9 +138,18 @@ class TestStrideAwareAttention:
 
         # Create contiguous FLUX layout tensors [B,H,S,D]
         torch.manual_seed(42)
-        q_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-        k_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-        v_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
+        q_flux = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
+        k_flux = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
+        v_flux = (
+            torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+            * 0.1
+        )
 
         print("\nOriginal FLUX tensors (contiguous):")
         print_tensor_info(q_flux, "Q_flux")
@@ -174,7 +185,9 @@ class TestStrideAwareAttention:
 
             # Verify output shape
             expected_shape = q_metal.shape
-            assert output.shape == expected_shape, f"Output shape mismatch: {output.shape} != {expected_shape}"
+            assert (
+                output.shape == expected_shape
+            ), f"Output shape mismatch: {output.shape} != {expected_shape}"
             print(f"✅ Output shape correct: {list(output.shape)}")
 
             # Check for NaN/Inf values that might indicate corruption
@@ -206,7 +219,7 @@ class TestStrideAwareAttention:
         print("✅ Contiguous tensor call completed")
 
         # If both succeed, compare outputs
-        if 'output' in locals():
+        if "output" in locals():
             diff = torch.abs(output - output_contig)
             max_diff = diff.max().item()
             mean_diff = diff.mean().item()
@@ -223,9 +236,9 @@ class TestStrideAwareAttention:
 
     def test_stride_patterns(self):
         """Test various stride patterns from common tensor operations."""
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Testing Various Stride Patterns")
-        print("="*80)
+        print("=" * 80)
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
         batch, heads, seq_len, dim = 1, 8, 64, 32
@@ -234,8 +247,13 @@ class TestStrideAwareAttention:
             ("Contiguous", lambda t: t),
             ("Permute(0,2,1,3)", lambda t: t.permute(0, 2, 1, 3)),
             ("Transpose(1,2)", lambda t: t.transpose(1, 2)),
-            ("View after permute", lambda t: t.permute(0, 2, 1, 3).reshape(batch, seq_len, -1).view(batch, seq_len, heads, dim)),
-            ("Slice", lambda t: t[:, :, :seq_len//2, :]),
+            (
+                "View after permute",
+                lambda t: t.permute(0, 2, 1, 3)
+                .reshape(batch, seq_len, -1)
+                .view(batch, seq_len, heads, dim),
+            ),
+            ("Slice", lambda t: t[:, :, : seq_len // 2, :]),
         ]
 
         for name, transform_fn in test_cases:
@@ -243,9 +261,24 @@ class TestStrideAwareAttention:
 
             # Create base tensor in FLUX layout
             torch.manual_seed(42)
-            q_base = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-            k_base = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-            v_base = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
+            q_base = (
+                torch.randn(
+                    batch, heads, seq_len, dim, dtype=torch.float16, device=device
+                )
+                * 0.1
+            )
+            k_base = (
+                torch.randn(
+                    batch, heads, seq_len, dim, dtype=torch.float16, device=device
+                )
+                * 0.1
+            )
+            v_base = (
+                torch.randn(
+                    batch, heads, seq_len, dim, dtype=torch.float16, device=device
+                )
+                * 0.1
+            )
 
             # Apply transformation
             q = transform_fn(q_base)
@@ -257,7 +290,9 @@ class TestStrideAwareAttention:
             print(f"  Contiguous: {q.is_contiguous()}")
 
             try:
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
                 print(f"  ✅ Success - Output shape: {list(output.shape)}")
 
                 # Check for validity
@@ -269,11 +304,12 @@ class TestStrideAwareAttention:
             except Exception as e:
                 print(f"  ❌ Failed: {e}")
 
+    @pytest.mark.slow
     def test_performance_comparison(self):
         """Compare performance of stride-aware vs contiguous approaches."""
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Performance Comparison: Stride-Aware vs Contiguous")
-        print("="*80)
+        print("=" * 80)
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -289,9 +325,24 @@ class TestStrideAwareAttention:
 
             # Create FLUX layout tensors
             torch.manual_seed(42)
-            q_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-            k_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-            v_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
+            q_flux = (
+                torch.randn(
+                    batch, heads, seq_len, dim, dtype=torch.float16, device=device
+                )
+                * 0.1
+            )
+            k_flux = (
+                torch.randn(
+                    batch, heads, seq_len, dim, dtype=torch.float16, device=device
+                )
+                * 0.1
+            )
+            v_flux = (
+                torch.randn(
+                    batch, heads, seq_len, dim, dtype=torch.float16, device=device
+                )
+                * 0.1
+            )
 
             # Non-contiguous (permuted)
             q_perm = q_flux.permute(0, 2, 1, 3)
@@ -305,7 +356,9 @@ class TestStrideAwareAttention:
 
             # Warm up
             for _ in range(3):
-                _ = metal_sdpa_extension.metal_scaled_dot_product_attention(q_cont, k_cont, v_cont)
+                _ = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q_cont, k_cont, v_cont
+                )
 
             # Time contiguous approach (includes copy time)
             torch.mps.synchronize() if device == "mps" else None
@@ -315,7 +368,9 @@ class TestStrideAwareAttention:
                 q_c = q_perm.contiguous()
                 k_c = k_perm.contiguous()
                 v_c = v_perm.contiguous()
-                output_cont = metal_sdpa_extension.metal_scaled_dot_product_attention(q_c, k_c, v_c)
+                output_cont = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q_c, k_c, v_c
+                )
 
             torch.mps.synchronize() if device == "mps" else None
             time_contiguous = (time.perf_counter() - start) / 10
@@ -324,13 +379,19 @@ class TestStrideAwareAttention:
             try:
                 # Warm up
                 for _ in range(3):
-                    _ = metal_sdpa_extension.metal_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+                    _ = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                        q_perm, k_perm, v_perm
+                    )
 
                 torch.mps.synchronize() if device == "mps" else None
                 start = time.perf_counter()
 
                 for _ in range(10):
-                    output_perm = metal_sdpa_extension.metal_scaled_dot_product_attention(q_perm, k_perm, v_perm)
+                    output_perm = (
+                        metal_sdpa_extension.metal_scaled_dot_product_attention(
+                            q_perm, k_perm, v_perm
+                        )
+                    )
 
                 torch.mps.synchronize() if device == "mps" else None
                 time_noncontig = (time.perf_counter() - start) / 10
@@ -352,9 +413,9 @@ class TestStrideAwareAttention:
 
     def test_memory_safety(self):
         """Test memory safety with various edge cases."""
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("Memory Safety Tests")
-        print("="*80)
+        print("=" * 80)
 
         device = "mps" if torch.backends.mps.is_available() else "cpu"
 
@@ -376,9 +437,15 @@ class TestStrideAwareAttention:
 
         # Test 2: Transposed tensors
         print("\nTest 2: Transposed tensors")
-        q = torch.randn(1, 64, 12, 32, dtype=torch.float16, device=device).transpose(1, 2)
-        k = torch.randn(1, 64, 12, 32, dtype=torch.float16, device=device).transpose(1, 2)
-        v = torch.randn(1, 64, 12, 32, dtype=torch.float16, device=device).transpose(1, 2)
+        q = torch.randn(1, 64, 12, 32, dtype=torch.float16, device=device).transpose(
+            1, 2
+        )
+        k = torch.randn(1, 64, 12, 32, dtype=torch.float16, device=device).transpose(
+            1, 2
+        )
+        v = torch.randn(1, 64, 12, 32, dtype=torch.float16, device=device).transpose(
+            1, 2
+        )
 
         print(f"  Shape after transpose: {list(q.shape)}")
         print(f"  Contiguous: {q.is_contiguous()}")
@@ -393,12 +460,20 @@ class TestStrideAwareAttention:
         print("\nTest 3: Memory pressure test")
         for i in range(10):
             q, k, v = create_test_tensors(
-                batch_size=1, num_heads=12, seq_len=256, head_dim=64,
-                layout="metal", dtype=torch.float16, device=device, contiguous=False
+                batch_size=1,
+                num_heads=12,
+                seq_len=256,
+                head_dim=64,
+                layout="metal",
+                dtype=torch.float16,
+                device=device,
+                contiguous=False,
             )
 
             try:
-                output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
+                output = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                    q, k, v
+                )
                 del output
                 gc.collect()
                 torch.mps.empty_cache() if device == "mps" else None
@@ -419,7 +494,9 @@ def test_basic_stride_handling():
     flux_tensor = torch.randn(1, 12, 77, 64, dtype=torch.float16, device="mps") * 0.1
     metal_tensor = flux_tensor.permute(0, 2, 1, 3)  # [B,H,S,D] -> [B,S,H,D]
 
-    assert not metal_tensor.is_contiguous(), "Tensor should be non-contiguous after permute"
+    assert (
+        not metal_tensor.is_contiguous()
+    ), "Tensor should be non-contiguous after permute"
 
     # This should work without memory corruption if strides are handled correctly
     q, k, v = metal_tensor, metal_tensor, metal_tensor
@@ -435,7 +512,7 @@ if __name__ == "__main__":
     test_runner = TestStrideAwareAttention()
 
     print("Running Stride-Aware Attention Tests")
-    print("="*80)
+    print("=" * 80)
 
     # Run MRE first
     test_runner.test_mre_memory_corruption()
@@ -445,6 +522,6 @@ if __name__ == "__main__":
     test_runner.test_performance_comparison()
     test_runner.test_memory_safety()
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("All tests completed")
-    print("="*80)
+    print("=" * 80)

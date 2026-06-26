@@ -73,6 +73,67 @@ typedef void* mfa_context_t;
  */
 typedef void* mfa_buffer_t;
 
+typedef enum {
+    MFA_QUANT_KERNEL_FORWARD = 0,
+    MFA_QUANT_KERNEL_BACKWARD_QUERY = 1,
+    MFA_QUANT_KERNEL_BACKWARD_KEY_VALUE = 2
+} mfa_quantized_kernel_t;
+
+typedef struct {
+    int32_t qData;
+    int32_t kData;
+    int32_t vData;
+    int32_t output;
+    int32_t gradOutput;
+    int32_t logsumexp;
+    int32_t gradQuery;
+    int32_t dValues;
+    int32_t gradKey;
+    int32_t gradValue;
+    int32_t qScale;
+    int32_t qZeroPoint;
+    int32_t kScale;
+    int32_t kZeroPoint;
+    int32_t vScale;
+    int32_t vZeroPoint;
+    int32_t dims;
+    int32_t steClipRange;
+    int32_t qBlockScales;
+    int32_t qBlockZeroPoints;
+    int32_t kBlockScales;
+    int32_t kBlockZeroPoints;
+    int32_t vBlockScales;
+    int32_t vBlockZeroPoints;
+    int32_t qPrecomputedSums;
+    int32_t kPrecomputedSums;
+    int32_t vPrecomputedSums;
+    int32_t qStrides;
+    int32_t kStrides;
+    int32_t vStrides;
+    int32_t oStrides;
+    int32_t maskBuffer;
+    int32_t numHeads;
+    int32_t numKeyValueHeads;
+    int32_t headDimension;
+    int32_t sequenceLength;
+    int32_t scratch0;
+    int32_t scratch1;
+} mfa_quantized_layout_t;
+
+void mfa_get_quantized_layout(
+    mfa_quantized_kernel_t kernel,
+    mfa_quantized_layout_t* out_layout
+);
+
+typedef struct {
+    bool supports_multi_head_backward;
+    bool supports_blockwise_backward;
+    uint32_t max_heads;
+    uint32_t max_block_size;
+} mfa_quantized_capabilities_t;
+
+void mfa_get_quantized_capabilities(void* out_capabilities);
+
 // =============================================================================
 // Context Management
 // =============================================================================
@@ -295,6 +356,20 @@ mfa_error_t mfa_attention_forward_quantized(
     bool transpose_o
 );
 
+mfa_error_t mfa_sparse_indexer_scores(
+    mfa_context_t context,
+    mfa_buffer_t q,
+    mfa_buffer_t k,
+    uint32_t batch_size,
+    uint32_t num_heads,
+    uint32_t seq_len_q,
+    uint32_t seq_len_k,
+    uint16_t head_dim,
+    float scale,
+    mfa_buffer_t scores_in,
+    mfa_buffer_t* scores_out
+);
+
 mfa_error_t mfa_attention_backward(
     mfa_context_t context,
     // Input tensors
@@ -367,6 +442,248 @@ void mfa_get_version(int* major, int* minor, int* patch);
  * @return GPU execution time in seconds, or 0.0 on error
  */
 double mfa_get_gpu_latency(mfa_context_t context);
+
+int32_t mfa_attention_backward_query_quantized(
+    mfa_context_t context,
+    mfa_buffer_t q,
+    mfa_buffer_t k,
+    mfa_buffer_t v,
+    mfa_buffer_t output,
+    mfa_buffer_t grad_output,
+    mfa_buffer_t logsumexp,
+    mfa_buffer_t grad_query,
+    mfa_buffer_t d_values,
+    uint32_t batch_size,
+    uint32_t seq_len_q,
+    uint32_t seq_len_kv,
+    uint32_t num_heads,
+    uint16_t head_dim,
+    float q_scale,
+    int32_t q_zero_point,
+    float k_scale,
+    int32_t k_zero_point,
+    float v_scale,
+    int32_t v_zero_point,
+    int32_t q_precision,
+    int32_t k_precision,
+    int32_t v_precision,
+    bool causal,
+    bool transpose_q,
+    bool transpose_k,
+    bool transpose_v,
+    bool transpose_o
+);
+
+int32_t mfa_attention_backward_kv_quantized(
+    mfa_context_t context,
+    mfa_buffer_t q,
+    mfa_buffer_t k,
+    mfa_buffer_t v,
+    mfa_buffer_t grad_output,
+    mfa_buffer_t logsumexp,
+    mfa_buffer_t d_values,
+    mfa_buffer_t grad_key,
+    mfa_buffer_t grad_value,
+    uint32_t batch_size,
+    uint32_t seq_len_q,
+    uint32_t seq_len_kv,
+    uint32_t num_heads,
+    uint16_t head_dim,
+    float q_scale,
+    int32_t q_zero_point,
+    float k_scale,
+    int32_t k_zero_point,
+    float v_scale,
+    int32_t v_zero_point,
+    int32_t q_precision,
+    int32_t k_precision,
+    int32_t v_precision,
+    bool causal,
+    bool transpose_q,
+    bool transpose_k,
+    bool transpose_v,
+    bool transpose_o
+);
+
+int32_t mfa_attention_backward_query_quantized_ex(
+    mfa_context_t context,
+    mfa_buffer_t q,
+    mfa_buffer_t k,
+    mfa_buffer_t v,
+    mfa_buffer_t output,
+    mfa_buffer_t grad_output,
+    mfa_buffer_t logsumexp,
+    mfa_buffer_t grad_query,
+    mfa_buffer_t d_values,
+    uint32_t batch_size,
+    uint32_t seq_len_q,
+    uint32_t seq_len_kv,
+    uint32_t num_heads,
+    uint32_t num_kv_heads,
+    uint16_t head_dim,
+    float q_scale,
+    int32_t q_zero_point,
+    float k_scale,
+    int32_t k_zero_point,
+    float v_scale,
+    int32_t v_zero_point,
+    int32_t q_precision,
+    int32_t k_precision,
+    int32_t v_precision,
+    bool causal,
+    bool transpose_q,
+    bool transpose_k,
+    bool transpose_v,
+    bool transpose_o,
+    mfa_buffer_t q_block_scales,
+    mfa_buffer_t q_block_zero_points,
+    mfa_buffer_t k_block_scales,
+    mfa_buffer_t k_block_zero_points,
+    mfa_buffer_t v_block_scales,
+    mfa_buffer_t v_block_zero_points,
+    uint32_t q_block_size,
+    uint32_t k_block_size,
+    uint32_t v_block_size,
+    uint32_t options
+);
+
+int32_t mfa_attention_backward_kv_quantized_ex(
+    mfa_context_t context,
+    mfa_buffer_t q,
+    mfa_buffer_t k,
+    mfa_buffer_t v,
+    mfa_buffer_t grad_output,
+    mfa_buffer_t logsumexp,
+    mfa_buffer_t d_values,
+    mfa_buffer_t grad_key,
+    mfa_buffer_t grad_value,
+    uint32_t batch_size,
+    uint32_t seq_len_q,
+    uint32_t seq_len_kv,
+    uint32_t num_heads,
+    uint32_t num_kv_heads,
+    uint16_t head_dim,
+    float q_scale,
+    int32_t q_zero_point,
+    float k_scale,
+    int32_t k_zero_point,
+    float v_scale,
+    int32_t v_zero_point,
+    int32_t q_precision,
+    int32_t k_precision,
+    int32_t v_precision,
+    bool causal,
+    bool transpose_q,
+    bool transpose_k,
+    bool transpose_v,
+    bool transpose_o,
+    mfa_buffer_t q_block_scales,
+    mfa_buffer_t q_block_zero_points,
+    mfa_buffer_t k_block_scales,
+    mfa_buffer_t k_block_zero_points,
+    mfa_buffer_t v_block_scales,
+    mfa_buffer_t v_block_zero_points,
+    uint32_t q_block_size,
+    uint32_t k_block_size,
+    uint32_t v_block_size,
+    uint32_t options
+);
+
+// =============================================================================
+// Multi-Latent Attention (MLA) Support
+// =============================================================================
+
+/**
+ * @brief Opaque handle to MLA decompression context
+ */
+typedef void* mfa_mla_context_t;
+
+/**
+ * @brief Create a new MLA decompression context
+ *
+ * MLA (Multi-Latent Attention) compresses KV cache from [batch, seq, num_heads × head_dim]
+ * to [batch, seq, kv_latent_dim]. This context manages decompression weights and GEMM kernels.
+ *
+ * @param[out] context Pointer to store the created MLA context handle
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_create_context(mfa_mla_context_t* context);
+
+/**
+ * @brief Destroy an MLA context and release associated resources
+ *
+ * @param context The MLA context to destroy
+ */
+void mfa_mla_destroy_context(mfa_mla_context_t context);
+
+/**
+ * @brief Initialize random decompression weights for testing
+ *
+ * Allocates and initializes W_k and W_v weight matrices with random values.
+ * For production use, load pre-trained weights with mfa_mla_load_weights instead.
+ *
+ * @param context The MLA context
+ * @param num_heads Number of attention heads
+ * @param head_dim Dimension of each attention head
+ * @param kv_latent_dim Compressed latent dimension
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_init_weights(
+    mfa_mla_context_t context,
+    uint32_t num_heads,
+    uint32_t head_dim,
+    uint32_t kv_latent_dim
+);
+
+/**
+ * @brief Load pre-trained decompression weights
+ *
+ * Loads W_k and W_v matrices from pre-trained buffers.
+ *
+ * @param context The MLA context
+ * @param wk Weight matrix for K decompression [kv_latent_dim, num_heads × head_dim]
+ * @param wv Weight matrix for V decompression [kv_latent_dim, num_heads × head_dim]
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_load_weights(
+    mfa_mla_context_t context,
+    mfa_buffer_t wk,
+    mfa_buffer_t wv
+);
+
+/**
+ * @brief Decompress KV latent representations into full K and V matrices
+ *
+ * Performs optimized GEMM operations to decompress compressed KV cache:
+ *   K = KV_latent @ W_k
+ *   V = KV_latent @ W_v
+ *
+ * Achieves 10.9 TFLOPS @ 2048×2048 on M3 Max, matching MPS performance.
+ *
+ * @param context The MLA context
+ * @param mfa_context The MFA context (for command queue)
+ * @param kv_latent Input compressed KV buffer [batch × seq, kv_latent_dim]
+ * @param[out] decompressed_k Output K buffer (allocated if NULL)
+ * @param[out] decompressed_v Output V buffer (allocated if NULL)
+ * @param batch_size Batch size
+ * @param num_heads Number of attention heads
+ * @param sequence_length Sequence length
+ * @param head_dim Head dimension
+ * @param kv_latent_dim Compressed latent dimension
+ * @return MFA_SUCCESS on success, error code on failure
+ */
+mfa_error_t mfa_mla_forward(
+    mfa_mla_context_t context,
+    mfa_context_t mfa_context,
+    mfa_buffer_t kv_latent,
+    mfa_buffer_t* decompressed_k,
+    mfa_buffer_t* decompressed_v,
+    uint32_t batch_size,
+    uint32_t num_heads,
+    uint32_t sequence_length,
+    uint32_t head_dim,
+    uint32_t kv_latent_dim
+);
 
 #ifdef __cplusplus
 }

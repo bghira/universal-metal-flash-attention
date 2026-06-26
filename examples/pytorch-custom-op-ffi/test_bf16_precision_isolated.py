@@ -11,17 +11,19 @@ This test file isolates the exact point where bf16 handling fails by testing:
 Each test provides clear PASS/FAIL status to help identify where bf16 processing breaks down.
 """
 
-import sys
 import os
+import sys
 from pathlib import Path
-import torch
+
 import numpy as np
+import torch
 
 # Add the python package to path
 sys.path.insert(0, str(Path(__file__).parent / "python"))
 
 try:
     import metal_sdpa_extension
+
     METAL_AVAILABLE = True
     print("✓ metal_sdpa_extension imported successfully")
 except ImportError as e:
@@ -33,7 +35,7 @@ def print_test_header(test_name):
     """Print formatted test header."""
     print(f"\n{'='*60}")
     print(f"TEST: {test_name}")
-    print('='*60)
+    print("=" * 60)
 
 
 def print_test_result(passed, message=""):
@@ -43,7 +45,9 @@ def print_test_result(passed, message=""):
     return passed
 
 
-def create_test_tensors(batch_size=1, num_heads=1, seq_len=8, head_dim=64, dtype=torch.float32):
+def create_test_tensors(
+    batch_size=1, num_heads=1, seq_len=8, head_dim=64, dtype=torch.float32
+):
     """Create small test tensors for attention computation."""
     # Use small values to avoid overflow in bf16
     scale = 0.1
@@ -67,7 +71,7 @@ def test_1_bf16_tensor_passthrough():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -92,8 +96,14 @@ def test_1_bf16_tensor_passthrough():
         print(f"Contains Inf: {torch.isinf(output).any()}")
 
         passed = dtype_preserved and shape_correct and no_nans and no_infs
-        return print_test_result(passed, "BF16 tensors passed through FFI successfully" if passed
-                               else "BF16 tensor pass-through failed")
+        return print_test_result(
+            passed,
+            (
+                "BF16 tensors passed through FFI successfully"
+                if passed
+                else "BF16 tensor pass-through failed"
+            ),
+        )
 
     except Exception as e:
         return print_test_result(False, f"Exception during bf16 pass-through: {e}")
@@ -112,12 +122,14 @@ def test_2_bf16_vs_fp32_attention():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
         # Create test data in fp32 first
-        q_fp32, k_fp32, v_fp32 = create_test_tensors(batch_size=1, num_heads=8, seq_len=64, head_dim=64, dtype=torch.float32)
+        q_fp32, k_fp32, v_fp32 = create_test_tensors(
+            batch_size=1, num_heads=8, seq_len=64, head_dim=64, dtype=torch.float32
+        )
 
         # Convert to bf16
         q_bf16 = q_fp32.to(torch.bfloat16)
@@ -128,12 +140,20 @@ def test_2_bf16_vs_fp32_attention():
         print(f"BF16 input range: [{q_bf16.min():.4f}, {q_bf16.max():.4f}]")
 
         # Compute attention in both precisions
-        output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_fp32, k_fp32, v_fp32)
-        output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_bf16, k_bf16, v_bf16)
+        output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+            q_fp32, k_fp32, v_fp32
+        )
+        output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+            q_bf16, k_bf16, v_bf16
+        )
 
         # Check basic properties
-        fp32_valid = not torch.isnan(output_fp32).any() and not torch.isinf(output_fp32).any()
-        bf16_valid = not torch.isnan(output_bf16).any() and not torch.isinf(output_bf16).any()
+        fp32_valid = (
+            not torch.isnan(output_fp32).any() and not torch.isinf(output_fp32).any()
+        )
+        bf16_valid = (
+            not torch.isnan(output_bf16).any() and not torch.isinf(output_bf16).any()
+        )
 
         print(f"FP32 output valid: {fp32_valid}")
         print(f"BF16 output valid: {bf16_valid}")
@@ -155,16 +175,24 @@ def test_2_bf16_vs_fp32_attention():
 
         # Reasonable thresholds for bf16 vs fp32 comparison
         abs_threshold = 1e-2  # BF16 has limited precision
-        rel_threshold = 0.1   # 10% relative difference is acceptable for BF16
+        rel_threshold = 0.1  # 10% relative difference is acceptable for BF16
 
         diff_reasonable = max_abs_diff < abs_threshold and max_rel_diff < rel_threshold
 
         passed = fp32_valid and bf16_valid and diff_reasonable
-        return print_test_result(passed, "BF16 vs FP32 comparison passed" if passed
-                               else f"BF16 vs FP32 comparison failed (abs_diff={max_abs_diff:.6f}, rel_diff={max_rel_diff:.4f})")
+        return print_test_result(
+            passed,
+            (
+                "BF16 vs FP32 comparison passed"
+                if passed
+                else f"BF16 vs FP32 comparison failed (abs_diff={max_abs_diff:.6f}, rel_diff={max_rel_diff:.4f})"
+            ),
+        )
 
     except Exception as e:
-        return print_test_result(False, f"Exception during bf16 vs fp32 comparison: {e}")
+        return print_test_result(
+            False, f"Exception during bf16 vs fp32 comparison: {e}"
+        )
 
 
 def test_3_bf16_dtype_preservation():
@@ -181,7 +209,7 @@ def test_3_bf16_dtype_preservation():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
@@ -189,9 +217,11 @@ def test_3_bf16_dtype_preservation():
         q, k, v = create_test_tensors(dtype=torch.bfloat16)
 
         # Verify input dtypes
-        input_dtypes_correct = (q.dtype == torch.bfloat16 and
-                               k.dtype == torch.bfloat16 and
-                               v.dtype == torch.bfloat16)
+        input_dtypes_correct = (
+            q.dtype == torch.bfloat16
+            and k.dtype == torch.bfloat16
+            and v.dtype == torch.bfloat16
+        )
 
         print(f"Input dtypes correct: {input_dtypes_correct}")
         print(f"Q dtype: {q.dtype}")
@@ -199,7 +229,9 @@ def test_3_bf16_dtype_preservation():
         print(f"V dtype: {v.dtype}")
 
         if not input_dtypes_correct:
-            return print_test_result(False, "Input tensors do not have correct bf16 dtype")
+            return print_test_result(
+                False, "Input tensors do not have correct bf16 dtype"
+            )
 
         # Pass through Metal SDPA
         output = metal_sdpa_extension.metal_scaled_dot_product_attention(q, k, v)
@@ -215,18 +247,27 @@ def test_3_bf16_dtype_preservation():
 
         # Convert back to fp32 and check that values are in reasonable range
         output_fp32 = output.to(torch.float32)
-        values_reasonable = (torch.isfinite(output_fp32).all() and
-                           output_fp32.abs().max() < 100.0)  # Reasonable range
+        values_reasonable = (
+            torch.isfinite(output_fp32).all() and output_fp32.abs().max() < 100.0
+        )  # Reasonable range
 
         print(f"Output values reasonable: {values_reasonable}")
         print(f"Output range: [{output.min():.4f}, {output.max():.4f}]")
 
         passed = input_dtypes_correct and output_dtype_correct and values_reasonable
-        return print_test_result(passed, "BF16 dtype preserved through FFI" if passed
-                               else "BF16 dtype preservation failed")
+        return print_test_result(
+            passed,
+            (
+                "BF16 dtype preserved through FFI"
+                if passed
+                else "BF16 dtype preservation failed"
+            ),
+        )
 
     except Exception as e:
-        return print_test_result(False, f"Exception during dtype preservation test: {e}")
+        return print_test_result(
+            False, f"Exception during dtype preservation test: {e}"
+        )
 
 
 def test_4_bf16_fp32_numerical_differences():
@@ -243,24 +284,28 @@ def test_4_bf16_fp32_numerical_differences():
     if not METAL_AVAILABLE:
         return print_test_result(False, "Metal extension not available")
 
-    if not hasattr(torch, 'bfloat16'):
+    if not hasattr(torch, "bfloat16"):
         return print_test_result(False, "BFloat16 not available in this PyTorch build")
 
     try:
         # Test with multiple tensor sizes and configurations
         test_configs = [
-            (1, 1, 32, 32),   # Small test
-            (1, 4, 64, 64),   # Medium test
+            (1, 1, 32, 32),  # Small test
+            (1, 4, 64, 64),  # Medium test
             (2, 8, 128, 64),  # Larger test
         ]
 
         all_passed = True
 
         for batch_size, num_heads, seq_len, head_dim in test_configs:
-            print(f"\nTesting config: batch={batch_size}, heads={num_heads}, seq_len={seq_len}, head_dim={head_dim}")
+            print(
+                f"\nTesting config: batch={batch_size}, heads={num_heads}, seq_len={seq_len}, head_dim={head_dim}"
+            )
 
             # Create test tensors in fp32
-            q_fp32, k_fp32, v_fp32 = create_test_tensors(batch_size, num_heads, seq_len, head_dim, torch.float32)
+            q_fp32, k_fp32, v_fp32 = create_test_tensors(
+                batch_size, num_heads, seq_len, head_dim, torch.float32
+            )
 
             # Convert to bf16
             q_bf16 = q_fp32.to(torch.bfloat16)
@@ -268,8 +313,12 @@ def test_4_bf16_fp32_numerical_differences():
             v_bf16 = v_fp32.to(torch.bfloat16)
 
             # Compute attention in both precisions
-            output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_fp32, k_fp32, v_fp32)
-            output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(q_bf16, k_bf16, v_bf16)
+            output_fp32 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                q_fp32, k_fp32, v_fp32
+            )
+            output_bf16 = metal_sdpa_extension.metal_scaled_dot_product_attention(
+                q_bf16, k_bf16, v_bf16
+            )
 
             # Convert bf16 output to fp32 for numerical comparison
             output_bf16_as_fp32 = output_bf16.to(torch.float32)
@@ -300,17 +349,25 @@ def test_4_bf16_fp32_numerical_differences():
             # Validate error is within acceptable ranges for bf16
             # BF16 has ~3 decimal digits of precision, so we expect some error
             abs_error_ok = max_abs_error < 1e-2  # 0.01 absolute error
-            rel_error_ok = max_rel_error < 0.2   # 20% relative error (generous for bf16)
-            bias_ok = abs(mean_bias) < 1e-3      # No systematic bias
+            rel_error_ok = max_rel_error < 0.2  # 20% relative error (generous for bf16)
+            bias_ok = abs(mean_bias) < 1e-3  # No systematic bias
 
             config_passed = abs_error_ok and rel_error_ok and bias_ok
             all_passed = all_passed and config_passed
 
             status = "✓" if config_passed else "✗"
-            print(f"  {status} Config result: abs_err_ok={abs_error_ok}, rel_err_ok={rel_error_ok}, bias_ok={bias_ok}")
+            print(
+                f"  {status} Config result: abs_err_ok={abs_error_ok}, rel_err_ok={rel_error_ok}, bias_ok={bias_ok}"
+            )
 
-        return print_test_result(all_passed, "Numerical differences within acceptable ranges" if all_passed
-                               else "Numerical differences exceed acceptable thresholds")
+        return print_test_result(
+            all_passed,
+            (
+                "Numerical differences within acceptable ranges"
+                if all_passed
+                else "Numerical differences exceed acceptable thresholds"
+            ),
+        )
 
     except Exception as e:
         return print_test_result(False, f"Exception during numerical analysis: {e}")
@@ -340,7 +397,7 @@ def main():
     # Summary
     print(f"\n{'='*60}")
     print("TEST SUMMARY")
-    print('='*60)
+    print("=" * 60)
 
     passed_count = sum(test_results)
     total_count = len(test_results)
@@ -355,7 +412,9 @@ def main():
         print("1. Check the failed tests above for specific error messages")
         print("2. Run test_bf16_ffi_conversion.py for deeper FFI boundary analysis")
         print("3. Examine the Metal kernel implementations for bf16 support")
-        print("4. Check if bf16 tensors are being inadvertently converted to other types")
+        print(
+            "4. Check if bf16 tensors are being inadvertently converted to other types"
+        )
 
 
 if __name__ == "__main__":

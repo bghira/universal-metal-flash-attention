@@ -5,8 +5,8 @@ This module provides direct access to the type management functions implemented
 in the C++ extension for testing and advanced usage.
 """
 
-import sys
 import os
+import sys
 
 try:
     # Import the compiled extension
@@ -28,12 +28,27 @@ try:
     BlockSizeConfig = _ext.BlockSizeConfig
 
     # Re-export main functions
-    quantized_scaled_dot_product_attention_unified = _ext.quantized_scaled_dot_product_attention_unified
+    quantized_scaled_dot_product_attention_unified = (
+        _ext.quantized_scaled_dot_product_attention_unified
+    )
     quantized_scaled_dot_product_attention = _ext.quantized_scaled_dot_product_attention
+    sparse_indexer_scores = _ext.sparse_indexer_scores
 
     # Re-export utility functions
     is_metal_available = _ext.is_metal_available
     get_version = _ext.get_version
+
+    # Re-export MLA class and functions
+    try:
+        MlaContext = _ext.MlaContext
+        mla_create_context = _ext.mla_create_context
+        mla_destroy_context = _ext.mla_destroy_context
+        mla_init_weights = _ext.mla_init_weights
+        mla_load_weights = _ext.mla_load_weights
+        mla_forward = _ext.mla_forward
+    except AttributeError:
+        # MLA functions not yet bound in C++ extension
+        pass
 
     _EXTENSION_AVAILABLE = True
 
@@ -65,6 +80,9 @@ except ImportError as e:
     def calculate_expected_buffer_size(*args, **kwargs):
         raise RuntimeError(f"Extension not available: {_import_error}")
 
+    def sparse_indexer_scores(*args, **kwargs):
+        raise RuntimeError(f"Extension not available: {_import_error}")
+
 
 def is_available():
     """Check if the Metal SDPA FFI extension is available."""
@@ -87,7 +105,6 @@ __all__ = [
     "validate_output_buffer_type",
     "convert_output_precision",
     "calculate_expected_buffer_size",
-
     # Configuration classes
     "QuantizationConfig",
     "OutputPrecision",
@@ -95,11 +112,17 @@ __all__ = [
     "QuantizationPrecision",
     "HybridStrategy",
     "BlockSizeConfig",
-
     # Main functions
     "quantized_scaled_dot_product_attention_unified",
     "quantized_scaled_dot_product_attention",
-
+    "sparse_indexer_scores",
+    # MLA class and functions
+    "MlaContext",
+    "mla_create_context",
+    "mla_destroy_context",
+    "mla_init_weights",
+    "mla_load_weights",
+    "mla_forward",
     # Utility functions
     "is_metal_available",
     "get_version",

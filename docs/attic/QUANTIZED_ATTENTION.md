@@ -121,7 +121,7 @@ commandBuffer?.waitUntilCompleted()
 - `mfa_set_scale_arrays` – optional helper to pass precomputed per-block scales when using
   the FFI directly.
 
-See [API.md](../API.md) for complete signatures.
+See [`mfa_ffi.h`](../../Sources/MFAFFI/include/mfa_ffi.h) for complete signatures.
 
 ## Performance at a Glance
 

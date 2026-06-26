@@ -6,21 +6,22 @@ This is a minimal test that shows the current implementation produces
 NaN values when given non-contiguous tensors from permute operations.
 """
 
-import sys
 import os
+import sys
 
 # Add parent directory to path
 parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, parent_dir)
 
-import torch
 import metal_sdpa_extension
+import torch
+
 
 def test_non_contiguous_issue():
     """Test that demonstrates NaN output with non-contiguous tensors."""
 
     print("Testing Non-Contiguous Tensor Handling")
-    print("="*50)
+    print("=" * 50)
 
     # Create FLUX layout tensors [B,H,S,D]
     batch, heads, seq_len, dim = 1, 12, 77, 64
@@ -31,12 +32,21 @@ def test_non_contiguous_issue():
 
     # Create tensors in FLUX layout
     torch.manual_seed(42)
-    q_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-    k_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
-    v_flux = torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device) * 0.1
+    q_flux = (
+        torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+        * 0.1
+    )
+    k_flux = (
+        torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+        * 0.1
+    )
+    v_flux = (
+        torch.randn(batch, heads, seq_len, dim, dtype=torch.float16, device=device)
+        * 0.1
+    )
 
     print("Test 1: Contiguous FLUX layout tensors")
-    print("-"*40)
+    print("-" * 40)
     print(f"Shape: {list(q_flux.shape)}")
     print(f"Contiguous: {q_flux.is_contiguous()}")
     print(f"Stride: {q_flux.stride()}")
@@ -56,7 +66,7 @@ def test_non_contiguous_issue():
         print(f"❌ FAIL: Exception - {e}")
 
     print("\nTest 2: Non-contiguous permuted tensors")
-    print("-"*40)
+    print("-" * 40)
 
     # Permute to Metal layout [B,S,H,D] - creates non-contiguous views
     q_metal = q_flux.permute(0, 2, 1, 3)
@@ -89,7 +99,7 @@ def test_non_contiguous_issue():
         print("   This might be a GPU memory access fault")
 
     print("\nTest 3: Contiguous copies of permuted tensors")
-    print("-"*40)
+    print("-" * 40)
 
     # Make contiguous copies
     q_contig = q_metal.contiguous()
@@ -117,11 +127,12 @@ def test_non_contiguous_issue():
     except Exception as e:
         print(f"❌ FAIL: Exception - {e}")
 
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("Summary:")
     print("The tests show that non-contiguous tensors (from permute)")
     print("produce NaN values or cause memory faults, confirming the")
     print("need for proper stride handling in the Metal kernels.")
+
 
 if __name__ == "__main__":
     test_non_contiguous_issue()

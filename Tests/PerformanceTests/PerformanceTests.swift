@@ -4,8 +4,19 @@ import XCTest
 
 @testable import MFABridge
 
+private enum PerformanceTestEnvironment {
+  static var shouldSkipOnCI: Bool {
+    let env = ProcessInfo.processInfo.environment
+    return env["CI"] != nil || env["GITHUB_ACTIONS"] != nil
+  }
+}
+
 final class PerformanceTests: XCTestCase {
   func testQuantizationPerformance() throws {
+    if PerformanceTestEnvironment.shouldSkipOnCI {
+      throw XCTSkip("Quantization performance test skipped on CI runners")
+    }
+
     let sizes = [1024, 4096, 16384, 65536]
 
     for size in sizes {

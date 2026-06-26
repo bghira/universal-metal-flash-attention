@@ -20,6 +20,11 @@ examples/python/src/**/__pycache__/
 *.pyc
 *.pyo
 
+# PyTorch extension build artifacts
+examples/pytorch-custom-op-ffi/build/
+examples/pytorch-custom-op-ffi/*.egg-info/
+examples/pytorch-custom-op-ffi/.pytest_cache/
+
 # Bindgen output (contains local paths)
 examples/rust/target/debug/build/*/out/
 examples/rust/target/release/build/*/out/

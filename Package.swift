@@ -1,4 +1,4 @@
-// swift-tools-version: 5.10
+// swift-tools-version: 6.0
 
 import PackageDescription
 
@@ -6,7 +6,7 @@ let package = Package(
   name: "universal-metal-flash-attention",
   platforms: [
     .iOS(.v17),
-    .macOS(.v14),
+    .macOS(.v15),
     .tvOS(.v17),
     .visionOS(.v1),
   ],
@@ -28,6 +28,7 @@ let package = Package(
       ],
       publicHeadersPath: "include",
       swiftSettings: [
+        .enableUpcomingFeature("StrictConcurrency"),
         .unsafeFlags(["-O"], .when(configuration: .release)),
         .unsafeFlags(["-Ounchecked"], .when(configuration: .debug)),
       ]
@@ -44,13 +45,19 @@ let package = Package(
     ),
     .testTarget(
       name: "MFAFFITests",
-      dependencies: ["MFAFFI"]
+      dependencies: ["MFAFFI"],
+      swiftSettings: [
+        .enableUpcomingFeature("StrictConcurrency"),
+      ]
     ),
     .testTarget(
       name: "FlashAttentionTests",
       dependencies: [
         "MFABridge",
         .product(name: "FlashAttention", package: "metal-flash-attention"),
+      ],
+      swiftSettings: [
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
     .testTarget(
@@ -58,6 +65,9 @@ let package = Package(
       dependencies: [
         "MFABridge",
         .product(name: "FlashAttention", package: "metal-flash-attention"),
+      ],
+      swiftSettings: [
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
     .testTarget(
@@ -65,6 +75,9 @@ let package = Package(
       dependencies: [
         "MFABridge",
         .product(name: "FlashAttention", package: "metal-flash-attention"),
+      ],
+      swiftSettings: [
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
   ]
