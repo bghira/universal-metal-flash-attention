@@ -11,6 +11,20 @@ private extension NSLock {
   }
 }
 
+// Compile options for runtime-compiled Metal kernels. PyTorch's MPS backend
+// (once imported) lowers the device's default Metal language version, which
+// disables `__HAVE_BFLOAT__` and makes generated bfloat kernels fail with
+// "unknown type name 'bfloat'". Pinning MSL 3.2 restores native bfloat and
+// overrides that — verified via the diagnose-runner workflow.
+func mfaCompileOptions(mathSafe: Bool = false) -> MTLCompileOptions {
+  let options = MTLCompileOptions()
+  options.languageVersion = .version3_2
+  if mathSafe {
+    options.mathMode = .safe
+  }
+  return options
+}
+
 /// C FFI defines: FP16=0, BF16=1, FP32=2
 /// Swift expects: FP32=0, FP16=1, BF16=2
 private func convertCFFIPrecisionToSwift(_ cPrecision: Int32) -> Int32 {
@@ -215,7 +229,10 @@ final class MFAContext {
     }
 
     do {
-      let library = try device.makeLibrary(source: Self.maskKernelSource, options: nil)
+      let library = try device.makeLibrary(
+        source: Self.maskKernelSource,
+        options: mfaCompileOptions()
+      )
       guard let function = library.makeFunction(name: "mfa_prepare_mask") else {
         throw MaskPreparationError.pipelineCreationFailed
       }
@@ -1025,7 +1042,7 @@ public func mfa_attention_forward(
 
       // Get the Metal function using native kernel source (no string replacement!)
       let source = kernel.createSource()
-      let library = try mfaContext.device.makeLibrary(source: source, options: nil)
+      let library = try mfaContext.device.makeLibrary(source: source, options: mfaCompileOptions())
       let function = try library.makeFunction(name: "attention", constantValues: constants)
 
       // Create pipeline descriptor with proper settings for Apple Silicon
@@ -1309,7 +1326,35 @@ public func mfa_has_native_bfloat() -> Int32 {
   }
   """
   do {
-    _ = try device.makeLibrary(source: source, options: nil)
+    _ = try device.makeLibrary(source: source, options: mfaCompileOptions())
+    return 1
+  } catch {
+    return 0
+  }
+}
+
+/// As `mfa_has_native_bfloat` but compiles with `languageVersion = .version3_2`.
+/// Diagnostics: determines whether forcing MSL 3.2 overrides whatever disables
+/// `__HAVE_BFLOAT__` after torch.mps is imported.
+@_cdecl("mfa_has_native_bfloat_msl32")
+public func mfa_has_native_bfloat_msl32() -> Int32 {
+  guard let device = MTLCreateSystemDefaultDevice() else { return 0 }
+  let source = """
+  #include <metal_stdlib>
+  using namespace metal;
+
+  #if !defined(__HAVE_BFLOAT__)
+  #error "NO_NATIVE_BFLOAT"
+  #endif
+
+  kernel void __bfloat_probe(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+    x[i] = 0;
+  }
+  """
+  let options = MTLCompileOptions()
+  options.languageVersion = .version3_2
+  do {
+    _ = try device.makeLibrary(source: source, options: options)
     return 1
   } catch {
     return 0
@@ -2043,8 +2088,7 @@ private func dequantizeBuffer(
   """
 
   // Create Metal compute pipeline for dequantization with precision safety
-  let compileOptions = MTLCompileOptions()
-  compileOptions.mathMode = .safe // Disable fast math for numerical stability with BF16
+  let compileOptions = mfaCompileOptions(mathSafe: true)
 
   guard
     let library = try? device.makeLibrary(source: kernelSource, options: compileOptions),

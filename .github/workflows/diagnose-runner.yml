@@ -1,0 +1,153 @@
+name: Diagnose Runner
+
+# Temporary diagnostic: prints the macOS runner's hardware (chip), toolchain
+# (Xcode/SDK), and whether the runtime Metal compiler exposes native bfloat16
+# at default vs pinned MSL versions. Triggered manually or when this file
+# changes, so it adds no noise to normal CI.
+on:
+  workflow_dispatch: {}
+  push:
+    paths:
+      - .github/workflows/diagnose-runner.yml
+  pull_request:
+    paths:
+      - .github/workflows/diagnose-runner.yml
+
+jobs:
+  probe:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: OS & hardware
+        run: |
+          echo "=== sw_vers ==="
+          sw_vers
+          echo "=== chip ==="
+          system_profiler SPHardwareDataType | grep -Ei "chip|model identifier|memory"
+          echo "=== gpu / metal ==="
+          system_profiler SPDisplaysDataType | grep -Ei "chipset|metal|vendor" || true
+
+      - name: Toolchain
+        run: |
+          echo "=== xcode ==="
+          xcodebuild -version
+          echo "=== sdk ==="
+          xcrun --sdk macosx --show-sdk-version
+          xcrun --sdk macosx --show-sdk-path
+          echo "=== installed xcodes ==="
+          ls /Applications | grep -i xcode || true
+          echo "=== metal toolchain ==="
+          xcrun -sdk macosx metal --version 2>&1 || true
+
+      - name: Metal bfloat probe
+        run: |
+          cat > /tmp/probe.swift <<'SWIFT'
+          import Metal
+          guard let dev = MTLCreateSystemDefaultDevice() else {
+            print("NO METAL DEVICE")
+            exit(0)
+          }
+          print("device: \(dev.name)")
+          print("supportsFamily(apple9): \(dev.supportsFamily(.apple9))")
+
+          // Probe source: defines __HAVE_BFLOAT__ check.
+          let src = """
+          #include <metal_stdlib>
+          using namespace metal;
+
+          #if defined(__HAVE_BFLOAT__)
+          // BFLOAT_DEFINED
+          #else
+          #error NO_NATIVE_BFLOAT
+          #endif
+
+          kernel void __bfloat_probe(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+            x[i] = 0;
+          }
+
+          """
+
+          func probe(_ label: String, _ opts: MTLCompileOptions?) {
+            do {
+              _ = try dev.makeLibrary(source: src, options: opts)
+              print("\(label): bfloat ON")
+            } catch {
+              let msg = String("\(error.localizedDescription)".prefix(120))
+              let verdict = msg.contains("NO_NATIVE_BFLOAT") ? "bfloat OFF" : "compile error"
+              print("\(label): \(verdict) — \(msg)")
+            }
+          }
+
+          probe("default(options: nil)", nil)
+          if #available(macOS 11.0, *) {
+            let a = MTLCompileOptions()
+            a.languageVersion = .version3_1
+            probe("languageVersion .version3_1", a)
+            let b = MTLCompileOptions()
+            b.languageVersion = .version3_2
+            probe("languageVersion .version3_2", b)
+          }
+          SWIFT
+          swift /tmp/probe.swift
+
+  python-bfloat:
+    name: Python (after torch.mps) bfloat probe
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Build Swift package
+        run: swift build -c release
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install torch numpy pybind11
+      - name: Build extension
+        run: |
+          cd examples/pytorch-custom-op-ffi
+          python setup.py build_ext --inplace
+      - name: Compare bfloat availability before/after torch
+        run: |
+          cd examples/pytorch-custom-op-ffi
+          python - <<'PY'
+          import subprocess
+          # 1) Standalone Swift probe BEFORE torch: does the runner define __HAVE_BFLOAT__?
+          before = subprocess.run(["swift", "/tmp/probe.swift"], capture_output=True, text=True)
+          # write the probe if missing
+          if before.returncode != 0:
+              open("/tmp/probe.swift","w").write('''
+          import Metal
+          let dev = MTLCreateSystemDefaultDevice()!
+          let src = """
+          #include <metal_stdlib>
+          using namespace metal;
+          #if defined(__HAVE_BFLOAT__)
+          // ON
+          #else
+          #error OFF
+          #endif
+          kernel void p(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) { x[i]=0; }
+
+          """
+          func probe(_ l: String, _ o: MTLCompileOptions?) {
+            do { _ = try dev.makeLibrary(source: src, options: o); print("\\(l): ON") }
+            catch { print("\\(l): OFF") }
+          }
+          probe("swift-subprocess-default", nil)
+          ''')
+              before = subprocess.run(["swift", "/tmp/probe.swift"], capture_output=True, text=True)
+          print("=== Swift probe BEFORE torch ===")
+          print(before.stdout.strip() or before.stderr.strip())
+
+          # 2) Import torch (initializes MPS), then ask the extension.
+          import torch
+          print("=== torch.mps.is_available():", torch.backends.mps.is_available())
+          import metal_sdpa_extension as ext
+          print("=== extension has_native_bfloat() AFTER torch:", ext.has_native_bfloat())
+          print("=== extension has_native_bfloat_msl32() AFTER torch:", ext.has_native_bfloat_msl32())
+          PY

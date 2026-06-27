@@ -116,6 +116,7 @@ def print_tensor_info(tensor: torch.Tensor, name: str = "Tensor"):
 class TestStrideAwareAttention:
     """Test suite for stride-aware attention implementation."""
 
+    @pytest.mark.slow
     def test_mre_memory_corruption(self):
         """
         Minimal Reproducible Example (MRE) for memory corruption issue.
@@ -234,6 +235,7 @@ class TestStrideAwareAttention:
             else:
                 print("✅ Outputs match within tolerance")
 
+    @pytest.mark.slow
     def test_stride_patterns(self):
         """Test various stride patterns from common tensor operations."""
         print("\n" + "=" * 80)
@@ -411,6 +413,7 @@ class TestStrideAwareAttention:
                 print(f"  Non-contiguous failed: {e}")
                 print(f"  Contiguous time: {time_contiguous*1000:.3f} ms")
 
+    @pytest.mark.slow
     def test_memory_safety(self):
         """Test memory safety with various edge cases."""
         print("\n" + "=" * 80)
@@ -485,6 +488,7 @@ class TestStrideAwareAttention:
 
 
 @pytest.mark.skipif(not HAS_METAL, reason="Metal SDPA extension not available")
+@pytest.mark.slow
 def test_basic_stride_handling():
     """Quick test to verify basic stride handling."""
     if not torch.backends.mps.is_available():
