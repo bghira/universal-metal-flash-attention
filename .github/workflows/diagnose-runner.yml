@@ -90,3 +90,63 @@ jobs:
           }
           SWIFT
           swift /tmp/probe.swift
+
+  python-bfloat:
+    name: Python (after torch.mps) bfloat probe
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Build Swift package
+        run: swift build -c release
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install torch numpy pybind11
+      - name: Build extension
+        run: |
+          cd examples/pytorch-custom-op-ffi
+          python setup.py build_ext --inplace
+      - name: Compare bfloat availability before/after torch
+        run: |
+          cd examples/pytorch-custom-op-ffi
+          python - <<'PY'
+          import subprocess
+          # 1) Standalone Swift probe BEFORE torch: does the runner define __HAVE_BFLOAT__?
+          before = subprocess.run(["swift", "/tmp/probe.swift"], capture_output=True, text=True)
+          # write the probe if missing
+          if before.returncode != 0:
+              open("/tmp/probe.swift","w").write('''
+          import Metal
+          let dev = MTLCreateSystemDefaultDevice()!
+          let src = """
+          #include <metal_stdlib>
+          using namespace metal;
+          #if defined(__HAVE_BFLOAT__)
+          // ON
+          #else
+          #error OFF
+          #endif
+          kernel void p(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) { x[i]=0; }
+
+          """
+          func probe(_ l: String, _ o: MTLCompileOptions?) {
+            do { _ = try dev.makeLibrary(source: src, options: o); print("\\(l): ON") }
+            catch { print("\\(l): OFF") }
+          }
+          probe("swift-subprocess-default", nil)
+          ''')
+              before = subprocess.run(["swift", "/tmp/probe.swift"], capture_output=True, text=True)
+          print("=== Swift probe BEFORE torch ===")
+          print(before.stdout.strip() or before.stderr.strip())
+
+          # 2) Import torch (initializes MPS), then ask the extension.
+          import torch
+          print("=== torch.mps.is_available():", torch.backends.mps.is_available())
+          import metal_sdpa_extension as ext
+          print("=== extension has_native_bfloat() AFTER torch:", ext.has_native_bfloat())
+          PY
