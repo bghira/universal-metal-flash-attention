@@ -149,4 +149,5 @@ jobs:
           print("=== torch.mps.is_available():", torch.backends.mps.is_available())
           import metal_sdpa_extension as ext
           print("=== extension has_native_bfloat() AFTER torch:", ext.has_native_bfloat())
+          print("=== extension has_native_bfloat_msl32() AFTER torch:", ext.has_native_bfloat_msl32())
           PY

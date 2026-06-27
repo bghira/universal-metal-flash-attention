@@ -261,6 +261,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("has_native_bfloat", []() { return mfa_has_native_bfloat() != 0; },
           "True if the runtime Metal compiler provides native bfloat16 support");
 
+    m.def("has_native_bfloat_msl32", []() { return mfa_has_native_bfloat_msl32() != 0; },
+          "True if forcing MSL 3.2 enables native bfloat16 (diagnostic)");
+
     m.def("get_version", []() {
         int major, minor, patch;
         mfa_get_version(&major, &minor, &patch);

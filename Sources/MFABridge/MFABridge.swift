@@ -1316,7 +1316,34 @@ public func mfa_has_native_bfloat() -> Int32 {
   }
 }
 
-@_cdecl("mfa_get_version")
+/// As `mfa_has_native_bfloat` but compiles with `languageVersion = .version3_2`.
+/// Diagnostics: determines whether forcing MSL 3.2 overrides whatever disables
+/// `__HAVE_BFLOAT__` after torch.mps is imported.
+@_cdecl("mfa_has_native_bfloat_msl32")
+public func mfa_has_native_bfloat_msl32() -> Int32 {
+  guard let device = MTLCreateSystemDefaultDevice() else { return 0 }
+  let source = """
+  #include <metal_stdlib>
+  using namespace metal;
+
+  #if !defined(__HAVE_BFLOAT__)
+  #error "NO_NATIVE_BFLOAT"
+  #endif
+
+  kernel void __bfloat_probe(device float* x [[buffer(0)]], uint i [[thread_position_in_grid]]) {
+    x[i] = 0;
+  }
+  """
+  let options = MTLCompileOptions()
+  options.languageVersion = .version3_2
+  do {
+    _ = try device.makeLibrary(source: source, options: options)
+    return 1
+  } catch {
+    return 0
+  }
+}
+
 public func mfa_get_version(
   _ major: UnsafeMutablePointer<Int32>?,
   _ minor: UnsafeMutablePointer<Int32>?,
