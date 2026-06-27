@@ -26,7 +26,7 @@ jobs:
           echo "=== chip ==="
           system_profiler SPHardwareDataType | grep -Ei "chip|model identifier|memory"
           echo "=== gpu / metal ==="
-          system_profiler SPDisplaysDataType | grep -Ei "chipset|metal|vendor"
+          system_profiler SPDisplaysDataType | grep -Ei "chipset|metal|vendor" || true
 
       - name: Toolchain
         run: |
