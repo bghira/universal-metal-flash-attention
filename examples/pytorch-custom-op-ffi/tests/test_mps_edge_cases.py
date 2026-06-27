@@ -54,6 +54,7 @@ class TestMPSMatrixMultiplication:
                 # Some other error - re-raise
                 raise
 
+    @pytest.mark.slow
     def test_large_matrix_multiplication(self, metal_device):
         """Test with large matrices that stress MPS."""
         # Large matrices can reveal accumulator precision issues
