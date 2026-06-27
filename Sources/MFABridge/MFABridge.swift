@@ -1344,6 +1344,7 @@ public func mfa_has_native_bfloat_msl32() -> Int32 {
   }
 }
 
+@_cdecl("mfa_get_version")
 public func mfa_get_version(
   _ major: UnsafeMutablePointer<Int32>?,
   _ minor: UnsafeMutablePointer<Int32>?,
