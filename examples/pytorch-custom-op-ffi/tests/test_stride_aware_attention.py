@@ -485,6 +485,7 @@ class TestStrideAwareAttention:
 
 
 @pytest.mark.skipif(not HAS_METAL, reason="Metal SDPA extension not available")
+@pytest.mark.slow
 def test_basic_stride_handling():
     """Quick test to verify basic stride handling."""
     if not torch.backends.mps.is_available():

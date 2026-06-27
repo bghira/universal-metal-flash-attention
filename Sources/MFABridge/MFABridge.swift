@@ -229,7 +229,10 @@ final class MFAContext {
     }
 
     do {
-      let library = try device.makeLibrary(source: Self.maskKernelSource, options: mfaCompileOptions())
+      let library = try device.makeLibrary(
+        source: Self.maskKernelSource,
+        options: mfaCompileOptions()
+      )
       guard let function = library.makeFunction(name: "mfa_prepare_mask") else {
         throw MaskPreparationError.pipelineCreationFailed
       }
