@@ -17,7 +17,7 @@ jobs:
   probe:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: OS & hardware
         run: |
@@ -95,7 +95,7 @@ jobs:
     name: Python (after torch.mps) bfloat probe
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: actions/setup-python@v6
