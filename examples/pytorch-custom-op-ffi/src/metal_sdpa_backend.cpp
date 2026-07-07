@@ -6,6 +6,7 @@
 #include <torch/nn/functional.h>  // For torch::nn::functional::pad
 #include <c10/util/Exception.h>
 #include <mutex>
+#include <unordered_set>
 #include <stdexcept>
 #include <iostream>
 #include <cinttypes>  // For PRId64, PRIu32, etc.

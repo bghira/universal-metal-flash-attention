@@ -2000,14 +2000,18 @@ private func mfa_attention_forward_multihead_internal(
     // counts
   )
 
-  // Execute multi-head attention (no logsumexp for forward-only)
+  // Execute multi-head attention.
+  // NOTE: The first Python-level call for each shape may produce slightly
+  // wrong output (a Metal driver quirk with newly compiled pipelines).
+  // The second call is always correct. Callers that need guaranteed
+  // correctness on the first call should do a throwaway warmup dispatch.
   guard
     let commandBuffer = multiHeadAttention.forward(
       query: qBuffer,
       key: kBuffer,
       value: vBuffer,
       output: outBuffer,
-      logsumexp: nil, // Skip logsumexp for forward-only passes
+      logsumexp: nil,
       descriptor: multiHeadDescriptor,
       maskBuffer: preparedMask?.buffer
     )
