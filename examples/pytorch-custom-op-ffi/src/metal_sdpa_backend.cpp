@@ -6,6 +6,7 @@
 #include <torch/nn/functional.h>  // For torch::nn::functional::pad
 #include <c10/util/Exception.h>
 #include <mutex>
+#include <unordered_set>
 #include <stdexcept>
 #include <iostream>
 #include <cinttypes>  // For PRId64, PRIu32, etc.
@@ -154,40 +155,36 @@ std::string scalar_type_to_string(torch::ScalarType type) {
     }
 }
 
-// Convert FLUX layout [B,H,S,D] to Metal layout [B,S,H,D]
+// Convert FLUX layout [B,H,S,D] to the layout the MFA multi-head kernel
+// expects. The generated multi-head kernel offsets buffers as
+// (batch * num_heads + head) * seq * dim, i.e. it assumes a contiguous
+// [B,H,S,D] layout. The earlier BHSD->BSHD permute produced a non-contiguous
+// view whose strides the kernel never received, so only head 0 was written.
+// Pass BHSD through (contiguous) to match the kernel's offset math.
 torch::Tensor convert_flux_to_metal_layout(const torch::Tensor& flux_tensor) {
     if (flux_tensor.dim() != 4) {
         throw std::runtime_error("convert_flux_to_metal_layout: Input must be 4D tensor");
     }
 
-    // FLUX [B,H,S,D] -> Metal [B,S,H,D]
-    // This is equivalent to: permute(0, 2, 1, 3)
-    // MFA handles non-contiguous strides efficiently, no need for contiguous()
-    auto metal_tensor = flux_tensor.permute({0, 2, 1, 3});
+    auto metal_tensor = flux_tensor.contiguous();
 
-    printf("🔄 Converted FLUX->Metal: %s dtype=%s -> %s dtype=%s\n",
+    printf("🔄 FLUX->Metal (passthrough BHSD): %s dtype=%s\n",
            ("[" + std::to_string(flux_tensor.size(0)) + "," + std::to_string(flux_tensor.size(1)) + "," + std::to_string(flux_tensor.size(2)) + "," + std::to_string(flux_tensor.size(3)) + "]").c_str(),
-           scalar_type_to_string(flux_tensor.scalar_type()).c_str(),
-           ("[" + std::to_string(metal_tensor.size(0)) + "," + std::to_string(metal_tensor.size(1)) + "," + std::to_string(metal_tensor.size(2)) + "," + std::to_string(metal_tensor.size(3)) + "]").c_str(),
-           scalar_type_to_string(metal_tensor.scalar_type()).c_str());
+           scalar_type_to_string(flux_tensor.scalar_type()).c_str());
 
     return metal_tensor;
 }
 
-// Convert Metal layout [B,S,H,D] back to FLUX layout [B,H,S,D]
+// Convert Metal layout back to FLUX layout [B,H,S,D]. Since the kernel now
+// operates in BHSD directly, this is a passthrough too.
 torch::Tensor convert_metal_to_flux_layout(const torch::Tensor& metal_tensor) {
     if (metal_tensor.dim() != 4) {
         throw std::runtime_error("convert_metal_to_flux_layout: Input must be 4D tensor");
     }
 
-    // Metal [B,S,H,D] -> FLUX [B,H,S,D]
-    // This is equivalent to: permute(0, 2, 1, 3)
-    // MFA handles non-contiguous strides efficiently, no need for contiguous()
-    auto flux_tensor = metal_tensor.permute({0, 2, 1, 3});
+    auto flux_tensor = metal_tensor.contiguous();
 
-    printf("🔄 Converted Metal->FLUX: %s dtype=%s -> %s dtype=%s\n",
-           ("[" + std::to_string(metal_tensor.size(0)) + "," + std::to_string(metal_tensor.size(1)) + "," + std::to_string(metal_tensor.size(2)) + "," + std::to_string(metal_tensor.size(3)) + "]").c_str(),
-           scalar_type_to_string(metal_tensor.scalar_type()).c_str(),
+    printf("🔄 Metal->FLUX (passthrough BHSD): %s dtype=%s\n",
            ("[" + std::to_string(flux_tensor.size(0)) + "," + std::to_string(flux_tensor.size(1)) + "," + std::to_string(flux_tensor.size(2)) + "," + std::to_string(flux_tensor.size(3)) + "]").c_str(),
            scalar_type_to_string(flux_tensor.scalar_type()).c_str());
 
@@ -995,7 +992,12 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
         num_heads = 1;
         head_dim = static_cast<uint16_t>(q_sizes[1]);
     } else if (q_sizes.size() == 4) {
-        printf("📋 Converting PyTorch layout [B,H,S,D] to Metal layout [B,S,H,D]\n");
+        // PyTorch SDPA passes [B,H,S,D] (BHSD). The MFA multi-head kernel
+        // offsets buffers as (batch*num_heads+head)*seq*dim, i.e. it expects a
+        // contiguous BHSD layout. Pass BHSD straight through (no BHSD->BSHD
+        // permute) and extract dims as BHSD so the kernel's offset math matches
+        // the buffer layout. (The earlier BSHD permute produced a non-contiguous
+        // view the kernel couldn't index, so only head 0 was written.)
         q_tensor = convert_flux_to_metal_layout(q_tensor);
         k_tensor = convert_flux_to_metal_layout(k_tensor);
         v_tensor = convert_flux_to_metal_layout(v_tensor);
@@ -1003,13 +1005,13 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
 
         auto q_metal_sizes = q_tensor.sizes();
         batch_size = static_cast<uint32_t>(q_metal_sizes[0]);
-        seq_len_q = static_cast<uint32_t>(q_metal_sizes[1]);
-        seq_len_kv = static_cast<uint32_t>(k_tensor.sizes()[1]);
-        num_heads = static_cast<uint32_t>(q_metal_sizes[2]);
+        num_heads = static_cast<uint32_t>(q_metal_sizes[1]);   // BHSD: heads
+        seq_len_q = static_cast<uint32_t>(q_metal_sizes[2]);   // BHSD: seq
+        seq_len_kv = static_cast<uint32_t>(k_tensor.sizes()[2]);
         head_dim = static_cast<uint16_t>(q_metal_sizes[3]);
 
-        printf("📊 Regular attention dimensions: batch=%u, seq_q=%u, seq_kv=%u, heads=%u, dim=%u\n",
-               batch_size, seq_len_q, seq_len_kv, num_heads, head_dim);
+        printf("📊 Regular attention dimensions (BHSD): batch=%u, heads=%u, seq_q=%u, seq_kv=%u, dim=%u\n",
+               batch_size, num_heads, seq_len_q, seq_len_kv, head_dim);
     } else {
         throw std::runtime_error("Unsupported tensor dimensions. Expected 2D (seq_len, head_dim) or 4D (batch, seq_len, num_heads, head_dim)");
     }

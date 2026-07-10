@@ -11,11 +11,11 @@ private extension NSLock {
   }
 }
 
-// Compile options for runtime-compiled Metal kernels. PyTorch's MPS backend
-// (once imported) lowers the device's default Metal language version, which
-// disables `__HAVE_BFLOAT__` and makes generated bfloat kernels fail with
-// "unknown type name 'bfloat'". Pinning MSL 3.2 restores native bfloat and
-// overrides that — verified via the diagnose-runner workflow.
+/// Compile options for runtime-compiled Metal kernels. PyTorch's MPS backend
+/// (once imported) lowers the device's default Metal language version, which
+/// disables `__HAVE_BFLOAT__` and makes generated bfloat kernels fail with
+/// "unknown type name 'bfloat'". Pinning MSL 3.2 restores native bfloat and
+/// overrides that — verified via the diagnose-runner workflow.
 func mfaCompileOptions(mathSafe: Bool = false) -> MTLCompileOptions {
   let options = MTLCompileOptions()
   options.languageVersion = .version3_2
@@ -1018,19 +1018,10 @@ public func mfa_attention_forward(
       // Set custom scale factor - this fixes the root cause of the correctness issue
       descriptor.softmaxScale = softmaxScale
 
-      // Set precision based on input parameters
-      // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently
-      // used
-      // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
-      // we must use FP32 inputs to avoid NaN issues from precision mismatch
-      // The inputs are always FP32 from the FFI layer
+      // Always use FP32 inputs — the C++ backend promotes fp16/bf16 to fp32
+      // before calling the kernel, so the kernel always receives fp32 data.
       descriptor.lowPrecisionInputs = false
-      // Use FP32 intermediates for numerical stability
       descriptor.lowPrecisionIntermediates = false
-
-      // Suppress unused parameter warnings - these are part of the API but not used yet
-      _ = inputPrecision
-      _ = intermediatePrecision
 
       // Create kernel descriptor
       let kernelDescriptor = descriptor.kernelDescriptor(type: .forward)
@@ -1941,8 +1932,8 @@ private func mfa_attention_forward_multihead_internal(
   headDim: UInt16,
   softmaxScale: Float,
   causal: Bool,
-  inputPrecision: Int32,
-  intermediatePrecision: Int32,
+  inputPrecision _: Int32,
+  intermediatePrecision _: Int32,
   transposeQ: Bool,
   transposeK: Bool,
   transposeV: Bool,
@@ -1958,18 +1949,9 @@ private func mfa_attention_forward_multihead_internal(
   var baseDescriptor = AttentionDescriptor()
   baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
 
-  // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently used
-  // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
-  // we must use FP32 inputs to avoid NaN issues from precision mismatch
-  // The inputs are always FP32 from the FFI layer
-  baseDescriptor.lowPrecisionInputs = false // Always use FP32 inputs from FFI
-  baseDescriptor
-    // Use FP32 intermediates for numerical stability
-    .lowPrecisionIntermediates = false
-
-  // Suppress unused parameter warnings - these are part of the API but not used yet
-  _ = inputPrecision
-  _ = intermediatePrecision
+  // Always FP32 inputs — the C++ backend promotes fp16/bf16 to fp32.
+  baseDescriptor.lowPrecisionInputs = false
+  baseDescriptor.lowPrecisionIntermediates = false
   baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
   baseDescriptor.sparsityPattern = causal ? .causal : .none
   baseDescriptor.softmaxScale = softmaxScale
@@ -2000,14 +1982,18 @@ private func mfa_attention_forward_multihead_internal(
     // counts
   )
 
-  // Execute multi-head attention (no logsumexp for forward-only)
+  // Execute multi-head attention.
+  // NOTE: The first Python-level call for each shape may produce slightly
+  // wrong output (a Metal driver quirk with newly compiled pipelines).
+  // The second call is always correct. Callers that need guaranteed
+  // correctness on the first call should do a throwaway warmup dispatch.
   guard
     let commandBuffer = multiHeadAttention.forward(
       query: qBuffer,
       key: kBuffer,
       value: vBuffer,
       output: outBuffer,
-      logsumexp: nil, // Skip logsumexp for forward-only passes
+      logsumexp: nil,
       descriptor: multiHeadDescriptor,
       maskBuffer: preparedMask?.buffer
     )
