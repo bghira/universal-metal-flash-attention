@@ -12,6 +12,7 @@ import torch
 
 @pytest.mark.metal
 @pytest.mark.layout
+@pytest.mark.slow
 class TestLayoutConversions:
     """Test layout conversions between FLUX and Metal formats."""
 
