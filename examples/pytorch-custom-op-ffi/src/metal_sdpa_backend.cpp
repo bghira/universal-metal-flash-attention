@@ -1,6 +1,7 @@
 #include "metal_sdpa_backend.h"
 #include "mps_utils.h"
 #include <torch/torch.h>
+#include <torch/mps.h>
 #include <ATen/ATen.h>
 #include <ATen/ops/scaled_dot_product_attention_native.h>
 #include <torch/nn/functional.h>  // For torch::nn::functional::pad
@@ -974,6 +975,20 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
     float softmax_scale,
     bool use_mps_buffers
 ) {
+    // Force contiguous BHSD before any Metal buffer access. FLUX feeds
+    // transposed/non-contiguous views; the kernel assumes contiguous BHSD.
+    // Must synchronize after .contiguous() — the copy is enqueued on the MPS
+    // command queue but the kernel reads the buffer immediately via a separate
+    // Metal command queue. Without sync, the kernel sees stale/uninitialised
+    // data.
+    bool did_contiguous = false;
+    if (!q_tensor.is_contiguous()) { q_tensor = q_tensor.contiguous(); did_contiguous = true; }
+    if (!k_tensor.is_contiguous()) { k_tensor = k_tensor.contiguous(); did_contiguous = true; }
+    if (!v_tensor.is_contiguous()) { v_tensor = v_tensor.contiguous(); did_contiguous = true; }
+    if (did_contiguous && use_mps_buffers) {
+        torch::mps::synchronize();
+    }
+
     auto q_sizes = q_tensor.sizes();
     auto k_sizes = k_tensor.sizes();
     auto v_sizes = v_tensor.sizes();
