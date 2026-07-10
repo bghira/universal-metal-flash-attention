@@ -981,11 +981,22 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
     // command queue but the kernel reads the buffer immediately via a separate
     // Metal command queue. Without sync, the kernel sees stale/uninitialised
     // data.
+    //
+    // Also synchronize on entry for already-contiguous tensors: PyTorch may
+    // have queued producer ops (matmul, activation, etc.) on the MPS command
+    // queue that write to the tensor's buffer. UMFA's kernel runs on a
+    // separate Metal command queue and would read the buffer before those
+    // writes complete. This matches the torch.mps.synchronize() the SimpleTuner
+    // wrapper now does, but makes the extension safe when called directly.
+    if (use_mps_buffers) {
+        torch::mps::synchronize();
+    }
+
     bool did_contiguous = false;
     if (!q_tensor.is_contiguous()) { q_tensor = q_tensor.contiguous(); did_contiguous = true; }
     if (!k_tensor.is_contiguous()) { k_tensor = k_tensor.contiguous(); did_contiguous = true; }
     if (!v_tensor.is_contiguous()) { v_tensor = v_tensor.contiguous(); did_contiguous = true; }
-    if (did_contiguous && use_mps_buffers) {
+    if (did_contiguous) {
         torch::mps::synchronize();
     }
 
