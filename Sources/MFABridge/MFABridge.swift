@@ -1018,19 +1018,10 @@ public func mfa_attention_forward(
       // Set custom scale factor - this fixes the root cause of the correctness issue
       descriptor.softmaxScale = softmaxScale
 
-      // Set precision based on input parameters
-      // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently
-      // used
-      // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
-      // we must use FP32 inputs to avoid NaN issues from precision mismatch
-      // The inputs are always FP32 from the FFI layer
+      // Always use FP32 inputs — the C++ backend promotes fp16/bf16 to fp32
+      // before calling the kernel, so the kernel always receives fp32 data.
       descriptor.lowPrecisionInputs = false
-      // Use FP32 intermediates for numerical stability
       descriptor.lowPrecisionIntermediates = false
-
-      // Suppress unused parameter warnings - these are part of the API but not used yet
-      _ = inputPrecision
-      _ = intermediatePrecision
 
       // Create kernel descriptor
       let kernelDescriptor = descriptor.kernelDescriptor(type: .forward)
@@ -1958,18 +1949,9 @@ private func mfa_attention_forward_multihead_internal(
   var baseDescriptor = AttentionDescriptor()
   baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
 
-  // NOTE: inputPrecision and intermediatePrecision parameters are accepted but not currently used
-  // IMPORTANT: When using FP16/BF16 precision modes with FP32 data,
-  // we must use FP32 inputs to avoid NaN issues from precision mismatch
-  // The inputs are always FP32 from the FFI layer
-  baseDescriptor.lowPrecisionInputs = false // Always use FP32 inputs from FFI
-  baseDescriptor
-    // Use FP32 intermediates for numerical stability
-    .lowPrecisionIntermediates = false
-
-  // Suppress unused parameter warnings - these are part of the API but not used yet
-  _ = inputPrecision
-  _ = intermediatePrecision
+   // Always FP32 inputs — the C++ backend promotes fp16/bf16 to fp32.
+   baseDescriptor.lowPrecisionInputs = false
+   baseDescriptor.lowPrecisionIntermediates = false
   baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
   baseDescriptor.sparsityPattern = causal ? .causal : .none
   baseDescriptor.softmaxScale = softmaxScale
