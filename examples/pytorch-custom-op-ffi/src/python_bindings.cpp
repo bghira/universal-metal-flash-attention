@@ -11,6 +11,15 @@ extern "C" {
     void mfa_get_version(int* major, int* minor, int* patch);
 }
 
+namespace metal_sdpa {
+    torch::Tensor metal_flash_attention_autograd(
+        const torch::Tensor& query,
+        const torch::Tensor& key,
+        const torch::Tensor& value,
+        bool is_causal,
+        double scale);
+}
+
 namespace py = pybind11;
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -35,6 +44,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("is_causal") = false,
           py::arg("scale") = py::none(),
           py::arg("enable_gqa") = false);
+
+    m.def("metal_flash_attention_autograd",
+          &metal_sdpa::metal_flash_attention_autograd,
+          "Metal Flash Attention with autograd (forward + backward support)",
+          py::arg("query"),
+          py::arg("key"),
+          py::arg("value"),
+          py::arg("is_causal") = false,
+          py::arg("scale") = 0.0);
 
     // Quantized SDPA call
     m.def("quantized_scaled_dot_product_attention",

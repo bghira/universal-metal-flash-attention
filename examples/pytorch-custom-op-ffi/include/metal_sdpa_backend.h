@@ -447,6 +447,30 @@ extern "C" {
     int32_t mfa_has_native_bfloat_msl32(void);
     void mfa_get_version(int* major, int* minor, int* patch);
 
+    // Autograd: forward with LSE output + backward
+    int32_t mfa_attention_forward_with_lse(
+        mfa_context_t context,
+        mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
+        mfa_buffer_t out, mfa_buffer_t lse,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim,
+        float softmax_scale, bool causal,
+        bool transpose_q, bool transpose_k,
+        bool transpose_v, bool transpose_o);
+
+    int32_t mfa_attention_backward(
+        mfa_context_t context,
+        mfa_buffer_t dout,
+        mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
+        mfa_buffer_t out, mfa_buffer_t lse,
+        mfa_buffer_t dq, mfa_buffer_t dk, mfa_buffer_t dv,
+        mfa_buffer_t d_buffer,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim,
+        float softmax_scale, bool causal,
+        bool transpose_q, bool transpose_k,
+        bool transpose_v, bool transpose_o);
+
     // =============================================================================
     // Multi-Latent Attention (MLA) Support
     // =============================================================================
@@ -539,6 +563,10 @@ public:
         const torch::Tensor& k,
         double scale
     );
+
+    friend class MetalFlashAttentionFn;
+
+    static mfa_context_t get_swift_context() { return swift_context_; }
 
 private:
     static mfa_context_t swift_context_;
