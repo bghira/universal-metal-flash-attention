@@ -2882,3 +2882,35 @@ public func mfa_sparse_indexer_scores(
 
   return 0
 }
+
+// MARK: - Hadamard Rotation (ConvRot-style)
+
+/// Apply group-wise Hadamard rotation (FWHT) to a buffer in-place.
+/// Used as an optional outlier-smoothing step before quantized attention.
+@_cdecl("mfa_hadamard_rotate")
+public func mfa_hadamard_rotate(
+  _ data: UnsafeMutableRawPointer?,
+  _ blockSize: UInt32,
+  _ numBlocks: UInt32
+)
+  -> Int32
+{
+  guard let data else { return 1 }
+  guard blockSize > 0, numBlocks > 0 else { return 1 }
+
+  let dev = MTLCreateSystemDefaultDevice()!
+  let rotator = HadamardRotation(device: dev)
+  let buffer = Unmanaged<MFABuffer>.fromOpaque(data).takeUnretainedValue()
+
+  do {
+    _ = try rotator.rotate(
+      buffer: buffer.buffer,
+      blockSize: Int(blockSize),
+      numBlocks: Int(numBlocks)
+    )
+    return 0
+  } catch {
+    print("Hadamard rotation error: \(error)")
+    return 5
+  }
+}

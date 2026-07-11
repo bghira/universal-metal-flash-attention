@@ -2347,6 +2347,27 @@ torch::Tensor metal_flash_attention_autograd(
   return MetalFlashAttentionFn::apply(query, key, value, is_causal, scale);
 }
 
+// Hadamard rotation helper for Python binding
+void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size) {
+    MetalSDPABackend::ensure_initialized();
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    auto flat = tensor.contiguous().view({-1});
+    int64_t total = flat.numel();
+    int64_t nb = total / block_size;
+    if (total % block_size != 0) {
+        throw std::runtime_error("Tensor size not divisible by block_size");
+    }
+    mfa_buffer_t buf = nullptr;
+    auto mtl = mps_utils::get_mtl_buffer_handle(flat);
+    mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, flat.nbytes(), &buf);
+    auto result = mfa_hadamard_rotate(
+        buf, static_cast<uint32_t>(block_size), static_cast<uint32_t>(nb));
+    mfa_destroy_buffer(buf);
+    if (result != 0) {
+        throw std::runtime_error("Hadamard rotation failed");
+    }
+}
+
 } // namespace metal_sdpa
 
 // Register the custom SDPA implementation for PrivateUse1 backend

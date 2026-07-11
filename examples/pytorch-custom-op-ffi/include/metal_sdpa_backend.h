@@ -447,7 +447,11 @@ extern "C" {
     int32_t mfa_has_native_bfloat_msl32(void);
     void mfa_get_version(int* major, int* minor, int* patch);
 
-    // Autograd: forward with LSE output + backward
+    // Hadamard rotation (ConvRot-style outlier smoothing)
+    int32_t mfa_hadamard_rotate(
+        mfa_buffer_t data,
+        uint32_t block_size,
+        uint32_t num_blocks);
     int32_t mfa_attention_forward_with_lse(
         mfa_context_t context,
         mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
@@ -565,6 +569,7 @@ public:
     );
 
     friend class MetalFlashAttentionFn;
+    friend void hadamard_rotate_inplace(torch::Tensor, int64_t);
 
     static mfa_context_t get_swift_context() { return swift_context_; }
 

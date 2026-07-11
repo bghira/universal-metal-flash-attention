@@ -18,6 +18,7 @@ namespace metal_sdpa {
         const torch::Tensor& value,
         bool is_causal,
         double scale);
+    void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size);
 }
 
 namespace py = pybind11;
@@ -53,6 +54,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("value"),
           py::arg("is_causal") = false,
           py::arg("scale") = 0.0);
+
+    m.def("hadamard_rotate",
+          &metal_sdpa::hadamard_rotate_inplace,
+          "Apply group-wise Hadamard rotation (ConvRot-style outlier smoothing) in-place",
+          py::arg("tensor"),
+          py::arg("block_size"));
 
     // Quantized SDPA call
     m.def("quantized_scaled_dot_product_attention",
