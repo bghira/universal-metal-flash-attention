@@ -1076,6 +1076,14 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
     promote_to_fp32(k_tensor);
     promote_to_fp32(v_tensor);
 
+    // Synchronize after FP16→FP32 promotion — the .to(kFloat32) conversion
+    // is enqueued on PyTorch's MPS command queue, but UMFA's kernel reads
+    // the buffer via a separate Metal command queue. Without this sync, the
+    // first dispatch reads stale/uninitialised memory (producing zeros).
+    if (promoted_precision && use_mps_buffers) {
+        torch::mps::synchronize();
+    }
+
     auto output = torch::empty_like(q_tensor);
     auto describe_shape = [](const torch::Tensor& t) {
         std::string s = "[";
