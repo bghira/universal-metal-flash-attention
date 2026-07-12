@@ -447,6 +447,59 @@ extern "C" {
     int32_t mfa_has_native_bfloat_msl32(void);
     void mfa_get_version(int* major, int* minor, int* patch);
 
+    // Hadamard rotation (ConvRot-style outlier smoothing)
+    int32_t mfa_hadamard_rotate(
+        mfa_buffer_t data,
+        uint32_t block_size,
+        uint32_t num_blocks);
+    int32_t mfa_attention_forward_with_lse(
+        mfa_context_t context,
+        mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
+        mfa_buffer_t out, mfa_buffer_t lse,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim,
+        float softmax_scale, bool causal,
+        bool transpose_q, bool transpose_k,
+        bool transpose_v, bool transpose_o);
+
+    int32_t mfa_attention_backward(
+        mfa_context_t context,
+        mfa_buffer_t dout,
+        mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
+        mfa_buffer_t out, mfa_buffer_t lse,
+        mfa_buffer_t dq, mfa_buffer_t dk, mfa_buffer_t dv,
+        mfa_buffer_t d_buffer,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim,
+        float softmax_scale, bool causal,
+        bool transpose_q, bool transpose_k,
+        bool transpose_v, bool transpose_o);
+
+    // Multi-head quantized attention with autograd support.
+    // Forward: runtime-quantizes Q/K/V to INT8, runs quantized flash
+    // attention, writes output + LSE.
+    int32_t mfa_quantized_forward_with_lse(
+        mfa_context_t context,
+        mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
+        mfa_buffer_t out, mfa_buffer_t lse,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim,
+        float softmax_scale, bool causal,
+        int32_t target_precision, // 3=INT8, 4=INT4
+        int32_t quant_mode);       // 0=tensorWise, 2=blockwise
+
+    // Backward: re-quantizes Q/K/V, runs quantized flash backward.
+    int32_t mfa_quantized_backward(
+        mfa_context_t context,
+        mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
+        mfa_buffer_t out, mfa_buffer_t grad_out, mfa_buffer_t lse,
+        mfa_buffer_t grad_q, mfa_buffer_t grad_k, mfa_buffer_t grad_v,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim,
+        float softmax_scale, bool causal,
+        int32_t target_precision,
+        int32_t quant_mode);
+
     // =============================================================================
     // Multi-Latent Attention (MLA) Support
     // =============================================================================
@@ -539,6 +592,12 @@ public:
         const torch::Tensor& k,
         double scale
     );
+
+    friend class MetalFlashAttentionFn;
+    friend class MetalQuantizedFlashAttentionFn;
+    friend void hadamard_rotate_inplace(torch::Tensor, int64_t);
+
+    static mfa_context_t get_swift_context() { return swift_context_; }
 
 private:
     static mfa_context_t swift_context_;

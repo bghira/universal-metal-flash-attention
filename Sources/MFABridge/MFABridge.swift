@@ -2545,6 +2545,206 @@ public func mfa_mla_forward(
   }
 }
 
+// MARK: - Autograd (Forward with LSE + Backward)
+
+/// Forward pass that also writes the log-sum-exp buffer for autograd.
+/// Same as mfa_attention_forward but the caller provides an LSE output buffer.
+@_cdecl("mfa_attention_forward_with_lse")
+public func mfa_attention_forward_with_lse(
+  _ context: UnsafeMutableRawPointer?,
+  _ q: UnsafeMutableRawPointer?,
+  _ k: UnsafeMutableRawPointer?,
+  _ v: UnsafeMutableRawPointer?,
+  _ out: UnsafeMutableRawPointer?,
+  _ lse: UnsafeMutableRawPointer?,
+  _ batchSize: UInt32,
+  _ seqLenQ: UInt32,
+  _ seqLenKV: UInt32,
+  _ numHeads: UInt32,
+  _ headDim: UInt16,
+  _ softmaxScale: Float,
+  _ causal: Bool,
+  _ transposeQ: Bool,
+  _ transposeK: Bool,
+  _ transposeV: Bool,
+  _ transposeO: Bool
+)
+  -> Int32
+{
+  guard let context, let q, let k, let v, let out, let lse else {
+    return 1
+  }
+
+  let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
+  let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
+  let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
+  let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
+  let lseBuffer = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
+
+  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
+
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
+  baseDescriptor.lowPrecisionInputs = false
+  baseDescriptor.lowPrecisionIntermediates = false
+  baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
+  baseDescriptor.softmaxScale = softmaxScale
+
+  let queryShape = MultiHeadShape(
+    batchSize: batchSize, numHeads: numHeads,
+    sequenceLength: seqLenQ, headDimension: headDim
+  )
+  let kvShape = MultiHeadShape(
+    batchSize: batchSize, numHeads: numHeads,
+    sequenceLength: seqLenKV, headDimension: headDim
+  )
+
+  let descriptor = MultiHeadAttentionDescriptor(
+    baseDescriptor: baseDescriptor,
+    queryShape: queryShape, keyShape: kvShape, valueShape: kvShape,
+    broadcastMode: .standard, dispatchStrategy: .perBatch
+  )
+
+  guard
+    let commandBuffer = multiHeadAttention.forward(
+      query: qBuffer.buffer,
+      key: kBuffer.buffer,
+      value: vBuffer.buffer,
+      output: outBuffer.buffer,
+      logsumexp: lseBuffer.buffer,
+      descriptor: descriptor,
+      maskBuffer: nil
+    )
+  else {
+    return 5
+  }
+
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Forward-with-LSE error: \(error)")
+    return 5
+  }
+
+  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+  GlobalContextStore.shared.updateLatency(gpuLatency)
+  return 0
+}
+
+/// Backward pass for flash attention.
+/// Computes dQ, dK, dV given dO, Q, K, V, O, L from the forward pass.
+/// The caller must provide a scratch D buffer of size [B*H*S_q] FP32.
+@_cdecl("mfa_attention_backward")
+public func mfa_attention_backward(
+  _ context: UnsafeMutableRawPointer?,
+  _ dout: UnsafeMutableRawPointer?,
+  _ q: UnsafeMutableRawPointer?,
+  _ k: UnsafeMutableRawPointer?,
+  _ v: UnsafeMutableRawPointer?,
+  _ out: UnsafeMutableRawPointer?,
+  _ lse: UnsafeMutableRawPointer?,
+  _ dq: UnsafeMutableRawPointer?,
+  _ dk: UnsafeMutableRawPointer?,
+  _ dv: UnsafeMutableRawPointer?,
+  _ dBuffer: UnsafeMutableRawPointer?,
+  _ batchSize: UInt32,
+  _ seqLenQ: UInt32,
+  _ seqLenKV: UInt32,
+  _ numHeads: UInt32,
+  _ headDim: UInt16,
+  _ softmaxScale: Float,
+  _ causal: Bool,
+  _ transposeQ: Bool,
+  _ transposeK: Bool,
+  _ transposeV: Bool,
+  _ transposeO: Bool
+)
+  -> Int32
+{
+  guard
+    let context,
+    let dout, let q, let k, let v, let out, let lse,
+    let dq, let dk, let dv, let dBuffer
+  else {
+    return 1
+  }
+
+  let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  let doutBuf = Unmanaged<MFABuffer>.fromOpaque(dout).takeUnretainedValue()
+  let qBuf = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
+  let kBuf = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
+  let vBuf = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
+  let outBuf = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
+  let lseBuf = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
+  let dqBuf = Unmanaged<MFABuffer>.fromOpaque(dq).takeUnretainedValue()
+  let dkBuf = Unmanaged<MFABuffer>.fromOpaque(dk).takeUnretainedValue()
+  let dvBuf = Unmanaged<MFABuffer>.fromOpaque(dv).takeUnretainedValue()
+  let dScratchBuf = Unmanaged<MFABuffer>.fromOpaque(dBuffer).takeUnretainedValue()
+
+  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
+
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
+  baseDescriptor.lowPrecisionInputs = false
+  baseDescriptor.lowPrecisionIntermediates = false
+  baseDescriptor.transposeState = (Q: transposeQ, K: transposeK, V: transposeV, O: transposeO)
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
+  baseDescriptor.softmaxScale = softmaxScale
+
+  let queryShape = MultiHeadShape(
+    batchSize: batchSize, numHeads: numHeads,
+    sequenceLength: seqLenQ, headDimension: headDim
+  )
+  let kvShape = MultiHeadShape(
+    batchSize: batchSize, numHeads: numHeads,
+    sequenceLength: seqLenKV, headDimension: headDim
+  )
+
+  let descriptor = MultiHeadAttentionDescriptor(
+    baseDescriptor: baseDescriptor,
+    queryShape: queryShape, keyShape: kvShape, valueShape: kvShape,
+    broadcastMode: .standard, dispatchStrategy: .perBatch
+  )
+
+  // Zero the D scratch buffer (needed by backwardQuery).
+  let dCount = Int(batchSize) * Int(numHeads) * Int(seqLenQ)
+  memset(dScratchBuf.buffer.contents(), 0, dCount * 4)
+
+  guard
+    let commandBuffer = multiHeadAttention.backward(
+      query: qBuf.buffer,
+      key: kBuf.buffer,
+      value: vBuf.buffer,
+      output: outBuf.buffer,
+      dOutput: doutBuf.buffer,
+      logsumexp: lseBuf.buffer,
+      dQuery: dqBuf.buffer,
+      dKey: dkBuf.buffer,
+      dValue: dvBuf.buffer,
+      dBuffer: dScratchBuf.buffer,
+      descriptor: descriptor,
+      maskBuffer: nil
+    )
+  else {
+    return 5
+  }
+
+  commandBuffer.commit()
+  commandBuffer.waitUntilCompleted()
+
+  if let error = commandBuffer.error {
+    print("Backward error: \(error)")
+    return 5
+  }
+
+  let gpuLatency = commandBuffer.gpuEndTime - commandBuffer.gpuStartTime
+  GlobalContextStore.shared.updateLatency(gpuLatency)
+  return 0
+}
+
 // MARK: - Sparse Indexer Operations
 
 @_cdecl("mfa_sparse_indexer_scores")
@@ -2688,4 +2888,36 @@ public func mfa_sparse_indexer_scores(
   }
 
   return 0
+}
+
+// MARK: - Hadamard Rotation (ConvRot-style)
+
+/// Apply group-wise Hadamard rotation (FWHT) to a buffer in-place.
+/// Used as an optional outlier-smoothing step before quantized attention.
+@_cdecl("mfa_hadamard_rotate")
+public func mfa_hadamard_rotate(
+  _ data: UnsafeMutableRawPointer?,
+  _ blockSize: UInt32,
+  _ numBlocks: UInt32
+)
+  -> Int32
+{
+  guard let data else { return 1 }
+  guard blockSize > 0, numBlocks > 0 else { return 1 }
+
+  let dev = MTLCreateSystemDefaultDevice()!
+  let rotator = HadamardRotation(device: dev)
+  let buffer = Unmanaged<MFABuffer>.fromOpaque(data).takeUnretainedValue()
+
+  do {
+    _ = try rotator.rotate(
+      buffer: buffer.buffer,
+      blockSize: Int(blockSize),
+      numBlocks: Int(numBlocks)
+    )
+    return 0
+  } catch {
+    print("Hadamard rotation error: \(error)")
+    return 5
+  }
 }

@@ -332,6 +332,7 @@ class TestMPSErrorRecovery:
                 "Destination NDArray and Accumulator" not in error_str
             ), "Internal MPS error should be caught and wrapped"
 
+    @pytest.mark.slow
     def test_recovery_after_error(self, metal_device):
         """Test that we can continue using Metal SDPA after an error."""
         # First, try something that might fail

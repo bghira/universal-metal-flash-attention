@@ -14,9 +14,11 @@ parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, parent_dir)
 
 import metal_sdpa_extension
+import pytest
 import torch
 
 
+@pytest.mark.slow
 def test_non_contiguous_issue():
     """Test that demonstrates NaN output with non-contiguous tensors."""
 

@@ -1,6 +1,7 @@
 #include "metal_sdpa_backend.h"
 #include "mps_utils.h"
 #include <torch/torch.h>
+#include <torch/mps.h>
 #include <ATen/ATen.h>
 #include <ATen/ops/scaled_dot_product_attention_native.h>
 #include <torch/nn/functional.h>  // For torch::nn::functional::pad
@@ -974,6 +975,31 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
     float softmax_scale,
     bool use_mps_buffers
 ) {
+    // Force contiguous BHSD before any Metal buffer access. FLUX feeds
+    // transposed/non-contiguous views; the kernel assumes contiguous BHSD.
+    // Must synchronize after .contiguous() — the copy is enqueued on the MPS
+    // command queue but the kernel reads the buffer immediately via a separate
+    // Metal command queue. Without sync, the kernel sees stale/uninitialised
+    // data.
+    //
+    // Also synchronize on entry for already-contiguous tensors: PyTorch may
+    // have queued producer ops (matmul, activation, etc.) on the MPS command
+    // queue that write to the tensor's buffer. UMFA's kernel runs on a
+    // separate Metal command queue and would read the buffer before those
+    // writes complete. This matches the torch.mps.synchronize() the SimpleTuner
+    // wrapper now does, but makes the extension safe when called directly.
+    if (use_mps_buffers) {
+        torch::mps::synchronize();
+    }
+
+    bool did_contiguous = false;
+    if (!q_tensor.is_contiguous()) { q_tensor = q_tensor.contiguous(); did_contiguous = true; }
+    if (!k_tensor.is_contiguous()) { k_tensor = k_tensor.contiguous(); did_contiguous = true; }
+    if (!v_tensor.is_contiguous()) { v_tensor = v_tensor.contiguous(); did_contiguous = true; }
+    if (did_contiguous) {
+        torch::mps::synchronize();
+    }
+
     auto q_sizes = q_tensor.sizes();
     auto k_sizes = k_tensor.sizes();
     auto v_sizes = v_tensor.sizes();
@@ -2117,6 +2143,412 @@ std::tuple<int, int, int> get_version() {
     int major, minor, patch;
     mfa_get_version(&major, &minor, &patch);
     return std::make_tuple(major, minor, patch);
+}
+
+// =============================================================================
+// Autograd: Flash Attention Forward + Backward
+// =============================================================================
+
+class MetalFlashAttentionFn
+    : public torch::autograd::Function<MetalFlashAttentionFn> {
+public:
+  static torch::Tensor forward(
+      torch::autograd::AutogradContext *ctx,
+      torch::Tensor query, torch::Tensor key, torch::Tensor value,
+      bool is_causal, double scale) {
+
+    MetalSDPABackend::ensure_initialized();
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    if (!mfa_ctx) {
+      throw std::runtime_error("Metal SDPA backend not initialized");
+    }
+
+    // Promote fp16/bf16 → fp32, make contiguous BHSD.
+    auto orig_dtype = query.scalar_type();
+    if (query.scalar_type() == torch::kFloat16 ||
+        query.scalar_type() == torch::kBFloat16) {
+      query = query.to(torch::kFloat32);
+      key = key.to(torch::kFloat32);
+      value = value.to(torch::kFloat32);
+    }
+    query = query.contiguous();
+    key = key.contiguous();
+    value = value.contiguous();
+    if (query.device().type() == at::kMPS) {
+      torch::mps::synchronize();
+    }
+
+    auto q_sizes = query.sizes();
+    uint32_t batch = static_cast<uint32_t>(q_sizes[0]);
+    uint32_t heads = static_cast<uint32_t>(q_sizes[1]);
+    uint32_t seq_q = static_cast<uint32_t>(q_sizes[2]);
+    uint32_t seq_kv = static_cast<uint32_t>(key.size(2));
+    uint16_t dim = static_cast<uint16_t>(q_sizes[3]);
+
+    float sm_scale = static_cast<float>(scale);
+    if (scale == 0.0) {
+      sm_scale = 1.0f / std::sqrt(static_cast<float>(dim));
+    }
+
+    auto output = torch::empty_like(query);
+    auto lse = torch::empty(
+        {batch * heads * seq_q}, torch::kFloat32).to(query.device());
+
+    // Bind buffers.
+    auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
+      mfa_buffer_t h = nullptr;
+      auto mtl = mps_utils::get_mtl_buffer_handle(t);
+      mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, t.nbytes(), &h);
+      return h;
+    };
+    auto q_b = bind(query);
+    auto k_b = bind(key);
+    auto v_b = bind(value);
+    auto out_b = bind(output);
+    auto lse_b = bind(lse);
+
+    auto result = mfa_attention_forward_with_lse(
+        mfa_ctx,
+        q_b, k_b, v_b, out_b, lse_b,
+        batch, seq_q, seq_kv, heads, dim,
+        sm_scale, is_causal,
+        false, false, false, false);
+
+    mfa_destroy_buffer(q_b);
+    mfa_destroy_buffer(k_b);
+    mfa_destroy_buffer(v_b);
+    mfa_destroy_buffer(out_b);
+    mfa_destroy_buffer(lse_b);
+
+    if (result != 0) {
+      throw std::runtime_error(
+          "MetalFlashAttention forward failed with code " +
+          std::to_string(result));
+    }
+
+    // Convert back to original dtype.
+    if (output.scalar_type() != orig_dtype) {
+      output = output.to(orig_dtype);
+    }
+
+    ctx->save_for_backward({query, key, value, output});
+    ctx->saved_data["lse"] = lse;
+    ctx->saved_data["scale"] = sm_scale;
+    ctx->saved_data["is_causal"] = is_causal;
+    ctx->saved_data["orig_dtype"] = static_cast<int64_t>(orig_dtype);
+
+    return output;
+  }
+
+  static torch::autograd::tensor_list backward(
+      torch::autograd::AutogradContext *ctx,
+      torch::autograd::tensor_list grad_outputs) {
+
+    MetalSDPABackend::ensure_initialized();
+    auto saved = ctx->get_saved_variables();
+    auto query = saved[0];
+    auto key = saved[1];
+    auto value = saved[2];
+    auto lse = ctx->saved_data["lse"].toTensor();
+    float sm_scale = static_cast<float>(ctx->saved_data["scale"].toDouble());
+    bool is_causal = ctx->saved_data["is_causal"].toBool();
+
+    auto d_output = grad_outputs[0];
+    auto orig_dtype = static_cast<torch::ScalarType>(
+        ctx->saved_data["orig_dtype"].toInt());
+
+    // Promote grad to fp32 + contiguous.
+    if (d_output.scalar_type() != torch::kFloat32) {
+      d_output = d_output.to(torch::kFloat32);
+    }
+    d_output = d_output.contiguous();
+
+    auto q_sizes = query.sizes();
+    uint32_t batch = static_cast<uint32_t>(q_sizes[0]);
+    uint32_t heads = static_cast<uint32_t>(q_sizes[1]);
+    uint32_t seq_q = static_cast<uint32_t>(q_sizes[2]);
+    uint32_t seq_kv = static_cast<uint32_t>(key.size(2));
+    uint16_t dim = static_cast<uint16_t>(q_sizes[3]);
+
+    if (query.device().type() == at::kMPS) {
+      torch::mps::synchronize();
+    }
+
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    auto d_query = torch::zeros_like(query);
+    auto d_key = torch::zeros_like(key);
+    auto d_value = torch::zeros_like(value);
+    auto d_buffer = torch::zeros(
+        {batch * heads * seq_q}, torch::kFloat32).to(query.device());
+
+    // Forward output needs to be fp32 for the backward kernel.
+    auto output_fp32 = saved[3].to(torch::kFloat32);
+
+    auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
+      mfa_buffer_t h = nullptr;
+      auto mtl = mps_utils::get_mtl_buffer_handle(t);
+      mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, t.nbytes(), &h);
+      return h;
+    };
+    auto dout_b = bind(d_output);
+    auto q_b = bind(query);
+    auto k_b = bind(key);
+    auto v_b = bind(value);
+    auto out_b = bind(output_fp32);
+    auto lse_b = bind(lse);
+    auto dq_b = bind(d_query);
+    auto dk_b = bind(d_key);
+    auto dv_b = bind(d_value);
+    auto d_b = bind(d_buffer);
+
+    auto result = mfa_attention_backward(
+        mfa_ctx,
+        dout_b, q_b, k_b, v_b, out_b, lse_b,
+        dq_b, dk_b, dv_b, d_b,
+        batch, seq_q, seq_kv, heads, dim,
+        sm_scale, is_causal,
+        false, false, false, false);
+
+    mfa_destroy_buffer(dout_b);
+    mfa_destroy_buffer(q_b);
+    mfa_destroy_buffer(k_b);
+    mfa_destroy_buffer(v_b);
+    mfa_destroy_buffer(out_b);
+    mfa_destroy_buffer(lse_b);
+    mfa_destroy_buffer(dq_b);
+    mfa_destroy_buffer(dk_b);
+    mfa_destroy_buffer(dv_b);
+    mfa_destroy_buffer(d_b);
+
+    if (result != 0) {
+      throw std::runtime_error(
+          "MetalFlashAttention backward failed with code " +
+          std::to_string(result));
+    }
+
+    // Convert grads back to original dtype.
+    if (orig_dtype != torch::kFloat32) {
+      d_query = d_query.to(orig_dtype);
+      d_key = d_key.to(orig_dtype);
+      d_value = d_value.to(orig_dtype);
+    }
+
+    return {d_query, d_key, d_value,
+            torch::Tensor(), torch::Tensor()};
+  }
+};
+
+torch::Tensor metal_flash_attention_autograd(
+    const torch::Tensor &query,
+    const torch::Tensor &key,
+    const torch::Tensor &value,
+    bool is_causal,
+    double scale) {
+  return MetalFlashAttentionFn::apply(query, key, value, is_causal, scale);
+}
+
+// =============================================================================
+// Quantized Flash Attention with Autograd
+// =============================================================================
+
+class MetalQuantizedFlashAttentionFn
+    : public torch::autograd::Function<MetalQuantizedFlashAttentionFn> {
+public:
+  static torch::Tensor forward(
+      torch::autograd::AutogradContext *ctx,
+      torch::Tensor query, torch::Tensor key, torch::Tensor value,
+      bool is_causal, double scale,
+      int64_t target_precision, int64_t quant_mode) {
+
+    MetalSDPABackend::ensure_initialized();
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    if (!mfa_ctx) {
+      throw std::runtime_error("Metal SDPA backend not initialized");
+    }
+
+    // Promote to fp32 — the quantization kernel reads FP32 input.
+    query = query.to(torch::kFloat32).contiguous();
+    key = key.to(torch::kFloat32).contiguous();
+    value = value.to(torch::kFloat32).contiguous();
+    if (query.device().type() == at::kMPS) {
+      torch::mps::synchronize();
+    }
+
+    auto q_sizes = query.sizes();
+    uint32_t batch = q_sizes[0];
+    uint32_t heads = q_sizes[1];
+    uint32_t seq_q = q_sizes[2];
+    uint32_t seq_kv = key.size(2);
+    uint16_t dim = q_sizes[3];
+
+    float sm_scale = static_cast<float>(scale);
+    if (scale == 0.0) {
+      sm_scale = 1.0f / std::sqrt(static_cast<float>(dim));
+    }
+
+    auto output = torch::empty_like(query);
+    auto lse = torch::empty(
+        {batch * heads * seq_q}, torch::kFloat32).to(query.device());
+
+    auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
+      mfa_buffer_t h = nullptr;
+      auto mtl = mps_utils::get_mtl_buffer_handle(t);
+      mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, t.nbytes(), &h);
+      return h;
+    };
+    auto q_b = bind(query);
+    auto k_b = bind(key);
+    auto v_b = bind(value);
+    auto out_b = bind(output);
+    auto lse_b = bind(lse);
+
+    auto result = mfa_quantized_forward_with_lse(
+        mfa_ctx,
+        q_b, k_b, v_b, out_b, lse_b,
+        batch, seq_q, seq_kv, heads, dim,
+        sm_scale, is_causal,
+        static_cast<int32_t>(target_precision),
+        static_cast<int32_t>(quant_mode));
+
+    mfa_destroy_buffer(q_b);
+    mfa_destroy_buffer(k_b);
+    mfa_destroy_buffer(v_b);
+    mfa_destroy_buffer(out_b);
+    mfa_destroy_buffer(lse_b);
+
+    if (result != 0) {
+      throw std::runtime_error(
+          "Quantized flash attention forward failed with code " +
+          std::to_string(result));
+    }
+
+    ctx->save_for_backward({query, key, value, output});
+    ctx->saved_data["lse"] = lse;
+    ctx->saved_data["scale"] = sm_scale;
+    ctx->saved_data["is_causal"] = is_causal;
+    ctx->saved_data["target_precision"] = target_precision;
+    ctx->saved_data["quant_mode"] = quant_mode;
+
+    return output;
+  }
+
+  static torch::autograd::tensor_list backward(
+      torch::autograd::AutogradContext *ctx,
+      torch::autograd::tensor_list grad_outputs) {
+
+    MetalSDPABackend::ensure_initialized();
+    auto saved = ctx->get_saved_variables();
+    auto query = saved[0];
+    auto key = saved[1];
+    auto value = saved[2];
+    auto lse = ctx->saved_data["lse"].toTensor();
+    float sm_scale = static_cast<float>(ctx->saved_data["scale"].toDouble());
+    bool is_causal = ctx->saved_data["is_causal"].toBool();
+    int64_t target_precision = ctx->saved_data["target_precision"].toInt();
+    int64_t quant_mode = ctx->saved_data["quant_mode"].toInt();
+
+    auto d_output = grad_outputs[0].to(torch::kFloat32).contiguous();
+
+    auto q_sizes = query.sizes();
+    uint32_t batch = q_sizes[0];
+    uint32_t heads = q_sizes[1];
+    uint32_t seq_q = q_sizes[2];
+    uint32_t seq_kv = key.size(2);
+    uint16_t dim = q_sizes[3];
+
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    auto output_fp32 = saved[3];
+    auto d_query = torch::zeros_like(query);
+    auto d_key = torch::zeros_like(key);
+    auto d_value = torch::zeros_like(value);
+
+    // Synchronize AFTER zeros_like (which schedules MPS zero-fill) but BEFORE
+    // the FFI writes. Without this, the MPS zero-fill can execute after the
+    // FFI write, overwriting the gradients.
+    if (query.device().type() == at::kMPS) {
+      torch::mps::synchronize();
+    }
+
+    auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
+      mfa_buffer_t h = nullptr;
+      auto mtl = mps_utils::get_mtl_buffer_handle(t);
+      mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, t.nbytes(), &h);
+      return h;
+    };
+    auto q_b = bind(query);
+    auto k_b = bind(key);
+    auto v_b = bind(value);
+    auto out_b = bind(output_fp32);
+    auto dout_b = bind(d_output);
+    auto lse_b = bind(lse);
+    auto dq_b = bind(d_query);
+    auto dk_b = bind(d_key);
+    auto dv_b = bind(d_value);
+
+    auto result = mfa_quantized_backward(
+        mfa_ctx,
+        q_b, k_b, v_b,
+        out_b, dout_b, lse_b,
+        dq_b, dk_b, dv_b,
+        batch, seq_q, seq_kv, heads, dim,
+        sm_scale, is_causal,
+        static_cast<int32_t>(target_precision),
+        static_cast<int32_t>(quant_mode));
+
+    mfa_destroy_buffer(q_b);
+    mfa_destroy_buffer(k_b);
+    mfa_destroy_buffer(v_b);
+    mfa_destroy_buffer(out_b);
+    mfa_destroy_buffer(dout_b);
+    mfa_destroy_buffer(lse_b);
+    mfa_destroy_buffer(dq_b);
+    mfa_destroy_buffer(dk_b);
+    mfa_destroy_buffer(dv_b);
+
+    if (result != 0) {
+      throw std::runtime_error(
+          "Quantized flash attention backward failed with code " +
+          std::to_string(result));
+    }
+
+    return {d_query, d_key, d_value,
+            torch::Tensor(), torch::Tensor(),
+            torch::Tensor(), torch::Tensor()};
+  }
+};
+
+torch::Tensor metal_quantized_flash_attention_autograd(
+    const torch::Tensor &query,
+    const torch::Tensor &key,
+    const torch::Tensor &value,
+    bool is_causal,
+    double scale,
+    int64_t target_precision,
+    int64_t quant_mode) {
+  return MetalQuantizedFlashAttentionFn::apply(
+      query, key, value, is_causal, scale,
+      target_precision, quant_mode);
+}
+
+// Hadamard rotation helper for Python binding
+void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size) {
+    MetalSDPABackend::ensure_initialized();
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    auto flat = tensor.contiguous().view({-1});
+    int64_t total = flat.numel();
+    int64_t nb = total / block_size;
+    if (total % block_size != 0) {
+        throw std::runtime_error("Tensor size not divisible by block_size");
+    }
+    mfa_buffer_t buf = nullptr;
+    auto mtl = mps_utils::get_mtl_buffer_handle(flat);
+    mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, flat.nbytes(), &buf);
+    auto result = mfa_hadamard_rotate(
+        buf, static_cast<uint32_t>(block_size), static_cast<uint32_t>(nb));
+    mfa_destroy_buffer(buf);
+    if (result != 0) {
+        throw std::runtime_error("Hadamard rotation failed");
+    }
 }
 
 } // namespace metal_sdpa
