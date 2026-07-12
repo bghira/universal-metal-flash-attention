@@ -30,6 +30,8 @@ namespace metal_sdpa {
     void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size);
     void set_quantization_mode(int64_t precision, int64_t block_mode);
     void clear_quantization_mode();
+    std::map<std::string, int64_t> get_dispatch_stats();
+    void reset_dispatch_stats();
 }
 
 namespace py = pybind11;
@@ -80,12 +82,29 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("set_quantization_mode",
           &metal_sdpa::set_quantization_mode,
           "Activate INT8/INT4 quantization for all F.scaled_dot_product_attention calls",
-          py::arg("precision"),   // 3=INT8, 4=INT4
-          py::arg("block_mode")); // 0=tensorWise, 2=blockwise
+          py::arg("precision"),   // QUANT_INT8 or QUANT_INT4
+          py::arg("block_mode")); // QUANT_TENSOR_WISE or QUANT_BLOCK_WISE
 
     m.def("clear_quantization_mode",
           &metal_sdpa::clear_quantization_mode,
           "Disable quantization — revert to FP32 attention");
+
+    m.def("get_dispatch_stats",
+          &metal_sdpa::get_dispatch_stats,
+          "Return dispatch counters showing which attention path each call took");
+
+    m.def("reset_dispatch_stats",
+          &metal_sdpa::reset_dispatch_stats,
+          "Reset all dispatch counters to zero");
+
+    // ---- Constants for quantization configuration ----
+    // Import these and pass to set_quantization_mode():
+    //   ext.set_quantization_mode(ext.QUANT_INT8, ext.QUANT_BLOCK_WISE)
+    m.attr("QUANT_NONE")         = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_NONE);
+    m.attr("QUANT_INT8")         = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_INT8);
+    m.attr("QUANT_INT4")         = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_INT4);
+    m.attr("QUANT_TENSOR_WISE")  = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_TENSOR_WISE);
+    m.attr("QUANT_BLOCK_WISE")   = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_BLOCK_WISE);
 
     m.def("hadamard_rotate",
           &metal_sdpa::hadamard_rotate_inplace,

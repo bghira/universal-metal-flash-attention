@@ -7,6 +7,7 @@
 #include <c10/core/ScalarType.h>
 #include <mutex>
 #include <optional>
+#include <map>
 
 namespace metal_sdpa {
 
@@ -599,17 +600,35 @@ public:
 
     static mfa_context_t get_swift_context() { return swift_context_; }
 
+    // ---- Quantization mode constants (exposed to Python) ----
+    static constexpr int32_t QUANT_NONE = 0;
+    static constexpr int32_t QUANT_INT8 = 3;
+    static constexpr int32_t QUANT_INT4 = 4;
+    static constexpr int32_t QUANT_TENSOR_WISE = 0;
+    static constexpr int32_t QUANT_BLOCK_WISE = 2;
+
     // Global quantization mode for dispatcher-level SDPA routing.
-    // When active, scaled_dot_product_attention routes through
-    // MetalQuantizedFlashAttentionFn instead of the FP32 path.
-    // Set by SimpleTuner's int8/int4 profiles via set_quantization_mode().
     static std::atomic<int32_t>& quant_precision() {
-        static std::atomic<int32_t> v{0}; // 0=disabled, 3=INT8, 4=INT4
+        static std::atomic<int32_t> v{0};
         return v;
     }
     static std::atomic<int32_t>& quant_block_mode() {
-        static std::atomic<int32_t> v{0}; // 0=tensorWise, 2=blockwise
+        static std::atomic<int32_t> v{0};
         return v;
+    }
+
+    // ---- Dispatch counters (observable from Python) ----
+    struct DispatchStats {
+        std::atomic<int64_t> total{0};
+        std::atomic<int64_t> quantized_autograd{0};
+        std::atomic<int64_t> fp32_autograd{0};
+        std::atomic<int64_t> fp32_direct{0};
+        std::atomic<int64_t> pytorch_fallback{0};
+        std::atomic<int64_t> mask_all_true_skipped{0};
+    };
+    static DispatchStats& dispatch_stats() {
+        static DispatchStats s;
+        return s;
     }
 
 private:
@@ -741,10 +760,11 @@ namespace metal_sdpa {
     std::tuple<int, int, int> get_version();
 
     // Quantization mode control for dispatcher-level SDPA routing.
-    // precision: 0=disabled, 3=INT8, 4=INT4
-    // block_mode: 0=tensorWise, 2=blockwise
+    // Use QUANT_* constants as precision values.
     void set_quantization_mode(int64_t precision, int64_t block_mode);
     void clear_quantization_mode();
+    std::map<std::string, int64_t> get_dispatch_stats();
+    void reset_dispatch_stats();
 }
 
 // =============================================================================

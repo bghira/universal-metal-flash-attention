@@ -8,6 +8,7 @@
 #include <c10/util/Exception.h>
 #include <mutex>
 #include <unordered_set>
+#include <map>
 #include <stdexcept>
 #include <iostream>
 #include <cinttypes>  // For PRId64, PRIu32, etc.
@@ -1347,43 +1348,64 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     bool enable_gqa
 ) {
     try {
-        // Ensure backend is initialized
         ensure_initialized();
+        auto& stats = dispatch_stats();
+        stats.total.fetch_add(1, std::memory_order_relaxed);
 
     double sm_scale = scale.value_or(0.0);
-    bool has_mask = attn_mask.has_value() && attn_mask.value().defined();
 
-    // Route to quantized autograd when INT8/INT4 mode is active.
-    if (quant_precision().load() != 0 && !has_mask) {
+    // ---- Detect trivially all-true bool masks ----
+    // Many models (e.g. Z-Image) always pass an encoder_attention_mask even
+    // when every position is attended. An all-true bool mask is semantically
+    // a no-op, so we strip it and route through the fast path.
+    bool has_real_mask = false;
+    if (attn_mask.has_value() && attn_mask.value().defined()) {
+        auto& mask = attn_mask.value();
+        if (mask.scalar_type() == torch::kBool && mask.numel() > 0) {
+            if (mask.all().item<bool>()) {
+                // All-true mask — skip it.
+                stats.mask_all_true_skipped.fetch_add(1, std::memory_order_relaxed);
+            } else {
+                has_real_mask = true;
+            }
+        } else {
+            has_real_mask = true;
+        }
+    }
+
+    // ---- Route to quantized autograd when INT8/INT4 mode is active ----
+    if (quant_precision().load() != 0 && !has_real_mask) {
+        stats.quantized_autograd.fetch_add(1, std::memory_order_relaxed);
         return metal_quantized_flash_attention_autograd(
             query, key, value, is_causal, sm_scale,
             static_cast<int64_t>(quant_precision().load()),
             static_cast<int64_t>(quant_block_mode().load()));
     }
 
-    // Route to FP32 autograd when inputs require grad and no mask.
-    // This ensures gradients flow through F.scaled_dot_product_attention
-    // at the dispatcher level (otherwise PyTorch warns about missing
-    // autograd kernels).
+    // ---- Route to FP32 autograd when inputs require grad ----
     bool needs_autograd = query.requires_grad() || key.requires_grad() ||
                           value.requires_grad();
-    if (needs_autograd && !has_mask) {
+    if (needs_autograd && !has_real_mask) {
+        stats.fp32_autograd.fetch_add(1, std::memory_order_relaxed);
         return metal_flash_attention_autograd(
             query, key, value, is_causal, sm_scale);
     }
+
+    // ---- Remaining paths: direct UMFA (no autograd) or PyTorch fallback ----
+    // These paths handle masks that aren't all-true.
 
     // Validate inputs
     if (dropout_p > 0.0) {
         std::cout << "Warning: Dropout not supported in Metal Flash Attention, ignoring dropout_p" << std::endl;
     }
 
-    if (attn_mask.has_value() && attn_mask.value().defined()) {
+    if (has_real_mask) {
         auto mask_dtype = attn_mask.value().scalar_type();
         if (mask_dtype != torch::kBool &&
             mask_dtype != torch::kFloat32 &&
             mask_dtype != torch::kFloat16 &&
             mask_dtype != torch::kBFloat16) {
-            std::cout << "⚠️  Unsupported attention mask dtype for Metal backend, using PyTorch reference implementation" << std::endl;
+            stats.pytorch_fallback.fetch_add(1, std::memory_order_relaxed);
             return at::native::scaled_dot_product_attention(
                 query,
                 key,
@@ -1416,6 +1438,7 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     auto orig_dtype = query.scalar_type();
 
     // Call Swift Flash Attention (using processed tensors from call_swift_flash_attention)
+    stats.fp32_direct.fetch_add(1, std::memory_order_relaxed);
     auto result = call_swift_flash_attention(query, key, value, attn_mask, is_causal, softmax_scale);
 
     // Convert result back to original layout if input was FLUX
@@ -2597,6 +2620,28 @@ void set_quantization_mode(int64_t precision, int64_t block_mode) {
 
 void clear_quantization_mode() {
     MetalSDPABackend::quant_precision().store(0);
+}
+
+std::map<std::string, int64_t> get_dispatch_stats() {
+    auto& s = MetalSDPABackend::dispatch_stats();
+    return {
+        {"total", s.total.load(std::memory_order_relaxed)},
+        {"quantized_autograd", s.quantized_autograd.load(std::memory_order_relaxed)},
+        {"fp32_autograd", s.fp32_autograd.load(std::memory_order_relaxed)},
+        {"fp32_direct", s.fp32_direct.load(std::memory_order_relaxed)},
+        {"pytorch_fallback", s.pytorch_fallback.load(std::memory_order_relaxed)},
+        {"mask_all_true_skipped", s.mask_all_true_skipped.load(std::memory_order_relaxed)},
+    };
+}
+
+void reset_dispatch_stats() {
+    auto& s = MetalSDPABackend::dispatch_stats();
+    s.total.store(0);
+    s.quantized_autograd.store(0);
+    s.fp32_autograd.store(0);
+    s.fp32_direct.store(0);
+    s.pytorch_fallback.store(0);
+    s.mask_all_true_skipped.store(0);
 }
 
 } // namespace metal_sdpa
