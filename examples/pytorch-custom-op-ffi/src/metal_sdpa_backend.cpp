@@ -1419,9 +1419,6 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
             v.scalar_type() != q.scalar_type()) {
             return true;
         }
-        if (q.size(1) < 4 || q.size(2) < 64) {
-            return true;
-        }
         return false;
     };
 
@@ -1503,6 +1500,15 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     // Call Swift Flash Attention (using processed tensors from call_swift_flash_attention)
     stats.fp32_direct.fetch_add(1, std::memory_order_relaxed);
     auto result = call_swift_flash_attention(q, k, v, attn_mask, is_causal, softmax_scale);
+
+    // Runtime NaN safety net — certain head_dim values trigger a kernel bug
+    // (likely in block dimension padding). Fall back to PyTorch native.
+    if (torch::isnan(result).any().item<bool>()) {
+        stats.fp32_direct.fetch_sub(1, std::memory_order_relaxed);
+        stats.pytorch_fallback.fetch_add(1, std::memory_order_relaxed);
+        return at::native::scaled_dot_product_attention(
+            query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+    }
 
     // Convert result back to original layout if input was FLUX
     // Note: The layout conversion is now handled within call_swift_flash_attention
