@@ -50,7 +50,13 @@ def metal_device():
 
 @pytest.fixture(autouse=True)
 def cleanup_metal():
-    """Clean up Metal resources after each test."""
+    """Clean up Metal resources before and after each test."""
+    # Clear MPS cache before test to reclaim memory from prior tests.
+    # On CI runners (virtualized M1, ~8 GiB), accumulated MPS allocations
+    # from earlier tests can exhaust GPU memory before later tests start.
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    gc.collect()
     yield
     # Clean up after test
     if torch.backends.mps.is_available():
