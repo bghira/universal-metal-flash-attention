@@ -232,6 +232,7 @@ public func mfa_quantized_forward_with_lse(
   _ v: UnsafeMutableRawPointer?,
   _ out: UnsafeMutableRawPointer?,
   _ lse: UnsafeMutableRawPointer?,
+  _ mask: UnsafeMutableRawPointer?,
   _ batchSize: UInt32,
   _ seqLenQ: UInt32,
   _ seqLenKV: UInt32,
@@ -258,6 +259,9 @@ public func mfa_quantized_forward_with_lse(
   let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
   let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
   let lseBuffer = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
+  let maskBuffer: MFABuffer? = mask.map {
+    Unmanaged<MFABuffer>.fromOpaque($0).takeUnretainedValue()
+  }
 
   let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
   let mode: QuantizationMode = switch quantMode {
@@ -310,6 +314,7 @@ public func mfa_quantized_forward_with_lse(
 
   let quantElemSize = precision.size
   let fp32Size = MemoryLayout<Float>.stride
+  let maskHeadSize = Int(seqLenQ) * Int(seqLenKV) * fp32Size
 
   for batchIdx in 0..<Int(batchSize) {
     for headIdx in 0..<Int(numHeads) {
@@ -318,6 +323,7 @@ public func mfa_quantized_forward_with_lse(
       let vOff = kOff
       let oOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * fp32Size
       let lseOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * fp32Size
+      let maskOff = (batchIdx * Int(numHeads) + headIdx) * maskHeadSize
 
       guard
         let cmd = quantAttention.forward(
@@ -325,7 +331,9 @@ public func mfa_quantized_forward_with_lse(
           output: outBuffer.buffer,
           descriptor: quantDescriptor,
           bufferOffsets: (q: qOff, k: kOff, v: vOff, o: oOff, lse: lseOff),
-          externalLogsumexp: lseBuffer.buffer
+          externalLogsumexp: lseBuffer.buffer,
+          mask: maskBuffer?.buffer,
+          maskOffset: maskOff
         )
       else {
         return 5
@@ -360,6 +368,7 @@ public func mfa_quantized_backward(
   _ gradQ: UnsafeMutableRawPointer?,
   _ gradK: UnsafeMutableRawPointer?,
   _ gradV: UnsafeMutableRawPointer?,
+  _ mask: UnsafeMutableRawPointer?,
   _ batchSize: UInt32,
   _ seqLenQ: UInt32,
   _ seqLenKV: UInt32,
@@ -393,6 +402,9 @@ public func mfa_quantized_backward(
   let gradQBuffer = Unmanaged<MFABuffer>.fromOpaque(gradQ).takeUnretainedValue()
   let gradKBuffer = Unmanaged<MFABuffer>.fromOpaque(gradK).takeUnretainedValue()
   let gradVBuffer = Unmanaged<MFABuffer>.fromOpaque(gradV).takeUnretainedValue()
+  let maskBuffer: MFABuffer? = mask.map {
+    Unmanaged<MFABuffer>.fromOpaque($0).takeUnretainedValue()
+  }
 
   let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
   let mode: QuantizationMode = switch quantMode {
@@ -452,6 +464,8 @@ public func mfa_quantized_backward(
     options: .storageModeShared
   )!
 
+  let maskHeadSize = Int(seqLenQ) * Int(seqLenKV) * fp32Size
+
   for batchIdx in 0..<Int(batchSize) {
     for headIdx in 0..<Int(numHeads) {
       let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
@@ -463,6 +477,7 @@ public func mfa_quantized_backward(
       let gqOff = oOff
       let gkOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * fp32Size
       let gvOff = gkOff
+      let maskOff = (batchIdx * Int(numHeads) + headIdx) * maskHeadSize
 
       guard
         let cmdBQ = quantAttention.backwardQuery(
@@ -476,15 +491,11 @@ public func mfa_quantized_backward(
           dValues: dBuf,
           descriptor: quantDescriptor,
           bufferOffsets: (
-            q: qOff,
-            k: kOff,
-            v: vOff,
-            o: oOff,
-            go: goOff,
-            lse: lseOff,
-            gq: gqOff,
-            dv: 0
-          )
+            q: qOff, k: kOff, v: vOff, o: oOff,
+            go: goOff, lse: lseOff, gq: gqOff, dv: 0
+          ),
+          mask: maskBuffer?.buffer,
+          maskOffset: maskOff
         )
       else {
         return 5
@@ -509,15 +520,12 @@ public func mfa_quantized_backward(
           gradValue: gradVBuffer.buffer,
           descriptor: quantDescriptor,
           bufferOffsets: (
-            q: qOff,
-            k: kOff,
-            v: vOff,
-            go: goOff,
-            lse: lseOff,
-            dv: 0,
-            gk: gkOff,
-            gv: gvOff
-          )
+            q: qOff, k: kOff, v: vOff,
+            go: goOff, lse: lseOff, dv: 0,
+            gk: gkOff, gv: gvOff
+          ),
+          mask: maskBuffer?.buffer,
+          maskOffset: maskOff
         )
       else {
         return 5

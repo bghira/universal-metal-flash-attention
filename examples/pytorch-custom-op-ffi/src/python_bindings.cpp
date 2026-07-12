@@ -26,7 +26,8 @@ namespace metal_sdpa {
         bool is_causal,
         double scale,
         int64_t target_precision,
-        int64_t quant_mode);
+        int64_t quant_mode,
+        c10::optional<torch::Tensor> attn_mask = c10::nullopt);
     void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size);
     void set_quantization_mode(int64_t precision, int64_t block_mode);
     void clear_quantization_mode();
@@ -77,7 +78,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("is_causal") = false,
           py::arg("scale") = 0.0,
           py::arg("target_precision") = 3,  // 3=INT8, 4=INT4
-          py::arg("quant_mode") = 0);       // 0=tensorWise, 2=blockwise
+          py::arg("quant_mode") = 0,        // 0=tensorWise, 2=blockwise
+          py::arg("attn_mask") = py::none());
 
     m.def("set_quantization_mode",
           &metal_sdpa::set_quantization_mode,

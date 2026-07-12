@@ -27,7 +27,8 @@ torch::Tensor metal_quantized_flash_attention_autograd(
     bool is_causal,
     double scale,
     int64_t target_precision,
-    int64_t quant_mode);
+    int64_t quant_mode,
+    c10::optional<torch::Tensor> attn_mask);
 
 torch::Tensor metal_flash_attention_autograd(
     const torch::Tensor& query,
@@ -1374,18 +1375,20 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     }
 
     // ---- Route to quantized autograd when INT8/INT4 mode is active ----
-    if (quant_precision().load() != 0 && !has_real_mask) {
+    // Now handles arbitrary masks (bool, additive, batched).
+    if (quant_precision().load() != 0) {
         stats.quantized_autograd.fetch_add(1, std::memory_order_relaxed);
         return metal_quantized_flash_attention_autograd(
             query, key, value, is_causal, sm_scale,
             static_cast<int64_t>(quant_precision().load()),
-            static_cast<int64_t>(quant_block_mode().load()));
+            static_cast<int64_t>(quant_block_mode().load()),
+            has_real_mask ? attn_mask : c10::optional<torch::Tensor>());
     }
 
     // ---- Route to FP32 autograd when inputs require grad ----
     bool needs_autograd = query.requires_grad() || key.requires_grad() ||
                           value.requires_grad();
-    if (needs_autograd && !has_real_mask) {
+    if (needs_autograd) {
         stats.fp32_autograd.fetch_add(1, std::memory_order_relaxed);
         return metal_flash_attention_autograd(
             query, key, value, is_causal, sm_scale);
@@ -2420,7 +2423,8 @@ public:
       torch::autograd::AutogradContext *ctx,
       torch::Tensor query, torch::Tensor key, torch::Tensor value,
       bool is_causal, double scale,
-      int64_t target_precision, int64_t quant_mode) {
+      int64_t target_precision, int64_t quant_mode,
+      c10::optional<torch::Tensor> attn_mask = c10::nullopt) {
 
     MetalSDPABackend::ensure_initialized();
     auto mfa_ctx = MetalSDPABackend::get_swift_context();
@@ -2464,9 +2468,32 @@ public:
     auto out_b = bind(output);
     auto lse_b = bind(lse);
 
+    // Preprocess mask: convert to float32 additive [B, H, S_q, S_kv].
+    // Bool: True→0.0 (attend), False→-inf (mask out).
+    // Float: pass through as-is.
+    torch::Tensor mask_tensor;
+    mfa_buffer_t mask_b = nullptr;
+    if (attn_mask.has_value() && attn_mask.value().defined()) {
+        auto m = attn_mask.value();
+        if (m.scalar_type() == torch::kBool) {
+            m = m.to(torch::kFloat32);
+            m.masked_fill_(m == 0.0f, -std::numeric_limits<float>::infinity());
+        } else {
+            m = m.to(torch::kFloat32);
+        }
+        // Expand to [B, H, S_q, S_kv]
+        while (m.dim() < 4) m = m.unsqueeze(0);
+        m = m.expand({batch, heads, seq_q, seq_kv}).contiguous();
+        mask_tensor = m;
+        if (query.device().type() == at::kMPS) {
+            torch::mps::synchronize();
+        }
+        mask_b = bind(mask_tensor);
+    }
+
     auto result = mfa_quantized_forward_with_lse(
         mfa_ctx,
-        q_b, k_b, v_b, out_b, lse_b,
+        q_b, k_b, v_b, out_b, lse_b, mask_b,
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
         static_cast<int32_t>(target_precision),
@@ -2477,6 +2504,7 @@ public:
     mfa_destroy_buffer(v_b);
     mfa_destroy_buffer(out_b);
     mfa_destroy_buffer(lse_b);
+    if (mask_b) mfa_destroy_buffer(mask_b);
 
     if (result != 0) {
       throw std::runtime_error(
@@ -2490,6 +2518,9 @@ public:
     ctx->saved_data["is_causal"] = is_causal;
     ctx->saved_data["target_precision"] = target_precision;
     ctx->saved_data["quant_mode"] = quant_mode;
+    if (mask_tensor.defined()) {
+        ctx->saved_data["mask"] = mask_tensor;
+    }
 
     return output;
   }
@@ -2508,6 +2539,10 @@ public:
     bool is_causal = ctx->saved_data["is_causal"].toBool();
     int64_t target_precision = ctx->saved_data["target_precision"].toInt();
     int64_t quant_mode = ctx->saved_data["quant_mode"].toInt();
+    torch::Tensor mask_tensor;
+    if (ctx->saved_data.count("mask") && ctx->saved_data["mask"].isTensor()) {
+        mask_tensor = ctx->saved_data["mask"].toTensor();
+    }
 
     auto d_output = grad_outputs[0].to(torch::kFloat32).contiguous();
 
@@ -2547,11 +2582,19 @@ public:
     auto dk_b = bind(d_key);
     auto dv_b = bind(d_value);
 
+    mfa_buffer_t mask_b = nullptr;
+    if (mask_tensor.defined()) {
+        if (query.device().type() == at::kMPS) {
+            torch::mps::synchronize();
+        }
+        mask_b = bind(mask_tensor);
+    }
+
     auto result = mfa_quantized_backward(
         mfa_ctx,
         q_b, k_b, v_b,
         out_b, dout_b, lse_b,
-        dq_b, dk_b, dv_b,
+        dq_b, dk_b, dv_b, mask_b,
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
         static_cast<int32_t>(target_precision),
@@ -2566,6 +2609,7 @@ public:
     mfa_destroy_buffer(dq_b);
     mfa_destroy_buffer(dk_b);
     mfa_destroy_buffer(dv_b);
+    if (mask_b) mfa_destroy_buffer(mask_b);
 
     if (result != 0) {
       throw std::runtime_error(
@@ -2575,7 +2619,8 @@ public:
 
     return {d_query, d_key, d_value,
             torch::Tensor(), torch::Tensor(),
-            torch::Tensor(), torch::Tensor()};
+            torch::Tensor(), torch::Tensor(),
+            torch::Tensor()};
   }
 };
 
@@ -2586,10 +2631,11 @@ torch::Tensor metal_quantized_flash_attention_autograd(
     bool is_causal,
     double scale,
     int64_t target_precision,
-    int64_t quant_mode) {
+    int64_t quant_mode,
+    c10::optional<torch::Tensor> attn_mask = c10::nullopt) {
   return MetalQuantizedFlashAttentionFn::apply(
       query, key, value, is_causal, scale,
-      target_precision, quant_mode);
+      target_precision, quant_mode, attn_mask);
 }
 
 // Hadamard rotation helper for Python binding

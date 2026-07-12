@@ -478,16 +478,16 @@ extern "C" {
 
     // Multi-head quantized attention with autograd support.
     // Forward: runtime-quantizes Q/K/V to INT8, runs quantized flash
-    // attention, writes output + LSE.
+    // attention, writes output + LSE. Optional mask (float32 additive
+    // [B,H,S_q,S_kv] or nil).
     int32_t mfa_quantized_forward_with_lse(
         mfa_context_t context,
         mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
-        mfa_buffer_t out, mfa_buffer_t lse,
+        mfa_buffer_t out, mfa_buffer_t lse, mfa_buffer_t mask,
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
-        int32_t target_precision, // 3=INT8, 4=INT4
-        int32_t quant_mode);       // 0=tensorWise, 2=blockwise
+        int32_t target_precision, int32_t quant_mode);
 
     // Backward: re-quantizes Q/K/V, runs quantized flash backward.
     int32_t mfa_quantized_backward(
@@ -495,11 +495,11 @@ extern "C" {
         mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
         mfa_buffer_t out, mfa_buffer_t grad_out, mfa_buffer_t lse,
         mfa_buffer_t grad_q, mfa_buffer_t grad_k, mfa_buffer_t grad_v,
+        mfa_buffer_t mask,
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
-        int32_t target_precision,
-        int32_t quant_mode);
+        int32_t target_precision, int32_t quant_mode);
 
     // =============================================================================
     // Multi-Latent Attention (MLA) Support
