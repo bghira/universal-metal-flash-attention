@@ -211,8 +211,309 @@ public func mfa_multihead_attention_quantized_direct(
     0, 0, // qScale, qZeroPoint - not used
     0, 0, // kScale, kZeroPoint - not used
     0, 0, // vScale, vZeroPoint - not used
-    qPrecision, kPrecision, vPrecision,
-    2, // outputPrecision = FP32
-    false, false, false, false // no transpose
+     qPrecision, kPrecision, vPrecision,
+     2, // outputPrecision = FP32
+     false, false, false, false // no transpose
+   )
+}
+
+// MARK: - Multi-Head Quantized Attention with Autograd Support
+
+/// Forward pass with runtime INT8 quantization + LSE output for autograd.
+///
+/// Quantizes Q/K/V to INT8 (per-tensor), then dispatches the quantized flash
+/// attention kernel per head. Writes both the attention output and the
+/// logsumexp buffer needed by the backward pass.
+@_cdecl("mfa_quantized_forward_with_lse")
+public func mfa_quantized_forward_with_lse(
+  _ context: UnsafeMutableRawPointer?,
+  _ q: UnsafeMutableRawPointer?,
+  _ k: UnsafeMutableRawPointer?,
+  _ v: UnsafeMutableRawPointer?,
+  _ out: UnsafeMutableRawPointer?,
+  _ lse: UnsafeMutableRawPointer?,
+  _ batchSize: UInt32,
+  _ seqLenQ: UInt32,
+  _ seqLenKV: UInt32,
+  _ numHeads: UInt32,
+  _ headDim: UInt16,
+  _ softmaxScale: Float,
+  _ causal: Bool,
+  _ targetPrecision: Int32,
+  _ quantMode: Int32
+)
+  -> Int32
+{
+  guard
+    let context,
+    let q, let k, let v, let out, let lse
+  else {
+    return 1
+  }
+
+  let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  let device = mfaContext.device
+
+  let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
+  let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
+  let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
+  let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
+  let lseBuffer = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
+
+  let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
+  let mode: QuantizationMode = switch quantMode {
+  case 0: .tensorWise
+  case 2: .blockwise(blockSizeK: 64)
+  default: .tensorWise
+  }
+
+  let quantAttention = QuantizedAttention(device: device)
+
+  let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
+  let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
+
+  guard
+    let qTensor = quantAttention.createQuantizedTensorFromBufferPublic(
+      buffer: qBuffer.buffer, shape: fullQShape,
+      inputPrecision: .FP32, targetPrecision: precision,
+      quantizationMode: mode, targetStrategy: .legacy
+    ),
+    let kTensor = quantAttention.createQuantizedTensorFromBufferPublic(
+      buffer: kBuffer.buffer, shape: fullKVShape,
+      inputPrecision: .FP32, targetPrecision: precision,
+      quantizationMode: mode, targetStrategy: .legacy
+    ),
+    let vTensor = quantAttention.createQuantizedTensorFromBufferPublic(
+      buffer: vBuffer.buffer, shape: fullKVShape,
+      inputPrecision: .FP32, targetPrecision: precision,
+      quantizationMode: mode, targetStrategy: .legacy
+    )
+  else {
+    return 5
+  }
+
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (
+    row: seqLenQ, column: seqLenKV, head: headDim
   )
+  baseDescriptor.transposeState = (Q: false, K: false, V: false, O: false)
+  baseDescriptor.softmaxScale = softmaxScale
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
+
+  var quantConfig = QuantizedAttention.Configuration()
+  quantConfig.queryPrecision = qTensor.parameters.precision
+  quantConfig.keyPrecision = kTensor.parameters.precision
+  quantConfig.valuePrecision = vTensor.parameters.precision
+
+  let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
+    baseDescriptor: baseDescriptor, quantizationConfig: quantConfig
+  )
+
+  let quantElemSize = precision.size
+  let fp32Size = MemoryLayout<Float>.stride
+
+  for batchIdx in 0..<Int(batchSize) {
+    for headIdx in 0..<Int(numHeads) {
+      let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
+      let kOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * quantElemSize
+      let vOff = kOff
+      let oOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * fp32Size
+      let lseOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * fp32Size
+
+      guard
+        let cmd = quantAttention.forward(
+          query: qTensor, key: kTensor, value: vTensor,
+          output: outBuffer.buffer,
+          descriptor: quantDescriptor,
+          bufferOffsets: (q: qOff, k: kOff, v: vOff, o: oOff),
+          externalLogsumexp: lseBuffer.buffer
+        )
+      else {
+        return 5
+      }
+      _ = lseOff
+      cmd.commit()
+      cmd.waitUntilCompleted()
+
+      if let error = cmd.error {
+        print("Quantized forward error (batch \(batchIdx), head \(headIdx)): \(error)")
+        return 5
+      }
+    }
+  }
+
+  return 0
+}
+
+/// Backward pass with runtime INT8 quantization.
+///
+/// Re-quantizes Q/K/V to INT8 (deterministic — same inputs produce same
+/// quantized values as the forward), then dispatches the quantized flash
+/// backward kernels per head. Computes dQ, dK, dV.
+@_cdecl("mfa_quantized_backward")
+public func mfa_quantized_backward(
+  _ context: UnsafeMutableRawPointer?,
+  _ q: UnsafeMutableRawPointer?,
+  _ k: UnsafeMutableRawPointer?,
+  _ v: UnsafeMutableRawPointer?,
+  _ out: UnsafeMutableRawPointer?,
+  _ gradOut: UnsafeMutableRawPointer?,
+  _ lse: UnsafeMutableRawPointer?,
+  _ gradQ: UnsafeMutableRawPointer?,
+  _ gradK: UnsafeMutableRawPointer?,
+  _ gradV: UnsafeMutableRawPointer?,
+  _ batchSize: UInt32,
+  _ seqLenQ: UInt32,
+  _ seqLenKV: UInt32,
+  _ numHeads: UInt32,
+  _ headDim: UInt16,
+  _ softmaxScale: Float,
+  _ causal: Bool,
+  _ targetPrecision: Int32,
+  _ quantMode: Int32
+)
+  -> Int32
+{
+  guard
+    let context,
+    let q, let k, let v, let out,
+    let gradOut, let lse,
+    let gradQ, let gradK, let gradV
+  else {
+    return 1
+  }
+
+  let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  let device = mfaContext.device
+
+  let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
+  let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
+  let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
+  let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
+  let gradOutBuffer = Unmanaged<MFABuffer>.fromOpaque(gradOut).takeUnretainedValue()
+  let lseBuffer = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
+  let gradQBuffer = Unmanaged<MFABuffer>.fromOpaque(gradQ).takeUnretainedValue()
+  let gradKBuffer = Unmanaged<MFABuffer>.fromOpaque(gradK).takeUnretainedValue()
+  let gradVBuffer = Unmanaged<MFABuffer>.fromOpaque(gradV).takeUnretainedValue()
+
+  let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
+  let mode: QuantizationMode = switch quantMode {
+  case 0: .tensorWise
+  case 2: .blockwise(blockSizeK: 64)
+  default: .tensorWise
+  }
+
+  let quantAttention = QuantizedAttention(device: device)
+
+  let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
+  let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
+
+  guard
+    let qTensor = quantAttention.createQuantizedTensorFromBufferPublic(
+      buffer: qBuffer.buffer, shape: fullQShape,
+      inputPrecision: .FP32, targetPrecision: precision,
+      quantizationMode: mode, targetStrategy: .legacy
+    ),
+    let kTensor = quantAttention.createQuantizedTensorFromBufferPublic(
+      buffer: kBuffer.buffer, shape: fullKVShape,
+      inputPrecision: .FP32, targetPrecision: precision,
+      quantizationMode: mode, targetStrategy: .legacy
+    ),
+    let vTensor = quantAttention.createQuantizedTensorFromBufferPublic(
+      buffer: vBuffer.buffer, shape: fullKVShape,
+      inputPrecision: .FP32, targetPrecision: precision,
+      quantizationMode: mode, targetStrategy: .legacy
+    )
+  else {
+    return 5
+  }
+
+  var baseDescriptor = AttentionDescriptor()
+  baseDescriptor.matrixDimensions = (
+    row: seqLenQ, column: seqLenKV, head: headDim
+  )
+  baseDescriptor.transposeState = (Q: false, K: false, V: false, O: false)
+  baseDescriptor.softmaxScale = softmaxScale
+  baseDescriptor.sparsityPattern = causal ? .causal : .none
+
+  var quantConfig = QuantizedAttention.Configuration()
+  quantConfig.queryPrecision = qTensor.parameters.precision
+  quantConfig.keyPrecision = kTensor.parameters.precision
+  quantConfig.valuePrecision = vTensor.parameters.precision
+
+  let quantDescriptor = QuantizedAttention.QuantizedAttentionDescriptor(
+    baseDescriptor: baseDescriptor, quantizationConfig: quantConfig
+  )
+
+  let quantElemSize = precision.size
+  let fp32Size = MemoryLayout<Float>.stride
+
+  for batchIdx in 0..<Int(batchSize) {
+    for headIdx in 0..<Int(numHeads) {
+      let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
+      let kOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * quantElemSize
+      let vOff = kOff
+      let oOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * fp32Size
+      let goOff = oOff
+      let lseOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * fp32Size
+      let gqOff = oOff
+      let gkOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * fp32Size
+      let gvOff = gkOff
+
+      let dBuf = device.makeBuffer(
+        length: Int(seqLenQ) * fp32Size,
+        options: .storageModeShared
+      )!
+
+      guard
+        let cmdBQ = quantAttention.backwardQuery(
+          query: qTensor,
+          key: kTensor,
+          value: vTensor,
+          output: outBuffer.buffer,
+          gradOutput: gradOutBuffer.buffer,
+          logsumexp: lseBuffer.buffer,
+          gradQuery: gradQBuffer.buffer,
+          dValues: dBuf,
+          descriptor: quantDescriptor,
+          bufferOffsets: (q: qOff, k: kOff, v: vOff, o: oOff, go: goOff, lse: lseOff, gq: gqOff, dv: 0)
+        )
+      else {
+        return 5
+      }
+      cmdBQ.commit()
+      cmdBQ.waitUntilCompleted()
+
+      if let error = cmdBQ.error {
+        print("Quantized backwardQuery error: \(error)")
+        return 5
+      }
+
+      guard
+        let cmdBK = quantAttention.backwardKeyValue(
+          query: qTensor,
+          key: kTensor,
+          value: vTensor,
+          gradOutput: gradOutBuffer.buffer,
+          logsumexp: lseBuffer.buffer,
+          dValues: dBuf,
+          gradKey: gradKBuffer.buffer,
+          gradValue: gradVBuffer.buffer,
+          descriptor: quantDescriptor,
+          bufferOffsets: (q: qOff, k: kOff, v: vOff, go: goOff, lse: lseOff, dv: 0, gk: gkOff, gv: gvOff)
+        )
+      else {
+        return 5
+      }
+      cmdBK.commit()
+      cmdBK.waitUntilCompleted()
+
+      if let error = cmdBK.error {
+        print("Quantized backwardKeyValue error: \(error)")
+        return 5
+      }
+    }
+  }
+
+  return 0
 }

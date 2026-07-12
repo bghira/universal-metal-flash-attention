@@ -19,6 +19,14 @@ namespace metal_sdpa {
         bool is_causal,
         double scale);
     void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size);
+    torch::Tensor metal_quantized_flash_attention_autograd(
+        const torch::Tensor& query,
+        const torch::Tensor& key,
+        const torch::Tensor& value,
+        bool is_causal,
+        double scale,
+        int64_t target_precision,
+        int64_t quant_mode);
 }
 
 namespace py = pybind11;
@@ -54,6 +62,17 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("value"),
           py::arg("is_causal") = false,
           py::arg("scale") = 0.0);
+
+    m.def("metal_quantized_flash_attention_autograd",
+          &metal_sdpa::metal_quantized_flash_attention_autograd,
+          "Quantized Metal Flash Attention with autograd (INT8/INT4 forward + backward)",
+          py::arg("query"),
+          py::arg("key"),
+          py::arg("value"),
+          py::arg("is_causal") = false,
+          py::arg("scale") = 0.0,
+          py::arg("target_precision") = 3,  // 3=INT8, 4=INT4
+          py::arg("quant_mode") = 0);       // 0=tensorWise, 2=blockwise
 
     m.def("hadamard_rotate",
           &metal_sdpa::hadamard_rotate_inplace,
