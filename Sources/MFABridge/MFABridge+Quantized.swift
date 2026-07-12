@@ -325,13 +325,12 @@ public func mfa_quantized_forward_with_lse(
           query: qTensor, key: kTensor, value: vTensor,
           output: outBuffer.buffer,
           descriptor: quantDescriptor,
-          bufferOffsets: (q: qOff, k: kOff, v: vOff, o: oOff),
+          bufferOffsets: (q: qOff, k: kOff, v: vOff, o: oOff, lse: lseOff),
           externalLogsumexp: lseBuffer.buffer
         )
       else {
         return 5
       }
-      _ = lseOff
       cmd.commit()
       cmd.waitUntilCompleted()
 
