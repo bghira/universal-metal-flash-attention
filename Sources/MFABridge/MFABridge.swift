@@ -2618,7 +2618,7 @@ public func mfa_attention_forward_with_lse(
   let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
   let lseBuffer = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
 
-  let multiHeadAttention = mfaContext.multiHeadAttention
+  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
 
   var baseDescriptor = AttentionDescriptor()
   baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)

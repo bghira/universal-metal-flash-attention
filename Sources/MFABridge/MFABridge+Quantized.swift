@@ -270,7 +270,7 @@ public func mfa_quantized_forward_with_lse(
   default: .tensorWise
   }
 
-  let quantAttention = mfaContext.quantizedAttention
+  let quantAttention = QuantizedAttention(device: mfaContext.device)
 
   let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
   let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
@@ -312,14 +312,18 @@ public func mfa_quantized_forward_with_lse(
     baseDescriptor: baseDescriptor, quantizationConfig: quantConfig
   )
 
-  let quantElemSize = precision.size
+  // INT4 data is packed 2 values per byte; INT8 is 1 byte per value.
+  let quantElemBytes = precision == .INT4
+    ? 0.5 // packed: 2 nibbles per byte
+    : Double(precision.size)
   let fp32Size = MemoryLayout<Float>.stride
   let maskHeadSize = Int(seqLenQ) * Int(seqLenKV) * fp32Size
 
   for batchIdx in 0..<Int(batchSize) {
     for headIdx in 0..<Int(numHeads) {
-      let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
-      let kOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * quantElemSize
+      let headIdxFlat = batchIdx * Int(numHeads) + headIdx
+      let qOff = Int(Double(headIdxFlat) * Double(seqLenQ) * Double(headDim) * quantElemBytes)
+      let kOff = Int(Double(headIdxFlat) * Double(seqLenKV) * Double(headDim) * quantElemBytes)
       let vOff = kOff
       let oOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * fp32Size
       let lseOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * fp32Size
@@ -413,7 +417,7 @@ public func mfa_quantized_backward(
   default: .tensorWise
   }
 
-  let quantAttention = mfaContext.quantizedAttention
+  let quantAttention = QuantizedAttention(device: mfaContext.device)
 
   let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
   let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
@@ -455,7 +459,9 @@ public func mfa_quantized_backward(
     baseDescriptor: baseDescriptor, quantizationConfig: quantConfig
   )
 
-  let quantElemSize = precision.size
+  let quantElemBytes = precision == .INT4
+    ? 0.5
+    : Double(precision.size)
   let fp32Size = MemoryLayout<Float>.stride
 
   // Scratch D buffer — allocated once, reused for all heads.
@@ -468,8 +474,9 @@ public func mfa_quantized_backward(
 
   for batchIdx in 0..<Int(batchSize) {
     for headIdx in 0..<Int(numHeads) {
-      let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
-      let kOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * quantElemSize
+      let headIdxFlat = batchIdx * Int(numHeads) + headIdx
+      let qOff = Int(Double(headIdxFlat) * Double(seqLenQ) * Double(headDim) * quantElemBytes)
+      let kOff = Int(Double(headIdxFlat) * Double(seqLenKV) * Double(headDim) * quantElemBytes)
       let vOff = kOff
       let oOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * fp32Size
       let goOff = oOff
