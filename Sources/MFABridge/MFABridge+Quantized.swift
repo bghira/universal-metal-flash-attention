@@ -211,10 +211,10 @@ public func mfa_multihead_attention_quantized_direct(
     0, 0, // qScale, qZeroPoint - not used
     0, 0, // kScale, kZeroPoint - not used
     0, 0, // vScale, vZeroPoint - not used
-     qPrecision, kPrecision, vPrecision,
-     2, // outputPrecision = FP32
-     false, false, false, false // no transpose
-   )
+    qPrecision, kPrecision, vPrecision,
+    2, // outputPrecision = FP32
+    false, false, false, false // no transpose
+  )
 }
 
 // MARK: - Multi-Head Quantized Attention with Autograd Support
@@ -475,7 +475,16 @@ public func mfa_quantized_backward(
           gradQuery: gradQBuffer.buffer,
           dValues: dBuf,
           descriptor: quantDescriptor,
-          bufferOffsets: (q: qOff, k: kOff, v: vOff, o: oOff, go: goOff, lse: lseOff, gq: gqOff, dv: 0)
+          bufferOffsets: (
+            q: qOff,
+            k: kOff,
+            v: vOff,
+            o: oOff,
+            go: goOff,
+            lse: lseOff,
+            gq: gqOff,
+            dv: 0
+          )
         )
       else {
         return 5
@@ -499,7 +508,16 @@ public func mfa_quantized_backward(
           gradKey: gradKBuffer.buffer,
           gradValue: gradVBuffer.buffer,
           descriptor: quantDescriptor,
-          bufferOffsets: (q: qOff, k: kOff, v: vOff, go: goOff, lse: lseOff, dv: 0, gk: gkOff, gv: gvOff)
+          bufferOffsets: (
+            q: qOff,
+            k: kOff,
+            v: vOff,
+            go: goOff,
+            lse: lseOff,
+            dv: 0,
+            gk: gkOff,
+            gv: gvOff
+          )
         )
       else {
         return 5

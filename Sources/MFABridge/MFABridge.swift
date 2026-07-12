@@ -2594,15 +2594,18 @@ public func mfa_attention_forward_with_lse(
 
   let queryShape = MultiHeadShape(
     batchSize: batchSize, numHeads: numHeads,
-    sequenceLength: seqLenQ, headDimension: headDim)
+    sequenceLength: seqLenQ, headDimension: headDim
+  )
   let kvShape = MultiHeadShape(
     batchSize: batchSize, numHeads: numHeads,
-    sequenceLength: seqLenKV, headDimension: headDim)
+    sequenceLength: seqLenKV, headDimension: headDim
+  )
 
   let descriptor = MultiHeadAttentionDescriptor(
     baseDescriptor: baseDescriptor,
     queryShape: queryShape, keyShape: kvShape, valueShape: kvShape,
-    broadcastMode: .standard, dispatchStrategy: .perBatch)
+    broadcastMode: .standard, dispatchStrategy: .perBatch
+  )
 
   guard
     let commandBuffer = multiHeadAttention.forward(
@@ -2661,7 +2664,8 @@ public func mfa_attention_backward(
 )
   -> Int32
 {
-  guard let context,
+  guard
+    let context,
     let dout, let q, let k, let v, let out, let lse,
     let dq, let dk, let dv, let dBuffer
   else {
@@ -2692,15 +2696,18 @@ public func mfa_attention_backward(
 
   let queryShape = MultiHeadShape(
     batchSize: batchSize, numHeads: numHeads,
-    sequenceLength: seqLenQ, headDimension: headDim)
+    sequenceLength: seqLenQ, headDimension: headDim
+  )
   let kvShape = MultiHeadShape(
     batchSize: batchSize, numHeads: numHeads,
-    sequenceLength: seqLenKV, headDimension: headDim)
+    sequenceLength: seqLenKV, headDimension: headDim
+  )
 
   let descriptor = MultiHeadAttentionDescriptor(
     baseDescriptor: baseDescriptor,
     queryShape: queryShape, keyShape: kvShape, valueShape: kvShape,
-    broadcastMode: .standard, dispatchStrategy: .perBatch)
+    broadcastMode: .standard, dispatchStrategy: .perBatch
+  )
 
   // Zero the D scratch buffer (needed by backwardQuery).
   let dCount = Int(batchSize) * Int(numHeads) * Int(seqLenQ)
