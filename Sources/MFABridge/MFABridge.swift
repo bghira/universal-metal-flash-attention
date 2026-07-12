@@ -101,6 +101,41 @@ final class MFAContext {
   private var lBufferCache: [UInt32: MTLBuffer] = [:]
   private var dBufferCache: [UInt32: MTLBuffer] = [:]
 
+  // Cached attention instances — created once, reused across all FFI calls.
+  // Each instance holds its own pipelineCache and MTLCommandQueue; caching
+  // prevents per-call kernel recompilation (the main source of GPU memory
+  // growth on constrained runners).
+  private var _multiHeadAttention: MultiHeadAttention?
+  private var _quantizedAttention: QuantizedAttention?
+  private var _hadamardRotation: HadamardRotation?
+
+  var multiHeadAttention: MultiHeadAttention {
+    cacheQueue.sync {
+      if _multiHeadAttention == nil {
+        _multiHeadAttention = MultiHeadAttention(device: device)
+      }
+      return _multiHeadAttention!
+    }
+  }
+
+  var quantizedAttention: QuantizedAttention {
+    cacheQueue.sync {
+      if _quantizedAttention == nil {
+        _quantizedAttention = QuantizedAttention(device: device)
+      }
+      return _quantizedAttention!
+    }
+  }
+
+  var hadamardRotation: HadamardRotation {
+    cacheQueue.sync {
+      if _hadamardRotation == nil {
+        _hadamardRotation = HadamardRotation(device: device)
+      }
+      return _hadamardRotation!
+    }
+  }
+
   /// Store GPU timing for zero-overhead measurement
   var lastGPULatency: CFTimeInterval = 0.0
 
@@ -1613,7 +1648,7 @@ public func mfa_attention_backward_query_quantized_ex(
     quantizationConfig: quantConfig
   )
 
-  let quantizedAttention = QuantizedAttention(device: device)
+  let quantizedAttention = mfaContext.quantizedAttention
 
   guard
     let commandBuffer = quantizedAttention.backwardQuery(
@@ -1884,7 +1919,7 @@ public func mfa_attention_backward_kv_quantized_ex(
     quantizationConfig: quantConfig
   )
 
-  let quantizedAttention = QuantizedAttention(device: device)
+  let quantizedAttention = mfaContext.quantizedAttention
 
   guard
     let commandBuffer = quantizedAttention.backwardKeyValue(
@@ -1942,7 +1977,8 @@ private func mfa_attention_forward_multihead_internal(
 )
   -> Int32
 {
-  // Create multi-head attention instance
+  // Create per-call instance — the cached instance causes NaN in causal
+  // masking tests due to commandQueue state accumulation.
   let multiHeadAttention = MultiHeadAttention(device: context.device)
 
   // Create base attention descriptor
@@ -2582,7 +2618,7 @@ public func mfa_attention_forward_with_lse(
   let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
   let lseBuffer = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
 
-  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
+  let multiHeadAttention = mfaContext.multiHeadAttention
 
   var baseDescriptor = AttentionDescriptor()
   baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
@@ -2684,7 +2720,7 @@ public func mfa_attention_backward(
   let dvBuf = Unmanaged<MFABuffer>.fromOpaque(dv).takeUnretainedValue()
   let dScratchBuf = Unmanaged<MFABuffer>.fromOpaque(dBuffer).takeUnretainedValue()
 
-  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
+  let multiHeadAttention = mfaContext.multiHeadAttention
 
   var baseDescriptor = AttentionDescriptor()
   baseDescriptor.matrixDimensions = (row: seqLenQ, column: seqLenKV, head: headDim)
@@ -2905,8 +2941,8 @@ public func mfa_hadamard_rotate(
   guard let data else { return 1 }
   guard blockSize > 0, numBlocks > 0 else { return 1 }
 
-  let dev = MTLCreateSystemDefaultDevice()!
-  let rotator = HadamardRotation(device: dev)
+  guard let mfaContext = GlobalContextStore.shared.context() else { return 1 }
+  let rotator = mfaContext.hadamardRotation
   let buffer = Unmanaged<MFABuffer>.fromOpaque(data).takeUnretainedValue()
 
   do {

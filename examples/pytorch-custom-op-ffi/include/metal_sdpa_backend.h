@@ -599,6 +599,19 @@ public:
 
     static mfa_context_t get_swift_context() { return swift_context_; }
 
+    // Global quantization mode for dispatcher-level SDPA routing.
+    // When active, scaled_dot_product_attention routes through
+    // MetalQuantizedFlashAttentionFn instead of the FP32 path.
+    // Set by SimpleTuner's int8/int4 profiles via set_quantization_mode().
+    static std::atomic<int32_t>& quant_precision() {
+        static std::atomic<int32_t> v{0}; // 0=disabled, 3=INT8, 4=INT4
+        return v;
+    }
+    static std::atomic<int32_t>& quant_block_mode() {
+        static std::atomic<int32_t> v{0}; // 0=tensorWise, 2=blockwise
+        return v;
+    }
+
 private:
     static mfa_context_t swift_context_;
     static bool is_initialized_;
@@ -726,6 +739,12 @@ namespace metal_sdpa {
     // Utility functions for Python binding
     bool is_metal_available();
     std::tuple<int, int, int> get_version();
+
+    // Quantization mode control for dispatcher-level SDPA routing.
+    // precision: 0=disabled, 3=INT8, 4=INT4
+    // block_mode: 0=tensorWise, 2=blockwise
+    void set_quantization_mode(int64_t precision, int64_t block_mode);
+    void clear_quantization_mode();
 }
 
 // =============================================================================

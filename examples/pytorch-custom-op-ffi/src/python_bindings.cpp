@@ -27,6 +27,9 @@ namespace metal_sdpa {
         double scale,
         int64_t target_precision,
         int64_t quant_mode);
+    void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size);
+    void set_quantization_mode(int64_t precision, int64_t block_mode);
+    void clear_quantization_mode();
 }
 
 namespace py = pybind11;
@@ -73,6 +76,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("scale") = 0.0,
           py::arg("target_precision") = 3,  // 3=INT8, 4=INT4
           py::arg("quant_mode") = 0);       // 0=tensorWise, 2=blockwise
+
+    m.def("set_quantization_mode",
+          &metal_sdpa::set_quantization_mode,
+          "Activate INT8/INT4 quantization for all F.scaled_dot_product_attention calls",
+          py::arg("precision"),   // 3=INT8, 4=INT4
+          py::arg("block_mode")); // 0=tensorWise, 2=blockwise
+
+    m.def("clear_quantization_mode",
+          &metal_sdpa::clear_quantization_mode,
+          "Disable quantization — revert to FP32 attention");
 
     m.def("hadamard_rotate",
           &metal_sdpa::hadamard_rotate_inplace,

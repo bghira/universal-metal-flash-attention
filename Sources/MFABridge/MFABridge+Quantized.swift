@@ -98,8 +98,8 @@ public func mfa_attention_forward_quantized_direct(
     return 2 // MFA_ERROR_INVALID_ARGUMENT
   }
 
-  // Create multi-head attention with quantization support for proper parallel processing
-  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
+  // Use cached multi-head attention instance (reuses compiled pipelines)
+  let multiHeadAttention = mfaContext.multiHeadAttention
 
   // Create proper MultiHeadAttentionDescriptor with 4D shape support
   var baseDescriptor = AttentionDescriptor()
@@ -252,7 +252,6 @@ public func mfa_quantized_forward_with_lse(
   }
 
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
-  let device = mfaContext.device
 
   let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
   let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
@@ -267,7 +266,7 @@ public func mfa_quantized_forward_with_lse(
   default: .tensorWise
   }
 
-  let quantAttention = QuantizedAttention(device: device)
+  let quantAttention = mfaContext.quantizedAttention
 
   let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
   let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
@@ -402,7 +401,7 @@ public func mfa_quantized_backward(
   default: .tensorWise
   }
 
-  let quantAttention = QuantizedAttention(device: device)
+  let quantAttention = mfaContext.quantizedAttention
 
   let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
   let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
@@ -447,6 +446,12 @@ public func mfa_quantized_backward(
   let quantElemSize = precision.size
   let fp32Size = MemoryLayout<Float>.stride
 
+  // Scratch D buffer — allocated once, reused for all heads.
+  let dBuf = device.makeBuffer(
+    length: Int(seqLenQ) * fp32Size,
+    options: .storageModeShared
+  )!
+
   for batchIdx in 0..<Int(batchSize) {
     for headIdx in 0..<Int(numHeads) {
       let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
@@ -458,11 +463,6 @@ public func mfa_quantized_backward(
       let gqOff = oOff
       let gkOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * fp32Size
       let gvOff = gkOff
-
-      let dBuf = device.makeBuffer(
-        length: Int(seqLenQ) * fp32Size,
-        options: .storageModeShared
-      )!
 
       guard
         let cmdBQ = quantAttention.backwardQuery(

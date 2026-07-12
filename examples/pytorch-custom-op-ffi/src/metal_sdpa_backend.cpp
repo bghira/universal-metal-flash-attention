@@ -18,6 +18,23 @@
 
 namespace metal_sdpa {
 
+// Forward declarations — defined later in this file.
+torch::Tensor metal_quantized_flash_attention_autograd(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    bool is_causal,
+    double scale,
+    int64_t target_precision,
+    int64_t quant_mode);
+
+torch::Tensor metal_flash_attention_autograd(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    bool is_causal,
+    double scale);
+
 namespace {
 
 bool cpu_fallback_allowed() {
@@ -1333,6 +1350,28 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
         // Ensure backend is initialized
         ensure_initialized();
 
+    double sm_scale = scale.value_or(0.0);
+    bool has_mask = attn_mask.has_value() && attn_mask.value().defined();
+
+    // Route to quantized autograd when INT8/INT4 mode is active.
+    if (quant_precision().load() != 0 && !has_mask) {
+        return metal_quantized_flash_attention_autograd(
+            query, key, value, is_causal, sm_scale,
+            static_cast<int64_t>(quant_precision().load()),
+            static_cast<int64_t>(quant_block_mode().load()));
+    }
+
+    // Route to FP32 autograd when inputs require grad and no mask.
+    // This ensures gradients flow through F.scaled_dot_product_attention
+    // at the dispatcher level (otherwise PyTorch warns about missing
+    // autograd kernels).
+    bool needs_autograd = query.requires_grad() || key.requires_grad() ||
+                          value.requires_grad();
+    if (needs_autograd && !has_mask) {
+        return metal_flash_attention_autograd(
+            query, key, value, is_causal, sm_scale);
+    }
+
     // Validate inputs
     if (dropout_p > 0.0) {
         std::cout << "Warning: Dropout not supported in Metal Flash Attention, ignoring dropout_p" << std::endl;
@@ -2551,9 +2590,22 @@ void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size) {
     }
 }
 
+void set_quantization_mode(int64_t precision, int64_t block_mode) {
+    MetalSDPABackend::quant_precision().store(static_cast<int32_t>(precision));
+    MetalSDPABackend::quant_block_mode().store(static_cast<int32_t>(block_mode));
+}
+
+void clear_quantization_mode() {
+    MetalSDPABackend::quant_precision().store(0);
+}
+
 } // namespace metal_sdpa
 
-// Register the custom SDPA implementation for PrivateUse1 backend
-TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+// Register the custom SDPA implementation for MPS backend.
+// PyTorch 2.x uses the "MPS" dispatch key (not "PrivateUse1") for
+// torch.device("mps") tensors. This overrides PyTorch's native MPS SDPA
+// with UMFA's flash-attention implementation for all F.scaled_dot_product_attention
+// calls on MPS tensors.
+TORCH_LIBRARY_IMPL(aten, MPS, m) {
     m.impl("scaled_dot_product_attention", &metal_sdpa::MetalSDPABackend::scaled_dot_product_attention);
 }
