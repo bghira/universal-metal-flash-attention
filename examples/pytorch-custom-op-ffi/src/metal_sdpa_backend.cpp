@@ -1361,7 +1361,73 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
         auto& stats = dispatch_stats();
         stats.total.fetch_add(1, std::memory_order_relaxed);
 
+    torch::Tensor q = query;
+    torch::Tensor k = key;
+    torch::Tensor v = value;
+
+    // GQA expansion: if Q has more heads than K/V, expand K/V by repeating
+    // each KV head Hq/Hkv times. Matches PyTorch's native GQA behavior.
+    if (q.dim() >= 3 && k.dim() >= 3 && q.size(-3) != k.size(-3)) {
+        int64_t Hq = q.size(-3);
+        int64_t Hkv = k.size(-3);
+        if (Hq > Hkv && Hq % Hkv == 0) {
+            int64_t group = Hq / Hkv;
+            k = k.repeat_interleave(group, -3).contiguous();
+            v = v.repeat_interleave(group, -3).contiguous();
+        }
+    }
+
     double sm_scale = scale.value_or(0.0);
+
+    auto fallback_to_native = [&]() {
+        stats.pytorch_fallback.fetch_add(1, std::memory_order_relaxed);
+        return at::native::scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask,
+            dropout_p,
+            is_causal,
+            scale,
+            enable_gqa
+        );
+    };
+
+    auto unsupported_shape_or_dtype = [&]() {
+        if (q.device().type() != at::kMPS ||
+            k.device().type() != at::kMPS ||
+            v.device().type() != at::kMPS) {
+            return true;
+        }
+        if (q.dim() != 4 || k.dim() != 4 || v.dim() != 4) {
+            return true;
+        }
+        if (q.size(0) != k.size(0) ||
+            q.size(0) != v.size(0) ||
+            q.size(1) != k.size(1) ||
+            q.size(1) != v.size(1) ||
+            q.size(3) != k.size(3) ||
+            q.size(3) != v.size(3)) {
+            return true;
+        }
+        if (q.scalar_type() != torch::kFloat32 &&
+            q.scalar_type() != torch::kFloat16 &&
+            q.scalar_type() != torch::kBFloat16) {
+            return true;
+        }
+        if (k.scalar_type() != q.scalar_type() ||
+            v.scalar_type() != q.scalar_type()) {
+            return true;
+        }
+        if (q.size(1) < 4 || q.size(2) < 64) {
+            return true;
+        }
+        return false;
+    };
+
+    if (unsupported_shape_or_dtype() || dropout_p > 0.0) {
+        return fallback_to_native();
+    }
 
     // ---- Detect trivially all-true bool masks ----
     // Many models (e.g. Z-Image) always pass an encoder_attention_mask even
@@ -1387,19 +1453,19 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     if (quant_precision().load() != 0) {
         stats.quantized_autograd.fetch_add(1, std::memory_order_relaxed);
         return metal_quantized_flash_attention_autograd(
-            query, key, value, is_causal, sm_scale,
+            q, k, v, is_causal, sm_scale,
             static_cast<int64_t>(quant_precision().load()),
             static_cast<int64_t>(quant_block_mode().load()),
             has_real_mask ? attn_mask : c10::optional<torch::Tensor>());
     }
 
     // ---- Route to FP32 autograd when inputs require grad ----
-    bool needs_autograd = query.requires_grad() || key.requires_grad() ||
-                          value.requires_grad();
+    bool needs_autograd = q.requires_grad() || k.requires_grad() ||
+                          v.requires_grad();
     if (needs_autograd) {
         stats.fp32_autograd.fetch_add(1, std::memory_order_relaxed);
         return metal_flash_attention_autograd(
-            query, key, value, is_causal, sm_scale);
+            q, k, v, is_causal, sm_scale);
     }
 
     // ---- Remaining paths: direct UMFA (no autograd) or PyTorch fallback ----
@@ -1416,22 +1482,8 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
             mask_dtype != torch::kFloat32 &&
             mask_dtype != torch::kFloat16 &&
             mask_dtype != torch::kBFloat16) {
-            stats.pytorch_fallback.fetch_add(1, std::memory_order_relaxed);
-            return at::native::scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                attn_mask,
-                dropout_p,
-                is_causal,
-                scale,
-                enable_gqa
-            );
+            return fallback_to_native();
         }
-    }
-
-    if (enable_gqa) {
-        std::cout << "Warning: Grouped Query Attention (GQA) not yet supported, ignoring enable_gqa flag" << std::endl;
     }
 
     // Calculate softmax scale
@@ -1440,17 +1492,17 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
         softmax_scale = static_cast<float>(scale.value());
     } else {
         // Default: 1/sqrt(head_dim)
-        int head_dim = query.size(-1);
+        int head_dim = q.size(-1);
         softmax_scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     }
 
     // Store original device and dtype
-    auto orig_device = query.device();
-    auto orig_dtype = query.scalar_type();
+    auto orig_device = q.device();
+    auto orig_dtype = q.scalar_type();
 
     // Call Swift Flash Attention (using processed tensors from call_swift_flash_attention)
     stats.fp32_direct.fetch_add(1, std::memory_order_relaxed);
-    auto result = call_swift_flash_attention(query, key, value, attn_mask, is_causal, softmax_scale);
+    auto result = call_swift_flash_attention(q, k, v, attn_mask, is_causal, softmax_scale);
 
     // Convert result back to original layout if input was FLUX
     // Note: The layout conversion is now handled within call_swift_flash_attention
