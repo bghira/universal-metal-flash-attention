@@ -1651,6 +1651,36 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
 ) {
     try {
         ensure_initialized();
+
+        TORCH_CHECK(
+            key.dim() == value.dim() && key.dim() >= 2 &&
+                key.size(-2) == value.size(-2),
+            "Metal SDPA: key and value must have matching sequence lengths");
+
+        // PyTorch SDPA accepts 2D (S, E) and 3D (N, S, E) inputs, but the
+        // kernels and torch's own MPS math fallback assume 4D BHSD (the
+        // math_mps path indexes dim 3 unconditionally and throws on
+        // anything smaller). Normalize to 4D here and strip the added
+        // leading dims from the result — this also routes small-rank calls
+        // through the real UMFA path instead of the fallback.
+        if (query.dim() >= 2 && query.dim() < 4 &&
+            key.dim() == query.dim() && value.dim() == query.dim()) {
+            auto q4 = query;
+            auto k4 = key;
+            auto v4 = value;
+            while (q4.dim() < 4) {
+                q4 = q4.unsqueeze(0);
+                k4 = k4.unsqueeze(0);
+                v4 = v4.unsqueeze(0);
+            }
+            auto out = scaled_dot_product_attention(
+                q4, k4, v4, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+            for (int64_t i = query.dim(); i < 4; ++i) {
+                out = out.squeeze(0);
+            }
+            return out;
+        }
+
         auto& stats = dispatch_stats();
         stats.total.fetch_add(1, std::memory_order_relaxed);
 
