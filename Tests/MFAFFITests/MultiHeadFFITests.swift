@@ -288,6 +288,16 @@ final class MultiHeadFFITests: XCTestCase {
   }
 
   private func testBugReproductionCases() throws {
+    // These reproduce historical NaN bugs at large sequence lengths
+    // (S=1024..8192) in low precision. GitHub's macOS runners expose an
+    // 'Apple Paravirtual device' without Apple7 family support, and the
+    // large-sequence low-precision kernels are not supported there —
+    // small-shape precision coverage above still runs. Same gate as the
+    // other stress suites.
+    guard TestEnvironment.supportsApple7 else {
+      print("  ⚠️ Skipping bug reproduction cases: requires Apple7+ GPU features")
+      return
+    }
     print("\n--- Bug Reproduction Test Cases ---")
 
     // Case 1: BF16/FP16 NaN bug reproduction with specific FLUX dimensions
