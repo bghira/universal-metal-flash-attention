@@ -200,8 +200,8 @@ final class MFAContext {
         switch (mask_type) {
         case 1u: {
           const device uchar* bool_ptr = mask_raw;
-          bool masked = bool_ptr[linear_index] != 0;
-          mask_value = masked ? -INFINITY : 0.0f;
+          bool attend = bool_ptr[linear_index] != 0;
+          mask_value = attend ? 0.0f : -INFINITY;
           break;
         }
         case 2u: {
