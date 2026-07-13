@@ -76,15 +76,15 @@ final class SimplePrecisionTests: XCTestCase {
       }
     }
 
-    // Call attention with FP32 precision (Swift enum value 0)
+    // Call attention with FP32 precision (C FFI enum: FP16=0, BF16=1, FP32=2)
     let result = mfa_attention_forward_nomask(
       context, q, k, v, out,
       batch, seqLen, seqLen, heads, headDim,
       1.0 / sqrtf(Float(headDim)), // softmax scale
       false, // not causal
-      0, // FP32 input precision (Swift enum)
-      0, // FP32 intermediate precision
-      0, // FP32 output precision
+      2, // FP32 input precision
+      2, // FP32 intermediate precision
+      2, // FP32 output precision
       false, false, false, false // no transpose
     )
 
@@ -150,6 +150,8 @@ final class SimplePrecisionTests: XCTestCase {
     var out: UnsafeMutableRawPointer?
 
     let bytes = elements * MemoryLayout<Float16>.size
+    // The kernel always stores O as FP32 regardless of the output label.
+    let outBytes = elements * MemoryLayout<Float>.size
 
     let qResult = mfa_create_buffer(context, bytes, &q)
     XCTAssertEqual(qResult, 0, "Failed to create Q buffer")
@@ -163,7 +165,7 @@ final class SimplePrecisionTests: XCTestCase {
     XCTAssertEqual(vResult, 0, "Failed to create V buffer")
     defer { mfa_destroy_buffer(v) }
 
-    let outResult = mfa_create_buffer(context, bytes, &out)
+    let outResult = mfa_create_buffer(context, outBytes, &out)
     XCTAssertEqual(outResult, 0, "Failed to create output buffer")
     defer { mfa_destroy_buffer(out) }
 
@@ -186,15 +188,15 @@ final class SimplePrecisionTests: XCTestCase {
       }
     }
 
-    // Call attention with FP16 precision (Swift enum value 1)
+    // Call attention with FP16 precision (C FFI enum: FP16=0, BF16=1, FP32=2)
     let result = mfa_attention_forward_nomask(
       context, q, k, v, out,
       batch, seqLen, seqLen, heads, headDim,
       1.0 / sqrtf(Float(headDim)), // softmax scale
       false, // not causal
-      1, // FP16 input precision (Swift enum)
-      1, // FP16 intermediate precision
-      1, // FP16 output precision
+      0, // FP16 input precision
+      0, // FP16 intermediate precision
+      0, // FP16 output precision
       false, false, false, false // no transpose
     )
 
@@ -202,7 +204,7 @@ final class SimplePrecisionTests: XCTestCase {
 
     // Check output for NaN
     if let outContents = mfa_buffer_contents(out) {
-      let outPointer = outContents.bindMemory(to: Float16.self, capacity: elements)
+      let outPointer = outContents.bindMemory(to: Float.self, capacity: elements)
       var nanCount = 0
       var nonZeroCount = 0
 
@@ -210,7 +212,7 @@ final class SimplePrecisionTests: XCTestCase {
         if outPointer[i].isNaN {
           nanCount += 1
         }
-        if abs(Float(outPointer[i])) > 1e-8 {
+        if abs(outPointer[i]) > 1e-8 {
           nonZeroCount += 1
         }
       }

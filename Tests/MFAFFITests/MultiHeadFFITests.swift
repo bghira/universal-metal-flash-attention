@@ -164,9 +164,16 @@ final class MultiHeadFFITests: XCTestCase {
 
     // Generate deterministic test data for reproducibility
     let seed: UInt64 = 42
-    var queryData = generateDeterministicData(count: totalElements, seed: seed)
-    var keyData = generateDeterministicData(count: totalElements, seed: seed + 1)
-    var valueData = generateDeterministicData(count: totalElements, seed: seed + 2)
+    let queryData = generateDeterministicData(count: totalElements, seed: seed)
+    let keyData = generateDeterministicData(count: totalElements, seed: seed + 1)
+    let valueData = generateDeterministicData(count: totalElements, seed: seed + 2)
+
+    // Input precision is honored by the kernels: buffers must contain data
+    // in the declared memory format. The output is always FP32 (the kernel
+    // stores O as FP32 regardless of the output precision label).
+    var queryBytes = encodeInputData(queryData, precision: inputPrecision)
+    var keyBytes = encodeInputData(keyData, precision: inputPrecision)
+    var valueBytes = encodeInputData(valueData, precision: inputPrecision)
     var outputData = [Float](repeating: 0.0, count: totalElements)
 
     // Create MFA buffers
@@ -175,20 +182,21 @@ final class MultiHeadFFITests: XCTestCase {
     var vBuffer: UnsafeMutableRawPointer?
     var oBuffer: UnsafeMutableRawPointer?
 
-    let dataSize = totalElements * MemoryLayout<Float>.size
+    let inputSize = queryBytes.count
+    let outputSize = totalElements * MemoryLayout<Float>.size
 
     // Create buffers from existing data
-    let result1 = queryData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &qBuffer)
+    let result1 = queryBytes.withUnsafeMutableBytes { ptr in
+      mfa_buffer_from_ptr(context, ptr.baseAddress, inputSize, &qBuffer)
     }
-    let result2 = keyData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &kBuffer)
+    let result2 = keyBytes.withUnsafeMutableBytes { ptr in
+      mfa_buffer_from_ptr(context, ptr.baseAddress, inputSize, &kBuffer)
     }
-    let result3 = valueData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &vBuffer)
+    let result3 = valueBytes.withUnsafeMutableBytes { ptr in
+      mfa_buffer_from_ptr(context, ptr.baseAddress, inputSize, &vBuffer)
     }
     let result4 = outputData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &oBuffer)
+      mfa_buffer_from_ptr(context, ptr.baseAddress, outputSize, &oBuffer)
     }
 
     guard
@@ -592,6 +600,40 @@ final class MultiHeadFFITests: XCTestCase {
     }
   }
 
+  /// Encode fp32 test values into the memory format a precision label
+  /// declares. The FFI honors input precision, so fp32 bytes labeled
+  /// fp16/bf16 would be reinterpreted as garbage.
+  private func encodeInputData(_ data: [Float], precision: mfa_precision_t) -> [UInt8] {
+    switch precision {
+    case mfa_precision_t(0): // FP16
+      var out = [UInt8]()
+      out.reserveCapacity(data.count * 2)
+      for value in data {
+        let half = Float16(value)
+        withUnsafeBytes(of: half) { out.append(contentsOf: $0) }
+      }
+      return out
+    case mfa_precision_t(1): // BF16, round-to-nearest-even
+      var out = [UInt8]()
+      out.reserveCapacity(data.count * 2)
+      for value in data {
+        var bits = value.bitPattern
+        let lsb = (bits >> 16) & 1
+        bits = bits &+ 0x7FFF &+ lsb
+        let bf16 = UInt16(truncatingIfNeeded: bits >> 16)
+        withUnsafeBytes(of: bf16) { out.append(contentsOf: $0) }
+      }
+      return out
+    default: // FP32
+      var out = [UInt8]()
+      out.reserveCapacity(data.count * 4)
+      for value in data {
+        withUnsafeBytes(of: value) { out.append(contentsOf: $0) }
+      }
+      return out
+    }
+  }
+
   private func testSingleHeadConfiguration(
     numHeads: UInt32,
     seqLen: UInt32,
@@ -608,9 +650,17 @@ final class MultiHeadFFITests: XCTestCase {
 
     // Use deterministic data for reproducibility
     let seed = deterministicSeed(for: testName)
-    var queryData = generateDeterministicData(count: totalElements, seed: seed)
-    var keyData = generateDeterministicData(count: totalElements, seed: seed + 1)
-    var valueData = generateDeterministicData(count: totalElements, seed: seed + 2)
+    let queryData = generateDeterministicData(count: totalElements, seed: seed)
+    let keyData = generateDeterministicData(count: totalElements, seed: seed + 1)
+    let valueData = generateDeterministicData(count: totalElements, seed: seed + 2)
+
+    // Input precision is honored by the kernels: buffers must contain data
+    // in the memory format the precision label declares. The output is
+    // always FP32 (the kernel stores O as FP32 regardless of the output
+    // precision label).
+    var queryBytes = encodeInputData(queryData, precision: inputPrecision)
+    var keyBytes = encodeInputData(keyData, precision: inputPrecision)
+    var valueBytes = encodeInputData(valueData, precision: inputPrecision)
     var outputData = [Float](repeating: 0.0, count: totalElements)
 
     // Create MFA buffers
@@ -619,19 +669,20 @@ final class MultiHeadFFITests: XCTestCase {
     var vBuffer: UnsafeMutableRawPointer?
     var oBuffer: UnsafeMutableRawPointer?
 
-    let dataSize = totalElements * MemoryLayout<Float>.size
+    let inputSize = queryBytes.count
+    let outputSize = totalElements * MemoryLayout<Float>.size
 
-    let result1 = queryData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &qBuffer)
+    let result1 = queryBytes.withUnsafeMutableBytes { ptr in
+      mfa_buffer_from_ptr(context, ptr.baseAddress, inputSize, &qBuffer)
     }
-    let result2 = keyData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &kBuffer)
+    let result2 = keyBytes.withUnsafeMutableBytes { ptr in
+      mfa_buffer_from_ptr(context, ptr.baseAddress, inputSize, &kBuffer)
     }
-    let result3 = valueData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &vBuffer)
+    let result3 = valueBytes.withUnsafeMutableBytes { ptr in
+      mfa_buffer_from_ptr(context, ptr.baseAddress, inputSize, &vBuffer)
     }
     let result4 = outputData.withUnsafeMutableBytes { ptr in
-      mfa_buffer_from_ptr(context, ptr.baseAddress, dataSize, &oBuffer)
+      mfa_buffer_from_ptr(context, ptr.baseAddress, outputSize, &oBuffer)
     }
 
     guard
