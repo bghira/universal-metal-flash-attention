@@ -638,6 +638,7 @@ public:
     );
 
     friend class MetalFlashAttentionFn;
+    friend class MetalRopeFlashAttentionFn;
     friend class MetalQuantizedFlashAttentionFn;
     friend void hadamard_rotate_inplace(torch::Tensor, int64_t);
 

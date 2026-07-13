@@ -37,6 +37,16 @@ torch::Tensor metal_flash_attention_autograd(
     bool is_causal,
     double scale);
 
+torch::Tensor metal_rope_flash_attention_autograd(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& cos_t,
+    const torch::Tensor& sin_t,
+    int64_t table_batch_stride,
+    bool is_causal,
+    double scale);
+
 namespace {
 
 bool cpu_fallback_allowed() {
@@ -1480,15 +1490,8 @@ torch::Tensor MetalSDPABackend::rope_scaled_dot_product_attention(
             q_rot, k_rot, value, attn_mask, 0.0, is_causal, scale, true);
     };
 
-    // v1 fused path is forward-only: attention backward returns gradients
-    // w.r.t. rotated Q/K, and the model needs pre-RoPE gradients (inverse
-    // rotation on dQ/dK). Until that autograd lands, gradient callers use
-    // the eager rotation, which flows through the existing autograd path.
     const bool needs_grad = at::GradMode::is_enabled() &&
         (query.requires_grad() || key.requires_grad() || value.requires_grad());
-    if (needs_grad) {
-        return eager();
-    }
     if (!swift_context_ ||
         !query.device().is_mps() || !key.device().is_mps() || !value.device().is_mps()) {
         return eager();
@@ -1554,6 +1557,25 @@ torch::Tensor MetalSDPABackend::rope_scaled_dot_product_attention(
     }
     // Table rows are indexed as s * D, so rows beyond Sq are simply unused;
     // a 2D table with more rows than Sq is fine, a batched one too.
+
+    // Gradient callers: fused forward + autograd backward with the inverse
+    // rotation on dQ/dK (RoPE is orthonormal, so the backward transform is
+    // the same pairwise rotation with sin negated). Causal is supported —
+    // both bitmask and elementwise transposed causal codegen verified exact.
+    // Masks and GQA still take the eager path: the attention-backward
+    // primitive does not accept masks, and GQA head expansion would need a
+    // grouped reduction in backward.
+    if (needs_grad) {
+        if ((attn_mask.has_value() && attn_mask.value().defined()) ||
+            Hq != Hkv) {
+            return eager();
+        }
+        auto result = metal_rope_flash_attention_autograd(
+            query, key, value, cos_t, sin_t, table_batch_stride, is_causal,
+            scale.has_value() ? scale.value() : 0.0);
+        dispatch_stats().rope_instream.fetch_add(1, std::memory_order_relaxed);
+        return result;
+    }
 
     const char* precision = dt == torch::kFloat16 ? "fp16"
         : dt == torch::kBFloat16                  ? "bf16"
@@ -2814,6 +2836,269 @@ torch::Tensor metal_flash_attention_autograd(
     bool is_causal,
     double scale) {
   return MetalFlashAttentionFn::apply(query, key, value, is_causal, scale);
+}
+
+// =============================================================================
+// Fused RoPE + Flash Attention with Autograd
+// =============================================================================
+//
+// forward:  q_rot = R(q); k_rot = R(k); out, lse = attention(q_rot, k_rot, v)
+// backward: d_q_rot, d_k_rot, d_v = attention_backward(...)
+//           d_q = R^-1(d_q_rot); d_k = R^-1(d_k_rot)
+// RoPE is orthonormal, so the inverse rotation is the same pairwise rotation
+// with sin negated (the rotation kernel's negate_sin parameter). Rotations
+// are encoded on the torch MPS stream; the attention primitives synchronize
+// before reading, matching the existing autograd path's ordering model.
+class MetalRopeFlashAttentionFn
+    : public torch::autograd::Function<MetalRopeFlashAttentionFn> {
+public:
+  static torch::Tensor forward(
+      torch::autograd::AutogradContext *ctx,
+      torch::Tensor query, torch::Tensor key, torch::Tensor value,
+      torch::Tensor cos_t, torch::Tensor sin_t,
+      int64_t table_batch_stride, bool is_causal, double scale) {
+
+    MetalSDPABackend::ensure_initialized();
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    if (!mfa_ctx) {
+      throw std::runtime_error("Metal SDPA backend not initialized");
+    }
+
+    auto orig_dtype = query.scalar_type();
+    auto input_precision = MetalSDPABackend::torch_dtype_to_mfa_dtype(orig_dtype);
+    const char *precision = orig_dtype == torch::kFloat16 ? "fp16"
+        : orig_dtype == torch::kBFloat16                  ? "bf16"
+                                                          : "fp32";
+
+    auto q_sizes = query.sizes();
+    uint32_t batch = static_cast<uint32_t>(q_sizes[0]);
+    uint32_t heads = static_cast<uint32_t>(q_sizes[1]);
+    uint32_t seq_q = static_cast<uint32_t>(q_sizes[2]);
+    uint32_t seq_kv = static_cast<uint32_t>(key.size(2));
+    uint16_t dim = static_cast<uint16_t>(q_sizes[3]);
+
+    float sm_scale = static_cast<float>(scale);
+    if (scale == 0.0) {
+      sm_scale = 1.0f / std::sqrt(static_cast<float>(dim));
+    }
+
+    // Rotate Q/K on the torch stream into dense scratch. The rotation kernel
+    // reads strided views with a contiguous last dim directly.
+    auto rope_src_ok = [](const torch::Tensor &t) {
+      if (t.is_contiguous()) {
+        return true;
+      }
+      auto st = t.strides();
+      return st[3] == 1 && st[0] >= 0 && st[1] >= 0 && st[2] >= 0;
+    };
+    auto q_src = rope_src_ok(query) ? query : query.contiguous();
+    auto k_src = rope_src_ok(key) ? key : key.contiguous();
+    auto q_rot = torch::empty(query.sizes(), query.options());
+    auto k_rot = torch::empty(key.sizes(), key.options());
+
+    int rc = mps_utils::encode_rope_rotate_on_torch_stream(
+        mfa_ctx, q_src, q_rot, cos_t, sin_t, table_batch_stride,
+        /*negate_sin=*/false, batch, heads, seq_q, dim, precision);
+    if (rc == 0) {
+      rc = mps_utils::encode_rope_rotate_on_torch_stream(
+          mfa_ctx, k_src, k_rot, cos_t, sin_t, table_batch_stride,
+          /*negate_sin=*/false, batch, heads, seq_kv, dim, precision);
+    }
+    if (rc != 0) {
+      throw std::runtime_error(
+          "RoPE rotation encode failed with code " + std::to_string(rc));
+    }
+
+    value = value.contiguous();
+    // Drain the torch stream so the rotations (and any producer ops) are
+    // visible to the attention primitive running on UMFA's own queue.
+    if (query.device().type() == at::kMPS) {
+      torch::mps::synchronize();
+    }
+
+    auto output_dtype = orig_dtype == torch::kFloat32 ? orig_dtype : torch::kFloat32;
+    auto output = torch::empty(query.sizes(), query.options().dtype(output_dtype));
+    auto lse = torch::empty(
+        {batch * heads * seq_q}, torch::kFloat32).to(query.device());
+
+    auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
+      mfa_buffer_t h = nullptr;
+      auto mtl = mps_utils::get_mtl_buffer_handle(t);
+      mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, t.nbytes(), &h);
+      return h;
+    };
+    auto q_b = bind(q_rot);
+    auto k_b = bind(k_rot);
+    auto v_b = bind(value);
+    auto out_b = bind(output);
+    auto lse_b = bind(lse);
+
+    auto result = mfa_attention_forward_with_lse(
+        mfa_ctx,
+        q_b, k_b, v_b, out_b, lse_b,
+        batch, seq_q, seq_kv, heads, dim,
+        sm_scale, is_causal,
+        input_precision, input_precision,
+        false, false, false, false);
+
+    mfa_destroy_buffer(q_b);
+    mfa_destroy_buffer(k_b);
+    mfa_destroy_buffer(v_b);
+    mfa_destroy_buffer(out_b);
+    mfa_destroy_buffer(lse_b);
+
+    if (result != 0) {
+      throw std::runtime_error(
+          "RoPE MetalFlashAttention forward failed with code " +
+          std::to_string(result));
+    }
+
+    auto returned_output = output;
+    if (output.scalar_type() != orig_dtype) {
+      returned_output = output.to(orig_dtype);
+    }
+
+    ctx->save_for_backward({q_rot, k_rot, value, output, cos_t, sin_t});
+    ctx->saved_data["lse"] = lse;
+    ctx->saved_data["scale"] = sm_scale;
+    ctx->saved_data["table_batch_stride"] = table_batch_stride;
+    ctx->saved_data["is_causal"] = is_causal;
+    ctx->saved_data["orig_dtype"] = static_cast<int64_t>(orig_dtype);
+    ctx->saved_data["input_precision"] = static_cast<int64_t>(input_precision);
+
+    return returned_output;
+  }
+
+  static torch::autograd::tensor_list backward(
+      torch::autograd::AutogradContext *ctx,
+      torch::autograd::tensor_list grad_outputs) {
+
+    MetalSDPABackend::ensure_initialized();
+    auto mfa_ctx = MetalSDPABackend::get_swift_context();
+    auto saved = ctx->get_saved_variables();
+    auto q_rot = saved[0];
+    auto k_rot = saved[1];
+    auto value = saved[2];
+    auto output_fp32 = saved[3];
+    auto cos_t = saved[4];
+    auto sin_t = saved[5];
+    auto lse = ctx->saved_data["lse"].toTensor();
+    float sm_scale = static_cast<float>(ctx->saved_data["scale"].toDouble());
+    int64_t table_batch_stride = ctx->saved_data["table_batch_stride"].toInt();
+    bool is_causal = ctx->saved_data["is_causal"].toBool();
+    auto orig_dtype = static_cast<torch::ScalarType>(
+        ctx->saved_data["orig_dtype"].toInt());
+    auto input_precision = static_cast<mfa_precision_t>(
+        ctx->saved_data["input_precision"].toInt());
+
+    auto d_output = grad_outputs[0];
+    auto d_output_dtype = orig_dtype == torch::kFloat32 ? torch::kFloat32 : orig_dtype;
+    if (d_output.scalar_type() != d_output_dtype) {
+      d_output = d_output.to(d_output_dtype);
+    }
+    d_output = d_output.contiguous();
+    if (q_rot.device().type() == at::kMPS) {
+      torch::mps::synchronize();
+    }
+
+    auto q_sizes = q_rot.sizes();
+    uint32_t batch = static_cast<uint32_t>(q_sizes[0]);
+    uint32_t heads = static_cast<uint32_t>(q_sizes[1]);
+    uint32_t seq_q = static_cast<uint32_t>(q_sizes[2]);
+    uint32_t seq_kv = static_cast<uint32_t>(k_rot.size(2));
+    uint16_t dim = static_cast<uint16_t>(q_sizes[3]);
+
+    auto fp32_options = q_rot.options().dtype(torch::kFloat32);
+    auto d_q_rot = torch::zeros(q_rot.sizes(), fp32_options);
+    auto d_k_rot = torch::zeros(k_rot.sizes(), fp32_options);
+    auto d_value = torch::zeros(value.sizes(), fp32_options);
+    auto d_buffer = torch::zeros(
+        {batch * heads * seq_q}, torch::kFloat32).to(q_rot.device());
+
+    auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
+      mfa_buffer_t h = nullptr;
+      auto mtl = mps_utils::get_mtl_buffer_handle(t);
+      mfa_buffer_from_mtl_buffer(mfa_ctx, mtl, t.nbytes(), &h);
+      return h;
+    };
+    auto dout_b = bind(d_output);
+    auto q_b = bind(q_rot);
+    auto k_b = bind(k_rot);
+    auto v_b = bind(value);
+    auto out_b = bind(output_fp32);
+    auto lse_b = bind(lse);
+    auto dq_b = bind(d_q_rot);
+    auto dk_b = bind(d_k_rot);
+    auto dv_b = bind(d_value);
+    auto d_b = bind(d_buffer);
+
+    auto result = mfa_attention_backward(
+        mfa_ctx,
+        dout_b, q_b, k_b, v_b, out_b, lse_b,
+        dq_b, dk_b, dv_b, d_b,
+        batch, seq_q, seq_kv, heads, dim,
+        sm_scale, is_causal,
+        input_precision, input_precision,
+        false, false, false, false);
+
+    mfa_destroy_buffer(dout_b);
+    mfa_destroy_buffer(q_b);
+    mfa_destroy_buffer(k_b);
+    mfa_destroy_buffer(v_b);
+    mfa_destroy_buffer(out_b);
+    mfa_destroy_buffer(lse_b);
+    mfa_destroy_buffer(dq_b);
+    mfa_destroy_buffer(dk_b);
+    mfa_destroy_buffer(dv_b);
+    mfa_destroy_buffer(d_b);
+
+    if (result != 0) {
+      throw std::runtime_error(
+          "RoPE MetalFlashAttention backward failed with code " +
+          std::to_string(result));
+    }
+
+    // Inverse rotation on dQ/dK (negate_sin) — gradients w.r.t. pre-RoPE
+    // Q/K. Encoded on the torch stream; the attention backward has already
+    // completed (its command buffer is waited on inside the FFI call).
+    auto d_query = torch::empty(d_q_rot.sizes(), fp32_options);
+    auto d_key = torch::empty(d_k_rot.sizes(), fp32_options);
+    int rc = mps_utils::encode_rope_rotate_on_torch_stream(
+        mfa_ctx, d_q_rot, d_query, cos_t, sin_t, table_batch_stride,
+        /*negate_sin=*/true, batch, heads, seq_q, dim, "fp32");
+    if (rc == 0) {
+      rc = mps_utils::encode_rope_rotate_on_torch_stream(
+          mfa_ctx, d_k_rot, d_key, cos_t, sin_t, table_batch_stride,
+          /*negate_sin=*/true, batch, heads, seq_kv, dim, "fp32");
+    }
+    if (rc != 0) {
+      throw std::runtime_error(
+          "RoPE inverse rotation encode failed with code " + std::to_string(rc));
+    }
+
+    if (orig_dtype != torch::kFloat32) {
+      d_query = d_query.to(orig_dtype);
+      d_key = d_key.to(orig_dtype);
+      d_value = d_value.to(orig_dtype);
+    }
+
+    return {d_query, d_key, d_value,
+            torch::Tensor(), torch::Tensor(), torch::Tensor(),
+            torch::Tensor(), torch::Tensor()};
+  }
+};
+
+torch::Tensor metal_rope_flash_attention_autograd(
+    const torch::Tensor &query,
+    const torch::Tensor &key,
+    const torch::Tensor &value,
+    const torch::Tensor &cos_t,
+    const torch::Tensor &sin_t,
+    int64_t table_batch_stride,
+    bool is_causal,
+    double scale) {
+  return MetalRopeFlashAttentionFn::apply(
+      query, key, value, cos_t, sin_t, table_batch_stride, is_causal, scale);
 }
 
 // =============================================================================
