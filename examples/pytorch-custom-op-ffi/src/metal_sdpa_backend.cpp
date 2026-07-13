@@ -1970,10 +1970,26 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
         }
     }
 
-    // Convert all tensors to CPU and contiguous
-    auto q_cpu = MetalSDPABackend::ensure_contiguous_cpu(query);
-    auto k_cpu = MetalSDPABackend::ensure_contiguous_cpu(key);
-    auto v_cpu = MetalSDPABackend::ensure_contiguous_cpu(value);
+    // Stage tensors for the kernel. On MPS, keep them on-device and bind their
+    // MTLBuffers directly like the regular path — wrapping CPU malloc memory
+    // with makeBuffer(bytesNoCopy:) is unreliable (intermittent NaN on first
+    // dispatch). Promote to FP32 here: the Swift kernel reads FP32.
+    // Synchronize around the on-device conversions so UMFA's separate Metal
+    // command queue doesn't read the buffers before PyTorch's queue has
+    // finished writing them.
+    bool use_mps_buffers = query.device().is_mps() && key.device().is_mps() && value.device().is_mps();
+    torch::Tensor q_cpu, k_cpu, v_cpu;
+    if (use_mps_buffers) {
+        torch::mps::synchronize();
+        q_cpu = query.contiguous().to(torch::kFloat32);
+        k_cpu = key.contiguous().to(torch::kFloat32);
+        v_cpu = value.contiguous().to(torch::kFloat32);
+        torch::mps::synchronize();
+    } else {
+        q_cpu = MetalSDPABackend::ensure_contiguous_cpu(query).to(torch::kFloat32);
+        k_cpu = MetalSDPABackend::ensure_contiguous_cpu(key).to(torch::kFloat32);
+        v_cpu = MetalSDPABackend::ensure_contiguous_cpu(value).to(torch::kFloat32);
+    }
 
     // Detect tensor layout and convert if necessary
     printf("🔍 Analyzing tensor layouts for FLUX compatibility...\n");
@@ -2003,15 +2019,17 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
         v_metal = convert_flux_to_metal_layout(v_cpu);
     }
 
-    // Get tensor dimensions (now in Metal layout [B,S,H,D])
+    // Get tensor dimensions. The layout "conversion" above is a passthrough
+    // (the kernel consumes contiguous BHSD directly), and PyTorch SDPA inputs
+    // are always [B, H, S, D] — extract dimensions accordingly.
     uint32_t batch_size, seq_len_q, seq_len_kv, num_heads, head_dim;
 
     if (q_metal.dim() == 4) {
         auto q_sizes = q_metal.sizes();
         batch_size = static_cast<uint32_t>(q_sizes[0]);
-        seq_len_q = static_cast<uint32_t>(q_sizes[1]);
-        seq_len_kv = static_cast<uint32_t>(k_metal.sizes()[1]);
-        num_heads = static_cast<uint32_t>(q_sizes[2]);
+        num_heads = static_cast<uint32_t>(q_sizes[1]);
+        seq_len_q = static_cast<uint32_t>(q_sizes[2]);
+        seq_len_kv = static_cast<uint32_t>(k_metal.sizes()[2]);
         head_dim = static_cast<uint16_t>(q_sizes[3]);
 
         printf("📊 Final tensor dimensions: batch=%u, seq_q=%u, seq_kv=%u, heads=%u, dim=%u\n",
@@ -2029,8 +2047,11 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
         throw std::runtime_error("Unified quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
     }
 
-    // Determine optimal output precision using intelligent selection
-    OutputPrecision optimal_output_precision = metal_sdpa::determine_output_precision(effective_config, q_metal, k_metal, v_metal);
+    // The Swift entry point (mfa_attention_forward_quantized_direct) dispatches
+    // MultiHeadAttention with default precisions: it reads Q/K/V as FP32 and
+    // writes FP32 output, ignoring the precision parameters. Feed it FP32 and
+    // cast back to the caller's dtype at the end.
+    OutputPrecision optimal_output_precision = OutputPrecision::FP32;
 
     // Create type-safe output tensor with validation (using Metal layout)
     auto output = metal_sdpa::create_typed_output_tensor(q_metal, optimal_output_precision, true);
@@ -2043,40 +2064,39 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     // The new runtime quantization API handles all quantization on the GPU side
     printf("🚀 Using runtime quantization - bypassing C++ side quantization\n");
 
-    // No longer quantize tensors on C++ side - pass raw FP16/BF16/FP32 tensors directly
+    // Tensors were already promoted to FP32 during staging above.
     torch::Tensor q_processed = q_metal;
     torch::Tensor k_processed = k_metal;
     torch::Tensor v_processed = v_metal;
 
-    // Create MFA buffers
+    // Create MFA buffers. On MPS, bind the tensors' MTLBuffers directly
+    // (same mechanism as the regular path); on CPU, wrap the host pointers.
     mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
 
-    size_t q_bytes = q_processed.numel() * q_processed.element_size();
-    size_t k_bytes = k_processed.numel() * k_processed.element_size();
-    size_t v_bytes = v_processed.numel() * v_processed.element_size();
-    size_t out_bytes = output.storage().nbytes();
+    auto bind_buffer = [&](const char* name, const torch::Tensor& tensor, mfa_buffer_t& buffer) {
+        size_t bytes = tensor.numel() * tensor.element_size();
+        mfa_error_t bind_result;
+        if (use_mps_buffers) {
+            void* handle = mps_utils::get_mtl_buffer_handle(tensor);
+            if (!handle) {
+                throw std::runtime_error(std::string("Failed to acquire MTLBuffer for ") + name + " in unified quantized attention");
+            }
+            bind_result = mfa_buffer_from_mtl_buffer(MetalSDPABackend::swift_context_, handle, bytes, &buffer);
+        } else {
+            bind_result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, tensor.data_ptr(), bytes, &buffer);
+        }
+        if (bind_result != MFA_SUCCESS) {
+            throw std::runtime_error(std::string("Failed to create ") + name + " buffer for unified quantized attention");
+        }
+    };
 
     mfa_error_t result;
 
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, q_processed.data_ptr(), q_bytes, &q_buffer);
-    if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create query buffer for unified quantized attention");
-    }
+    bind_buffer("query", q_processed, q_buffer);
+    bind_buffer("key", k_processed, k_buffer);
+    bind_buffer("value", v_processed, v_buffer);
 
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, k_processed.data_ptr(), k_bytes, &k_buffer);
-    if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create key buffer for unified quantized attention");
-    }
-
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, v_processed.data_ptr(), v_bytes, &v_buffer);
-    if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create value buffer for unified quantized attention");
-    }
-
-    result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, output.data_ptr(), out_bytes, &out_buffer);
-    if (result != MFA_SUCCESS) {
-        throw std::runtime_error("Failed to create output buffer for unified quantized attention");
-    }
+    bind_buffer("output", output, out_buffer);
 
     try {
         // Convert effective granularity enum to int32_t for FFI
@@ -2185,8 +2205,8 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
         printf("🧹 Creating safe copy of output tensor before buffer cleanup...\n");
         torch::Tensor safe_output = final_output.clone().contiguous();
 
-        // Convert to target device AFTER creating safe copy
-        torch::Tensor final_result = safe_output.to(query.device());
+        // Convert to target device and the caller's dtype AFTER creating safe copy
+        torch::Tensor final_result = safe_output.to(query.device(), query.scalar_type());
 
         // Now safe to clean up MFA buffers since we have an independent copy
         printf("🧹 Skipping MFA buffer destruction (zero-copy views are owned by PyTorch)\n");
