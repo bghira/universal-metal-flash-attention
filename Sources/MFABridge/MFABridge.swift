@@ -305,18 +305,19 @@ final class MFAContext {
       return nil
     }
 
+    // Copy the mask bytes into a device buffer. bytesNoCopy requires a
+    // page-aligned pointer; torch CPU tensors are only malloc-aligned, so
+    // zero-copy wrapping reads garbage (wrong bool masks, NaN additive
+    // masks). Masks are small next to the attention cost — copy is cheap.
     guard
       let maskInputBuffer = device.makeBuffer(
-        bytesNoCopy: arguments.pointer,
+        bytes: arguments.pointer,
         length: arguments.sizeBytes,
-        options: .storageModeShared,
-        deallocator: nil
+        options: .storageModeShared
       )
     else {
       throw MaskPreparationError.bufferAllocationFailed
     }
-
-    maskInputBuffer.didModifyRange(0..<arguments.sizeBytes)
 
     let requiredBytes = totalElements * MemoryLayout<Float>.size
     if maskOutputBuffer == nil || maskOutputBuffer!.length < requiredBytes {
@@ -994,7 +995,7 @@ public func mfa_attention_forward(
     false
   }
 
-  let shouldUseMultiHead = numHeads > 1 && (deviceSupportsMultiHead || forceMultiHead)
+  let shouldUseMultiHead = numHeads >= 1 && (deviceSupportsMultiHead || forceMultiHead)
   if shouldUseMultiHead, deviceSupportsMultiHead {
     return mfa_attention_forward_multihead_internal(
       context: mfaContext,

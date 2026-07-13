@@ -1379,13 +1379,27 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
 
     double sm_scale = scale.value_or(0.0);
 
+    // PyTorch's MPS math fallback promotes the query to FP32 internally and
+    // then rejects FP16/BF16 masks ("attn_mask dtype ... to match query
+    // dtype"). FP32 masks are always accepted, so upcast before falling back.
+    auto native_safe_mask = [&]() -> c10::optional<torch::Tensor> {
+        if (!attn_mask.has_value() || !attn_mask.value().defined()) {
+            return attn_mask;
+        }
+        auto mask_dtype = attn_mask.value().scalar_type();
+        if (mask_dtype == torch::kFloat16 || mask_dtype == torch::kBFloat16) {
+            return attn_mask.value().to(torch::kFloat32);
+        }
+        return attn_mask;
+    };
+
     auto fallback_to_native = [&]() {
         stats.pytorch_fallback.fetch_add(1, std::memory_order_relaxed);
         return at::native::scaled_dot_product_attention(
             query,
             key,
             value,
-            attn_mask,
+            native_safe_mask(),
             dropout_p,
             is_causal,
             scale,
@@ -1507,7 +1521,7 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
         stats.fp32_direct.fetch_sub(1, std::memory_order_relaxed);
         stats.pytorch_fallback.fetch_add(1, std::memory_order_relaxed);
         return at::native::scaled_dot_product_attention(
-            query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+            query, key, value, native_safe_mask(), dropout_p, is_causal, scale, enable_gqa);
     }
 
     // Convert result back to original layout if input was FLUX
