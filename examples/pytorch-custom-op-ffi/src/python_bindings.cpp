@@ -26,7 +26,13 @@ namespace metal_sdpa {
         bool is_causal,
         double scale,
         int64_t target_precision,
-        int64_t quant_mode);
+        int64_t quant_mode,
+        c10::optional<torch::Tensor> attn_mask = c10::nullopt);
+    void hadamard_rotate_inplace(torch::Tensor tensor, int64_t block_size);
+    void set_quantization_mode(int64_t precision, int64_t block_mode);
+    void clear_quantization_mode();
+    std::map<std::string, int64_t> get_dispatch_stats();
+    void reset_dispatch_stats();
 }
 
 namespace py = pybind11;
@@ -54,6 +60,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("scale") = py::none(),
           py::arg("enable_gqa") = false);
 
+    m.def("rope_scaled_dot_product_attention",
+          &metal_sdpa::MetalSDPABackend::rope_scaled_dot_product_attention,
+          "Fused RoPE + SDPA (interleaved-pair rotation, pair-duplicated fp32 "
+          "cos/sin tables [S,D], [1,S,D] or [B,S,D]; BHSD tensors). "
+          "Gradient callers fall back to eager rotation + the normal path.",
+          py::arg("query"),
+          py::arg("key"),
+          py::arg("value"),
+          py::arg("rope_cos"),
+          py::arg("rope_sin"),
+          py::arg("attn_mask") = py::none(),
+          py::arg("is_causal") = false,
+          py::arg("scale") = py::none());
+
     m.def("metal_flash_attention_autograd",
           &metal_sdpa::metal_flash_attention_autograd,
           "Metal Flash Attention with autograd (forward + backward support)",
@@ -72,7 +92,35 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("is_causal") = false,
           py::arg("scale") = 0.0,
           py::arg("target_precision") = 3,  // 3=INT8, 4=INT4
-          py::arg("quant_mode") = 0);       // 0=tensorWise, 2=blockwise
+          py::arg("quant_mode") = 0,        // 0=tensorWise, 2=blockwise
+          py::arg("attn_mask") = py::none());
+
+    m.def("set_quantization_mode",
+          &metal_sdpa::set_quantization_mode,
+          "Activate INT8/INT4 quantization for all F.scaled_dot_product_attention calls",
+          py::arg("precision"),   // QUANT_INT8 or QUANT_INT4
+          py::arg("block_mode")); // QUANT_TENSOR_WISE or QUANT_BLOCK_WISE
+
+    m.def("clear_quantization_mode",
+          &metal_sdpa::clear_quantization_mode,
+          "Disable quantization — revert to FP32 attention");
+
+    m.def("get_dispatch_stats",
+          &metal_sdpa::get_dispatch_stats,
+          "Return dispatch counters showing which attention path each call took");
+
+    m.def("reset_dispatch_stats",
+          &metal_sdpa::reset_dispatch_stats,
+          "Reset all dispatch counters to zero");
+
+    // ---- Constants for quantization configuration ----
+    // Import these and pass to set_quantization_mode():
+    //   ext.set_quantization_mode(ext.QUANT_INT8, ext.QUANT_BLOCK_WISE)
+    m.attr("QUANT_NONE")         = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_NONE);
+    m.attr("QUANT_INT8")         = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_INT8);
+    m.attr("QUANT_INT4")         = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_INT4);
+    m.attr("QUANT_TENSOR_WISE")  = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_TENSOR_WISE);
+    m.attr("QUANT_BLOCK_WISE")   = static_cast<int64_t>(metal_sdpa::MetalSDPABackend::QUANT_BLOCK_WISE);
 
     m.def("hadamard_rotate",
           &metal_sdpa::hadamard_rotate_inplace,

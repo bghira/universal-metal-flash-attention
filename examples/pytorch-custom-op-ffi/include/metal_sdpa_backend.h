@@ -7,6 +7,7 @@
 #include <c10/core/ScalarType.h>
 #include <mutex>
 #include <optional>
+#include <map>
 
 namespace metal_sdpa {
 
@@ -325,6 +326,31 @@ extern "C" {
         mfa_mask_scalar_t mask_scalar_type
     );
 
+    // Encode attention into a caller-provided MTLCommandBuffer without
+    // committing or waiting. Buffers are raw id<MTLBuffer> pointers, offsets
+    // in bytes. Optional masks are raw id<MTLBuffer> pointers plus tensor
+    // metadata and are expanded on the same command buffer before attention.
+    // The caller owns commit/completion — intended for encoding into PyTorch's
+    // MPS stream so no host sync is required.
+    mfa_error_t mfa_attention_encode_mtl(
+        mfa_context_t context,
+        void* command_buffer,
+        void* q_buffer, int64_t q_offset, const int64_t* q_strides,
+        void* k_buffer, int64_t k_offset, const int64_t* k_strides,
+        void* v_buffer, int64_t v_offset, const int64_t* v_strides,
+        void* out_buffer, int64_t out_offset,
+        void* mask_buffer, int64_t mask_offset,
+        const int64_t* mask_shape,
+        const int64_t* mask_strides,
+        uint32_t mask_ndim,
+        mfa_mask_type_t mask_type,
+        mfa_mask_scalar_t mask_scalar_type,
+        uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
+        uint32_t num_heads, uint16_t head_dim, float softmax_scale,
+        bool causal,
+        const char* input_precision, const char* intermediate_precision
+    );
+
     mfa_error_t mfa_attention_forward_quantized(
         mfa_context_t context,
         mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v, mfa_buffer_t out,
@@ -459,6 +485,7 @@ extern "C" {
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
+        int32_t input_precision, int32_t intermediate_precision,
         bool transpose_q, bool transpose_k,
         bool transpose_v, bool transpose_o);
 
@@ -472,21 +499,22 @@ extern "C" {
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
+        int32_t input_precision, int32_t intermediate_precision,
         bool transpose_q, bool transpose_k,
         bool transpose_v, bool transpose_o);
 
     // Multi-head quantized attention with autograd support.
     // Forward: runtime-quantizes Q/K/V to INT8, runs quantized flash
-    // attention, writes output + LSE.
+    // attention, writes output + LSE. Optional mask (float32 additive
+    // [B,H,S_q,S_kv] or nil).
     int32_t mfa_quantized_forward_with_lse(
         mfa_context_t context,
         mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
-        mfa_buffer_t out, mfa_buffer_t lse,
+        mfa_buffer_t out, mfa_buffer_t lse, mfa_buffer_t mask,
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
-        int32_t target_precision, // 3=INT8, 4=INT4
-        int32_t quant_mode);       // 0=tensorWise, 2=blockwise
+        int32_t target_precision, int32_t quant_mode);
 
     // Backward: re-quantizes Q/K/V, runs quantized flash backward.
     int32_t mfa_quantized_backward(
@@ -494,11 +522,11 @@ extern "C" {
         mfa_buffer_t q, mfa_buffer_t k, mfa_buffer_t v,
         mfa_buffer_t out, mfa_buffer_t grad_out, mfa_buffer_t lse,
         mfa_buffer_t grad_q, mfa_buffer_t grad_k, mfa_buffer_t grad_v,
+        mfa_buffer_t mask,
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
-        int32_t target_precision,
-        int32_t quant_mode);
+        int32_t target_precision, int32_t quant_mode);
 
     // =============================================================================
     // Multi-Latent Attention (MLA) Support
@@ -553,6 +581,22 @@ public:
         bool enable_gqa = false
     );
 
+    // Fused RoPE + SDPA (v1: forward/no-grad; gradient callers fall back to
+    // eager rotation + the normal dispatcher until the autograd backward
+    // with inverse rotation lands). Q/K/V are BHSD; rope_cos/rope_sin are
+    // pair-duplicated tables, [S, D] / [1, S, D] / [B, S, D], any float
+    // dtype (normalized to fp32 internally).
+    static torch::Tensor rope_scaled_dot_product_attention(
+        const torch::Tensor& query,
+        const torch::Tensor& key,
+        const torch::Tensor& value,
+        const torch::Tensor& rope_cos,
+        const torch::Tensor& rope_sin,
+        const c10::optional<torch::Tensor>& attn_mask,
+        bool is_causal,
+        c10::optional<double> scale
+    );
+
     // Unified quantized attention function - replaces all previous variants
     // This is the primary interface that supports all quantization features
     static torch::Tensor quantized_scaled_dot_product_attention_unified(
@@ -594,10 +638,44 @@ public:
     );
 
     friend class MetalFlashAttentionFn;
+    friend class MetalRopeFlashAttentionFn;
     friend class MetalQuantizedFlashAttentionFn;
     friend void hadamard_rotate_inplace(torch::Tensor, int64_t);
 
     static mfa_context_t get_swift_context() { return swift_context_; }
+
+    // ---- Quantization mode constants (exposed to Python) ----
+    static constexpr int32_t QUANT_NONE = 0;
+    static constexpr int32_t QUANT_INT8 = 3;
+    static constexpr int32_t QUANT_INT4 = 4;
+    static constexpr int32_t QUANT_TENSOR_WISE = 0;
+    static constexpr int32_t QUANT_BLOCK_WISE = 2;
+
+    // Global quantization mode for dispatcher-level SDPA routing.
+    static std::atomic<int32_t>& quant_precision() {
+        static std::atomic<int32_t> v{0};
+        return v;
+    }
+    static std::atomic<int32_t>& quant_block_mode() {
+        static std::atomic<int32_t> v{0};
+        return v;
+    }
+
+    // ---- Dispatch counters (observable from Python) ----
+    struct DispatchStats {
+        std::atomic<int64_t> total{0};
+        std::atomic<int64_t> quantized_autograd{0};
+        std::atomic<int64_t> fp32_autograd{0};
+        std::atomic<int64_t> fp32_direct{0};
+        std::atomic<int64_t> fp32_instream{0};
+        std::atomic<int64_t> rope_instream{0};
+        std::atomic<int64_t> pytorch_fallback{0};
+        std::atomic<int64_t> mask_all_true_skipped{0};
+    };
+    static DispatchStats& dispatch_stats() {
+        static DispatchStats s;
+        return s;
+    }
 
 private:
     static mfa_context_t swift_context_;
@@ -609,6 +687,19 @@ private:
 
     // Helper methods
     static torch::Tensor call_swift_flash_attention(
+        const torch::Tensor& q,
+        const torch::Tensor& k,
+        const torch::Tensor& v,
+        const c10::optional<torch::Tensor>& attn_mask,
+        bool is_causal,
+        float softmax_scale
+    );
+
+    // Async fast path: encode into PyTorch's MPS stream (no syncs, no
+    // waits). Returns an undefined tensor when the call isn't eligible
+    // (non-MPS, non-4D, unsupported dtype/mask) or encoding fails, in
+    // which case the caller uses the legacy synchronous path.
+    static torch::Tensor try_instream_flash_attention(
         const torch::Tensor& q,
         const torch::Tensor& k,
         const torch::Tensor& v,
@@ -726,6 +817,13 @@ namespace metal_sdpa {
     // Utility functions for Python binding
     bool is_metal_available();
     std::tuple<int, int, int> get_version();
+
+    // Quantization mode control for dispatcher-level SDPA routing.
+    // Use QUANT_* constants as precision values.
+    void set_quantization_mode(int64_t precision, int64_t block_mode);
+    void clear_quantization_mode();
+    std::map<std::string, int64_t> get_dispatch_stats();
+    void reset_dispatch_stats();
 }
 
 // =============================================================================

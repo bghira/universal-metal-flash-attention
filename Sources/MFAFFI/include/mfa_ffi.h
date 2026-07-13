@@ -300,6 +300,40 @@ mfa_error_t mfa_attention_forward(
 );
 
 /**
+ * @brief Encode attention into a caller-provided MTLCommandBuffer.
+ *
+ * Does not commit or wait — the caller owns submission and completion.
+ * Intended for encoding into an external stream (e.g. PyTorch's MPS stream)
+ * so no host synchronization is required around the dispatch. Buffers are
+ * raw id<MTLBuffer> pointers; offsets are in bytes. Optional masks are raw
+ * id<MTLBuffer> pointers plus tensor metadata and are expanded on the same
+ * command buffer before attention; causal masking is also supported.
+ */
+mfa_error_t mfa_attention_encode_mtl(
+    mfa_context_t context,
+    void* command_buffer,
+    void* q_buffer, int64_t q_offset, const int64_t* q_strides,
+    void* k_buffer, int64_t k_offset, const int64_t* k_strides,
+    void* v_buffer, int64_t v_offset, const int64_t* v_strides,
+    void* out_buffer, int64_t out_offset,
+    void* mask_buffer, int64_t mask_offset,
+    const int64_t* mask_shape,
+    const int64_t* mask_strides,
+    uint32_t mask_ndim,
+    mfa_mask_type_t mask_type,
+    mfa_mask_scalar_t mask_scalar_type,
+    uint32_t batch_size,
+    uint32_t seq_len_q,
+    uint32_t seq_len_kv,
+    uint32_t num_heads,
+    uint16_t head_dim,
+    float softmax_scale,
+    bool causal,
+    const char* input_precision,
+    const char* intermediate_precision
+);
+
+/**
  * @brief Perform Quantized Flash Attention forward pass
  *
  * Computes scaled dot-product attention with quantized K/V tensors for memory efficiency.
@@ -383,6 +417,7 @@ mfa_error_t mfa_attention_backward(
     mfa_buffer_t dq,          // Gradient w.r.t Q
     mfa_buffer_t dk,          // Gradient w.r.t K
     mfa_buffer_t dv,          // Gradient w.r.t V
+    mfa_buffer_t d_buffer,    // Scratch buffer [batch_size * num_heads * seq_len_q]
     // Dimensions
     uint32_t batch_size,
     uint32_t seq_len_q,
@@ -395,7 +430,6 @@ mfa_error_t mfa_attention_backward(
     // Precision control
     mfa_precision_t input_precision,
     mfa_precision_t intermediate_precision,
-    mfa_precision_t output_precision,
     // Layout control
     bool transpose_q,
     bool transpose_k,

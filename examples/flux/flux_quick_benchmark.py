@@ -3,6 +3,7 @@
 Quick FLUX benchmark for Metal SDPA - Tests one resolution with minimal steps
 """
 
+import argparse
 import gc
 import os
 import sys
@@ -33,9 +34,6 @@ _prepend_dyld_library_path(
     ]
 )
 
-# Add the PyTorch custom op path to sys.path
-sys.path.insert(0, str(PROJECT_ROOT / "examples" / "pytorch-custom-op-ffi"))
-
 
 def _maybe_add_venv_site_packages() -> None:
     venv_root = Path(os.environ.get("VIRTUAL_ENV", PROJECT_ROOT / ".venv"))
@@ -48,6 +46,10 @@ def _maybe_add_venv_site_packages() -> None:
 
 
 _maybe_add_venv_site_packages()
+
+# Add the PyTorch custom op path ahead of site-packages so a freshly built
+# extension takes precedence over any stale installed copy
+sys.path.insert(0, str(PROJECT_ROOT / "examples" / "pytorch-custom-op-ffi"))
 
 # Try to import Metal SDPA extension
 try:
@@ -161,29 +163,89 @@ def restore_attention(original_sdpa):
         F.scaled_dot_product_attention = original_sdpa
 
 
-def run_quick_benchmark():
-    """Run a quick benchmark with 512x512 resolution and 2 steps"""
+def parse_args():
+    parser = argparse.ArgumentParser(description="Quick FLUX benchmark for Metal SDPA")
+    parser.add_argument(
+        "--model",
+        default="black-forest-labs/FLUX.1-schnell",
+        help="Hugging Face model id or local path for the Flux pipeline",
+    )
+    parser.add_argument(
+        "--steps", type=int, default=2, help="Number of inference steps"
+    )
+    parser.add_argument("--height", type=int, default=512, help="Image height")
+    parser.add_argument("--width", type=int, default=512, help="Image width")
+    parser.add_argument(
+        "--guidance-scale",
+        type=float,
+        default=None,
+        help="Guidance scale (default: 0.0 for schnell, 3.5 for dev-style models)",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=["all", "vanilla", "bf16", "int8", "int4"],
+        default="all",
+        help="Which attention configuration(s) to benchmark",
+    )
+    parser.add_argument(
+        "--prompt", default="A simple test", help="Prompt used for generation"
+    )
+    parser.add_argument(
+        "--local-files-only",
+        action="store_true",
+        help="Load the model from the local Hugging Face cache without network access",
+    )
+    return parser.parse_args()
+
+
+def run_quick_benchmark(args):
+    """Run a quick benchmark at the requested resolution and step count"""
 
     if not DIFFUSERS_AVAILABLE:
         print("❌ Cannot run benchmark without diffusers")
         return
 
+    guidance_scale = args.guidance_scale
+    if guidance_scale is None:
+        guidance_scale = 0.0 if "schnell" in args.model.lower() else 3.5
+
     print("\n" + "=" * 60)
-    print("🚀 FLUX Quick Benchmark - 512x512, 2 steps")
+    print(f"🚀 FLUX Quick Benchmark - {args.width}x{args.height}, {args.steps} steps")
+    print(f"   Model: {args.model} (guidance_scale={guidance_scale})")
     print("=" * 60)
 
-    configs = [
-        ("PyTorch Vanilla", None),
+    all_configs = [
+        ("PyTorch Vanilla", "vanilla"),
         ("Metal UMFA BF16", "bf16"),
     ]
 
     if HAS_QUANTIZATION:
-        configs.extend(
+        all_configs.extend(
             [
                 ("Metal UMFA INT8", "int8"),
                 ("Metal UMFA INT4", "int4"),
             ]
         )
+
+    if args.precision == "all":
+        configs = all_configs
+    else:
+        configs = [(name, mode) for name, mode in all_configs if mode == args.precision]
+        if not configs:
+            print(f"❌ Precision '{args.precision}' not available in this build")
+            return
+
+    # Load the pipeline once and reuse it across configurations
+    print("\n📦 Loading pipeline (this can take a while for large models)...")
+    load_start = time.time()
+    pipe = FluxPipeline.from_pretrained(
+        args.model,
+        torch_dtype=torch.bfloat16,
+        local_files_only=args.local_files_only,
+    )
+    pipe = pipe.to("mps")
+    pipe.set_progress_bar_config(disable=True)
+    print(f"📦 Pipeline loaded in {time.time() - load_start:.1f}s")
 
     results = []
 
@@ -203,24 +265,16 @@ def run_quick_benchmark():
             original_sdpa = patch_attention(quantization)
 
         try:
-            # Load pipeline
-            print("  Loading pipeline...")
-            pipe = FluxPipeline.from_pretrained(
-                "black-forest-labs/FLUX.1-schnell", torch_dtype=torch.bfloat16
-            )
-            pipe = pipe.to("mps")
-
-            # Generate with minimal steps
             print("  Generating image...")
             start_time = time.time()
 
             with torch.inference_mode():
                 image = pipe(
-                    prompt="A simple test",
-                    num_inference_steps=2,  # Minimal steps
-                    height=512,
-                    width=512,
-                    guidance_scale=0.0,
+                    prompt=args.prompt,
+                    num_inference_steps=args.steps,
+                    height=args.height,
+                    width=args.width,
+                    guidance_scale=guidance_scale,
                     generator=torch.Generator().manual_seed(42),
                 ).images[0]
 
@@ -235,8 +289,6 @@ def run_quick_benchmark():
             print(f"  ✅ Time: {generation_time:.2f}s")
             results.append({"config": config_name, "time": generation_time})
 
-            # Clean up
-            del pipe
             if torch.backends.mps.is_available():
                 torch.mps.empty_cache()
             gc.collect()
@@ -268,4 +320,4 @@ def run_quick_benchmark():
 
 
 if __name__ == "__main__":
-    run_quick_benchmark()
+    run_quick_benchmark(parse_args())

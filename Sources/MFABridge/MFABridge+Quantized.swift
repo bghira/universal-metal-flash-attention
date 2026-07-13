@@ -98,8 +98,8 @@ public func mfa_attention_forward_quantized_direct(
     return 2 // MFA_ERROR_INVALID_ARGUMENT
   }
 
-  // Create multi-head attention with quantization support for proper parallel processing
-  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
+  // Use cached multi-head attention instance (reuses compiled pipelines)
+  let multiHeadAttention = mfaContext.multiHeadAttention
 
   // Create proper MultiHeadAttentionDescriptor with 4D shape support
   var baseDescriptor = AttentionDescriptor()
@@ -232,6 +232,7 @@ public func mfa_quantized_forward_with_lse(
   _ v: UnsafeMutableRawPointer?,
   _ out: UnsafeMutableRawPointer?,
   _ lse: UnsafeMutableRawPointer?,
+  _ mask: UnsafeMutableRawPointer?,
   _ batchSize: UInt32,
   _ seqLenQ: UInt32,
   _ seqLenKV: UInt32,
@@ -252,13 +253,15 @@ public func mfa_quantized_forward_with_lse(
   }
 
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
-  let device = mfaContext.device
 
   let qBuffer = Unmanaged<MFABuffer>.fromOpaque(q).takeUnretainedValue()
   let kBuffer = Unmanaged<MFABuffer>.fromOpaque(k).takeUnretainedValue()
   let vBuffer = Unmanaged<MFABuffer>.fromOpaque(v).takeUnretainedValue()
   let outBuffer = Unmanaged<MFABuffer>.fromOpaque(out).takeUnretainedValue()
   let lseBuffer = Unmanaged<MFABuffer>.fromOpaque(lse).takeUnretainedValue()
+  let maskBuffer: MFABuffer? = mask.map {
+    Unmanaged<MFABuffer>.fromOpaque($0).takeUnretainedValue()
+  }
 
   let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
   let mode: QuantizationMode = switch quantMode {
@@ -267,7 +270,7 @@ public func mfa_quantized_forward_with_lse(
   default: .tensorWise
   }
 
-  let quantAttention = QuantizedAttention(device: device)
+  let quantAttention = QuantizedAttention(device: mfaContext.device)
 
   let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
   let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
@@ -309,16 +312,22 @@ public func mfa_quantized_forward_with_lse(
     baseDescriptor: baseDescriptor, quantizationConfig: quantConfig
   )
 
-  let quantElemSize = precision.size
+  // INT4 data is packed 2 values per byte; INT8 is 1 byte per value.
+  let quantElemBytes = precision == .INT4
+    ? 0.5 // packed: 2 nibbles per byte
+    : Double(precision.size)
   let fp32Size = MemoryLayout<Float>.stride
+  let maskHeadSize = Int(seqLenQ) * Int(seqLenKV) * fp32Size
 
   for batchIdx in 0..<Int(batchSize) {
     for headIdx in 0..<Int(numHeads) {
-      let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
-      let kOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * quantElemSize
+      let headIdxFlat = batchIdx * Int(numHeads) + headIdx
+      let qOff = Int(Double(headIdxFlat) * Double(seqLenQ) * Double(headDim) * quantElemBytes)
+      let kOff = Int(Double(headIdxFlat) * Double(seqLenKV) * Double(headDim) * quantElemBytes)
       let vOff = kOff
       let oOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * fp32Size
       let lseOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * fp32Size
+      let maskOff = (batchIdx * Int(numHeads) + headIdx) * maskHeadSize
 
       guard
         let cmd = quantAttention.forward(
@@ -326,7 +335,9 @@ public func mfa_quantized_forward_with_lse(
           output: outBuffer.buffer,
           descriptor: quantDescriptor,
           bufferOffsets: (q: qOff, k: kOff, v: vOff, o: oOff, lse: lseOff),
-          externalLogsumexp: lseBuffer.buffer
+          externalLogsumexp: lseBuffer.buffer,
+          mask: maskBuffer?.buffer,
+          maskOffset: maskOff
         )
       else {
         return 5
@@ -361,6 +372,7 @@ public func mfa_quantized_backward(
   _ gradQ: UnsafeMutableRawPointer?,
   _ gradK: UnsafeMutableRawPointer?,
   _ gradV: UnsafeMutableRawPointer?,
+  _ mask: UnsafeMutableRawPointer?,
   _ batchSize: UInt32,
   _ seqLenQ: UInt32,
   _ seqLenKV: UInt32,
@@ -394,6 +406,9 @@ public func mfa_quantized_backward(
   let gradQBuffer = Unmanaged<MFABuffer>.fromOpaque(gradQ).takeUnretainedValue()
   let gradKBuffer = Unmanaged<MFABuffer>.fromOpaque(gradK).takeUnretainedValue()
   let gradVBuffer = Unmanaged<MFABuffer>.fromOpaque(gradV).takeUnretainedValue()
+  let maskBuffer: MFABuffer? = mask.map {
+    Unmanaged<MFABuffer>.fromOpaque($0).takeUnretainedValue()
+  }
 
   let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
   let mode: QuantizationMode = switch quantMode {
@@ -402,7 +417,7 @@ public func mfa_quantized_backward(
   default: .tensorWise
   }
 
-  let quantAttention = QuantizedAttention(device: device)
+  let quantAttention = QuantizedAttention(device: mfaContext.device)
 
   let fullQShape = [Int(batchSize), Int(numHeads), Int(seqLenQ), Int(headDim)]
   let fullKVShape = [Int(batchSize), Int(numHeads), Int(seqLenKV), Int(headDim)]
@@ -444,13 +459,24 @@ public func mfa_quantized_backward(
     baseDescriptor: baseDescriptor, quantizationConfig: quantConfig
   )
 
-  let quantElemSize = precision.size
+  let quantElemBytes = precision == .INT4
+    ? 0.5
+    : Double(precision.size)
   let fp32Size = MemoryLayout<Float>.stride
+
+  // Scratch D buffer — allocated once, reused for all heads.
+  let dBuf = device.makeBuffer(
+    length: Int(seqLenQ) * fp32Size,
+    options: .storageModeShared
+  )!
+
+  let maskHeadSize = Int(seqLenQ) * Int(seqLenKV) * fp32Size
 
   for batchIdx in 0..<Int(batchSize) {
     for headIdx in 0..<Int(numHeads) {
-      let qOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * quantElemSize
-      let kOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * quantElemSize
+      let headIdxFlat = batchIdx * Int(numHeads) + headIdx
+      let qOff = Int(Double(headIdxFlat) * Double(seqLenQ) * Double(headDim) * quantElemBytes)
+      let kOff = Int(Double(headIdxFlat) * Double(seqLenKV) * Double(headDim) * quantElemBytes)
       let vOff = kOff
       let oOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenQ) * Int(headDim) * fp32Size
       let goOff = oOff
@@ -458,11 +484,7 @@ public func mfa_quantized_backward(
       let gqOff = oOff
       let gkOff = (batchIdx * Int(numHeads) + headIdx) * Int(seqLenKV) * Int(headDim) * fp32Size
       let gvOff = gkOff
-
-      let dBuf = device.makeBuffer(
-        length: Int(seqLenQ) * fp32Size,
-        options: .storageModeShared
-      )!
+      let maskOff = (batchIdx * Int(numHeads) + headIdx) * maskHeadSize
 
       guard
         let cmdBQ = quantAttention.backwardQuery(
@@ -476,15 +498,11 @@ public func mfa_quantized_backward(
           dValues: dBuf,
           descriptor: quantDescriptor,
           bufferOffsets: (
-            q: qOff,
-            k: kOff,
-            v: vOff,
-            o: oOff,
-            go: goOff,
-            lse: lseOff,
-            gq: gqOff,
-            dv: 0
-          )
+            q: qOff, k: kOff, v: vOff, o: oOff,
+            go: goOff, lse: lseOff, gq: gqOff, dv: 0
+          ),
+          mask: maskBuffer?.buffer,
+          maskOffset: maskOff
         )
       else {
         return 5
@@ -509,15 +527,12 @@ public func mfa_quantized_backward(
           gradValue: gradVBuffer.buffer,
           descriptor: quantDescriptor,
           bufferOffsets: (
-            q: qOff,
-            k: kOff,
-            v: vOff,
-            go: goOff,
-            lse: lseOff,
-            dv: 0,
-            gk: gkOff,
-            gv: gvOff
-          )
+            q: qOff, k: kOff, v: vOff,
+            go: goOff, lse: lseOff, dv: 0,
+            gk: gkOff, gv: gvOff
+          ),
+          mask: maskBuffer?.buffer,
+          maskOffset: maskOff
         )
       else {
         return 5
