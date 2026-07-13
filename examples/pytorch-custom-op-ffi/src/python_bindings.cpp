@@ -60,6 +60,20 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("scale") = py::none(),
           py::arg("enable_gqa") = false);
 
+    m.def("rope_scaled_dot_product_attention",
+          &metal_sdpa::MetalSDPABackend::rope_scaled_dot_product_attention,
+          "Fused RoPE + SDPA (interleaved-pair rotation, pair-duplicated fp32 "
+          "cos/sin tables [S,D], [1,S,D] or [B,S,D]; BHSD tensors). "
+          "Gradient callers fall back to eager rotation + the normal path.",
+          py::arg("query"),
+          py::arg("key"),
+          py::arg("value"),
+          py::arg("rope_cos"),
+          py::arg("rope_sin"),
+          py::arg("attn_mask") = py::none(),
+          py::arg("is_causal") = false,
+          py::arg("scale") = py::none());
+
     m.def("metal_flash_attention_autograd",
           &metal_sdpa::metal_flash_attention_autograd,
           "Metal Flash Attention with autograd (forward + backward support)",
