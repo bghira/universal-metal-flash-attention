@@ -188,10 +188,6 @@ torch::Tensor convert_flux_to_metal_layout(const torch::Tensor& flux_tensor) {
 
     auto metal_tensor = flux_tensor.contiguous();
 
-    printf("🔄 FLUX->Metal (passthrough BHSD): %s dtype=%s\n",
-           ("[" + std::to_string(flux_tensor.size(0)) + "," + std::to_string(flux_tensor.size(1)) + "," + std::to_string(flux_tensor.size(2)) + "," + std::to_string(flux_tensor.size(3)) + "]").c_str(),
-           scalar_type_to_string(flux_tensor.scalar_type()).c_str());
-
     return metal_tensor;
 }
 
@@ -203,10 +199,6 @@ torch::Tensor convert_metal_to_flux_layout(const torch::Tensor& metal_tensor) {
     }
 
     auto flux_tensor = metal_tensor.contiguous();
-
-    printf("🔄 Metal->FLUX (passthrough BHSD): %s dtype=%s\n",
-           ("[" + std::to_string(flux_tensor.size(0)) + "," + std::to_string(flux_tensor.size(1)) + "," + std::to_string(flux_tensor.size(2)) + "," + std::to_string(flux_tensor.size(3)) + "]").c_str(),
-           scalar_type_to_string(flux_tensor.scalar_type()).c_str());
 
     return flux_tensor;
 }
@@ -1055,49 +1047,15 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
         seq_len_kv = static_cast<uint32_t>(k_tensor.sizes()[2]);
         head_dim = static_cast<uint16_t>(q_metal_sizes[3]);
 
-        printf("📊 Regular attention dimensions (BHSD): batch=%u, heads=%u, seq_q=%u, seq_kv=%u, dim=%u\n",
-               batch_size, num_heads, seq_len_q, seq_len_kv, head_dim);
     } else {
         throw std::runtime_error("Unsupported tensor dimensions. Expected 2D (seq_len, head_dim) or 4D (batch, seq_len, num_heads, head_dim)");
     }
 
-    bool cpu_binding = !use_mps_buffers;
-    bool promoted_precision = false;
     auto original_input_dtype = q_tensor.scalar_type();
-
-    auto promote_to_fp32 = [&](torch::Tensor& tensor) {
-        if (tensor.scalar_type() == torch::kFloat16 || tensor.scalar_type() == torch::kBFloat16) {
-            tensor = tensor.to(torch::kFloat32);
-            promoted_precision = true;
-        }
-    };
-
-    promote_to_fp32(q_tensor);
-    promote_to_fp32(k_tensor);
-    promote_to_fp32(v_tensor);
-
-    // Synchronize after FP16→FP32 promotion — the .to(kFloat32) conversion
-    // is enqueued on PyTorch's MPS command queue, but UMFA's kernel reads
-    // the buffer via a separate Metal command queue. Without this sync, the
-    // first dispatch reads stale/uninitialised memory (producing zeros).
-    if (promoted_precision && use_mps_buffers) {
-        torch::mps::synchronize();
-    }
-
-    auto output = torch::empty_like(q_tensor);
-    auto describe_shape = [](const torch::Tensor& t) {
-        std::string s = "[";
-        for (int64_t i = 0; i < t.dim(); ++i) {
-            s += std::to_string(t.size(i));
-            if (i + 1 < t.dim()) s += ",";
-        }
-        s += "]";
-        return s;
-    };
-    printf("📋 Created output tensor: shape=%s dtype=%s\n",
-           describe_shape(output).c_str(),
-           scalar_type_to_string(output.scalar_type()).c_str());
-
+    auto output_dtype = original_input_dtype == torch::kFloat32
+        ? original_input_dtype
+        : torch::kFloat32;
+    auto output = torch::empty(q_tensor.sizes(), q_tensor.options().dtype(output_dtype));
     std::string precision_str;
     switch (q_tensor.scalar_type()) {
         case torch::kFloat16: precision_str = "fp16"; break;
@@ -1128,13 +1086,6 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
 
     if (attn_mask.has_value() && attn_mask.value().defined()) {
         mask_cpu = ensure_contiguous_cpu(attn_mask.value());
-        if (promoted_precision) {
-            auto mask_dtype_for_conversion = mask_cpu.scalar_type();
-            if (mask_dtype_for_conversion == torch::kFloat16 || mask_dtype_for_conversion == torch::kBFloat16) {
-                mask_cpu = mask_cpu.to(torch::kFloat32);
-            }
-        }
-
         auto mask_dtype = mask_cpu.scalar_type();
         if (mask_dtype == torch::kBool) {
             mask_type = MFA_MASK_TYPE_BOOL;
@@ -1287,11 +1238,10 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
     }
 
     if (input_was_flux) {
-        printf("🔄 Converting output from Metal layout [B,S,H,D] back to PyTorch layout [B,H,S,D]\n");
         output = convert_metal_to_flux_layout(output);
     }
 
-    if (promoted_precision) {
+    if (output.scalar_type() != original_input_dtype) {
         output = output.to(original_input_dtype);
     }
 
@@ -1345,6 +1295,327 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention(
     return call_swift_flash_attention_impl(q_cpu, k_cpu, v_cpu, mask_cpu, is_causal, softmax_scale, false);
 }
 
+torch::Tensor MetalSDPABackend::try_instream_flash_attention(
+    const torch::Tensor& q_in,
+    const torch::Tensor& k_in,
+    const torch::Tensor& v_in,
+    const c10::optional<torch::Tensor>& attn_mask,
+    bool is_causal,
+    float softmax_scale
+) {
+    // Kill switch for debugging: MFA_DISABLE_INSTREAM=1 forces the legacy
+    // synchronous dispatch path.
+    static const bool instream_disabled = []() {
+        const char* env = std::getenv("MFA_DISABLE_INSTREAM");
+        return env && env[0] == '1';
+    }();
+    if (instream_disabled || !swift_context_) {
+        return {};
+    }
+    if (!q_in.device().is_mps() || !k_in.device().is_mps() || !v_in.device().is_mps()) {
+        return {};
+    }
+    if (q_in.dim() != 4 || k_in.dim() != 4 || v_in.dim() != 4) {
+        return {};
+    }
+
+    const char* precision = nullptr;
+    switch (q_in.scalar_type()) {
+        case torch::kFloat16: precision = "fp16"; break;
+        case torch::kBFloat16: precision = "bf16"; break;
+        case torch::kFloat32: precision = "fp32"; break;
+        default: return {};
+    }
+    if (k_in.scalar_type() != q_in.scalar_type() ||
+        v_in.scalar_type() != q_in.scalar_type()) {
+        return {};
+    }
+
+    // Strided views ride the kernel's stride path when the last dim is
+    // contiguous and no stride is zero/negative (broadcast/flipped views
+    // still need a copy). Anything else gets a stream-ordered contiguous
+    // copy — no synchronization needed either way, the attention kernel is
+    // encoded on the same MPS stream after any copies. The kernel computes
+    // offsets in 32-bit, so very large strided extents fall back to a copy.
+    auto kernel_supports_strides = [](const torch::Tensor& t) {
+        if (t.is_contiguous()) {
+            return true;  // passed with null strides -> dense addressing
+        }
+        auto st = t.strides();
+        if (st[3] != 1) {
+            return false;
+        }
+        if (st[0] <= 0 || st[1] <= 0 || st[2] <= 0) {
+            return false;
+        }
+        const int64_t max_elem_offset =
+            (t.size(0) - 1) * st[0] + (t.size(1) - 1) * st[1] +
+            (t.size(2) - 1) * st[2] + (t.size(3) - 1) + t.storage_offset();
+        return max_elem_offset < (int64_t{1} << 31);
+    };
+    auto q = kernel_supports_strides(q_in) ? q_in : q_in.contiguous();
+    auto k = kernel_supports_strides(k_in) ? k_in : k_in.contiguous();
+    auto v = kernel_supports_strides(v_in) ? v_in : v_in.contiguous();
+
+    const auto q_sizes = q.sizes();  // BHSD
+    const int64_t batch = q_sizes[0];
+    const int64_t heads = q_sizes[1];
+    const int64_t seq_q = q_sizes[2];
+    const int64_t head_dim = q_sizes[3];
+    const int64_t seq_kv = k.size(2);
+    if (k.size(0) != batch || v.size(0) != batch ||
+        k.size(1) != heads || v.size(1) != heads ||
+        v.size(2) != seq_kv ||
+        k.size(3) != head_dim || v.size(3) != head_dim) {
+        return {};
+    }
+    if (seq_q > 65535 || seq_kv > 65535 || head_dim > 1024 || batch > 1024) {
+        return {};
+    }
+
+    torch::Tensor mask_tensor;
+    const torch::Tensor* mask_ptr = nullptr;
+    int mask_type = MFA_MASK_TYPE_NONE;
+    int mask_scalar_type = MFA_MASK_SCALAR_BYTE;
+    if (attn_mask.has_value() && attn_mask.value().defined()) {
+        mask_tensor = attn_mask.value();
+        if (!mask_tensor.device().is_mps() || mask_tensor.dim() == 0 || mask_tensor.dim() > 4) {
+            return {};
+        }
+        switch (mask_tensor.scalar_type()) {
+            case torch::kBool:
+                mask_type = MFA_MASK_TYPE_BOOL;
+                mask_scalar_type = MFA_MASK_SCALAR_BYTE;
+                break;
+            case torch::kFloat32:
+                mask_type = MFA_MASK_TYPE_ADDITIVE;
+                mask_scalar_type = MFA_MASK_SCALAR_FP32;
+                break;
+            case torch::kFloat16:
+                mask_type = MFA_MASK_TYPE_ADDITIVE;
+                mask_scalar_type = MFA_MASK_SCALAR_FP16;
+                break;
+            case torch::kBFloat16:
+                mask_type = MFA_MASK_TYPE_ADDITIVE;
+                mask_scalar_type = MFA_MASK_SCALAR_BF16;
+                break;
+            default:
+                return {};
+        }
+        mask_ptr = &mask_tensor;
+    }
+
+    // The kernel always stores O as FP32 (memoryPrecisions[.O] = .FP32), so
+    // the output buffer must be fp32 even for half-precision inputs; cast
+    // back afterwards. The cast is stream-ordered — still no host sync.
+    const auto orig_dtype = q.scalar_type();
+    const auto output_dtype = orig_dtype == torch::kFloat32 ? orig_dtype : torch::kFloat32;
+    auto output = torch::empty(q.sizes(), q.options().dtype(output_dtype));
+    int rc = mps_utils::encode_attention_on_torch_stream(
+        swift_context_,
+        q, k, v, output,
+        mask_ptr,
+        mask_type,
+        mask_scalar_type,
+        static_cast<uint32_t>(batch),
+        static_cast<uint32_t>(seq_q),
+        static_cast<uint32_t>(seq_kv),
+        static_cast<uint32_t>(heads),
+        static_cast<uint16_t>(head_dim),
+        softmax_scale,
+        is_causal,
+        precision,
+        precision);
+    if (rc != 0) {
+        return {};
+    }
+    if (output.scalar_type() != orig_dtype) {
+        output = output.to(orig_dtype);
+    }
+    return output;
+}
+
+
+namespace {
+
+// Eager interleaved-pair RoPE on BHSD tensors, fp32 math — bit-compatible
+// with diffusers apply_rotary_emb(use_real_unbind_dim=-1) given
+// pair-duplicated tables. Used as the fallback and the autograd-safe path.
+torch::Tensor apply_rope_eager_bhsd(
+    const torch::Tensor& x,
+    const torch::Tensor& cos_t,
+    const torch::Tensor& sin_t
+) {
+    auto cos_b = (cos_t.dim() == 2 ? cos_t.unsqueeze(0) : cos_t).unsqueeze(1);
+    auto sin_b = (sin_t.dim() == 2 ? sin_t.unsqueeze(0) : sin_t).unsqueeze(1);
+    auto xf = x.to(torch::kFloat32);
+    auto shape = xf.sizes().vec();
+    auto pairs = xf.reshape({shape[0], shape[1], shape[2], shape[3] / 2, 2});
+    auto x_real = pairs.select(-1, 0);
+    auto x_imag = pairs.select(-1, 1);
+    auto rotated = torch::stack({-x_imag, x_real}, -1).reshape(shape);
+    return (xf * cos_b + rotated * sin_b).to(x.scalar_type());
+}
+
+} // namespace
+
+torch::Tensor MetalSDPABackend::rope_scaled_dot_product_attention(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& rope_cos,
+    const torch::Tensor& rope_sin,
+    const c10::optional<torch::Tensor>& attn_mask,
+    bool is_causal,
+    c10::optional<double> scale
+) {
+    ensure_initialized();
+
+    auto eager = [&]() {
+        auto cos_f = rope_cos.to(query.device(), torch::kFloat32);
+        auto sin_f = rope_sin.to(query.device(), torch::kFloat32);
+        auto q_rot = apply_rope_eager_bhsd(query, cos_f, sin_f);
+        auto k_rot = apply_rope_eager_bhsd(key, cos_f, sin_f);
+        return scaled_dot_product_attention(
+            q_rot, k_rot, value, attn_mask, 0.0, is_causal, scale, true);
+    };
+
+    // v1 fused path is forward-only: attention backward returns gradients
+    // w.r.t. rotated Q/K, and the model needs pre-RoPE gradients (inverse
+    // rotation on dQ/dK). Until that autograd lands, gradient callers use
+    // the eager rotation, which flows through the existing autograd path.
+    const bool needs_grad = at::GradMode::is_enabled() &&
+        (query.requires_grad() || key.requires_grad() || value.requires_grad());
+    if (needs_grad) {
+        return eager();
+    }
+    if (!swift_context_ ||
+        !query.device().is_mps() || !key.device().is_mps() || !value.device().is_mps()) {
+        return eager();
+    }
+    if (query.dim() != 4 || key.dim() != 4 || value.dim() != 4) {
+        return eager();
+    }
+    const auto dt = query.scalar_type();
+    if (dt != torch::kFloat32 && dt != torch::kFloat16 && dt != torch::kBFloat16) {
+        return eager();
+    }
+    if (key.scalar_type() != dt || value.scalar_type() != dt) {
+        return eager();
+    }
+
+    const int64_t B = query.size(0);
+    const int64_t Hq = query.size(1);
+    const int64_t Sq = query.size(2);
+    const int64_t D = query.size(3);
+    const int64_t Hkv = key.size(1);
+    const int64_t Skv = key.size(2);
+    if (D % 2 != 0 || D > 1024 || Sq > 65535 || Skv > 65535 || B > 1024) {
+        return eager();
+    }
+    if (key.size(0) != B || value.size(0) != B || value.size(1) != Hkv ||
+        value.size(2) != Skv || key.size(3) != D || value.size(3) != D) {
+        return eager();
+    }
+    if (Hq != Hkv && (Hkv == 0 || Hq % Hkv != 0)) {
+        return eager();
+    }
+    // All four target models are joint self-attention: one table covers the
+    // shared sequence. Cross-length rope needs per-tensor tables — later.
+    if (Sq != Skv) {
+        return eager();
+    }
+
+    // Normalize tables to fp32 contiguous MPS: [S, D] (shared) or [B, S, D].
+    auto normalize_table = [&](const torch::Tensor& t) -> torch::Tensor {
+        auto out = t;
+        if (out.dim() == 3 && out.size(0) == 1) {
+            out = out.squeeze(0);
+        }
+        return out.to(query.device(), torch::kFloat32).contiguous();
+    };
+    auto cos_t = normalize_table(rope_cos);
+    auto sin_t = normalize_table(rope_sin);
+    if (cos_t.sizes() != sin_t.sizes()) {
+        return eager();
+    }
+    int64_t table_batch_stride = 0;
+    if (cos_t.dim() == 2) {
+        if (cos_t.size(0) < Sq || cos_t.size(1) != D) {
+            return eager();
+        }
+    } else if (cos_t.dim() == 3) {
+        if (cos_t.size(0) != B || cos_t.size(1) < Sq || cos_t.size(2) != D) {
+            return eager();
+        }
+        table_batch_stride = cos_t.size(1) * D;
+    } else {
+        return eager();
+    }
+    // Table rows are indexed as s * D, so rows beyond Sq are simply unused;
+    // a 2D table with more rows than Sq is fine, a batched one too.
+
+    const char* precision = dt == torch::kFloat16 ? "fp16"
+        : dt == torch::kBFloat16                  ? "bf16"
+                                                  : "fp32";
+
+    // The rotation kernel reads strided BHSD views directly when the last
+    // dim is contiguous; otherwise copy (stream-ordered, no sync).
+    auto rope_src_ok = [](const torch::Tensor& t) {
+        if (t.is_contiguous()) {
+            return true;
+        }
+        auto st = t.strides();
+        return st[3] == 1 && st[0] >= 0 && st[1] >= 0 && st[2] >= 0;
+    };
+    auto q_src = rope_src_ok(query) ? query : query.contiguous();
+    auto k_src = rope_src_ok(key) ? key : key.contiguous();
+
+    auto q_rot = torch::empty({B, Hq, Sq, D}, query.options());
+    auto k_rot = torch::empty({B, Hkv, Skv, D}, key.options());
+
+    int rc = mps_utils::encode_rope_rotate_on_torch_stream(
+        swift_context_, q_src, q_rot, cos_t, sin_t,
+        table_batch_stride, /*negate_sin=*/false,
+        static_cast<uint32_t>(B), static_cast<uint32_t>(Hq),
+        static_cast<uint32_t>(Sq), static_cast<uint32_t>(D), precision);
+    if (rc == 0) {
+        rc = mps_utils::encode_rope_rotate_on_torch_stream(
+            swift_context_, k_src, k_rot, cos_t, sin_t,
+            table_batch_stride, /*negate_sin=*/false,
+            static_cast<uint32_t>(B), static_cast<uint32_t>(Hkv),
+            static_cast<uint32_t>(Skv), static_cast<uint32_t>(D), precision);
+    }
+    if (rc != 0) {
+        // Nothing has been committed; any encoded rotation only writes the
+        // scratch tensors we are about to drop. Correctness via eager path.
+        return eager();
+    }
+
+    torch::Tensor k_in = k_rot;
+    torch::Tensor v_in = value;
+    if (Hq != Hkv) {
+        const int64_t group = Hq / Hkv;
+        k_in = k_rot.repeat_interleave(group, 1);
+        v_in = value.repeat_interleave(group, 1);
+    }
+
+    float softmax_scale = scale.has_value()
+        ? static_cast<float>(scale.value())
+        : 1.0f / std::sqrt(static_cast<float>(D));
+
+    auto result = try_instream_flash_attention(
+        q_rot, k_in, v_in, attn_mask, is_causal, softmax_scale);
+    if (!result.defined()) {
+        // Attention declined (mask type, shape, ...). The rotations are
+        // already encoded and correct — route the rotated tensors through
+        // the full dispatcher instead of redoing rope eagerly.
+        return scaled_dot_product_attention(
+            q_rot, k_in, v_in, attn_mask, 0.0, is_causal, scale, false);
+    }
+    dispatch_stats().rope_instream.fetch_add(1, std::memory_order_relaxed);
+    return result;
+}
 
 torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     const torch::Tensor& query,
@@ -1474,6 +1745,9 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     bool needs_autograd = q.requires_grad() || k.requires_grad() ||
                           v.requires_grad();
     if (needs_autograd) {
+        if (is_causal) {
+            return fallback_to_native();
+        }
         stats.fp32_autograd.fetch_add(1, std::memory_order_relaxed);
         return metal_flash_attention_autograd(
             q, k, v, is_causal, sm_scale);
@@ -1511,14 +1785,42 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     auto orig_device = q.device();
     auto orig_dtype = q.scalar_type();
 
-    // Call Swift Flash Attention (using processed tensors from call_swift_flash_attention)
-    stats.fp32_direct.fetch_add(1, std::memory_order_relaxed);
-    auto result = call_swift_flash_attention(q, k, v, attn_mask, is_causal, softmax_scale);
+    // Eligible calls encode straight into PyTorch's MPS stream: no entry
+    // sync, no dtype promotion, no waitUntilCompleted. Real masks are
+    // expanded on the same stream before attention. Anything the in-stream
+    // path declines uses the legacy synchronous path.
+    torch::Tensor result;
+    bool used_instream = false;
+    result = try_instream_flash_attention(
+        q, k, v,
+        has_real_mask ? attn_mask : c10::optional<torch::Tensor>(),
+        is_causal,
+        softmax_scale);
+    used_instream = result.defined();
+    if (used_instream) {
+        stats.fp32_instream.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        stats.fp32_direct.fetch_add(1, std::memory_order_relaxed);
+        result = call_swift_flash_attention(
+            q, k, v,
+            has_real_mask ? attn_mask : c10::optional<torch::Tensor>(),
+            is_causal,
+            softmax_scale);
+    }
 
-    // Runtime NaN safety net — certain head_dim values trigger a kernel bug
-    // (likely in block dimension padding). Fall back to PyTorch native.
-    if (torch::isnan(result).any().item<bool>()) {
-        stats.fp32_direct.fetch_sub(1, std::memory_order_relaxed);
+    // Runtime NaN safety net, opt-in via MFA_NAN_CHECK=1. The check forces a
+    // blocking GPU sync per call, which defeats the async in-stream path —
+    // keep it for debugging suspected kernel issues only.
+    static const bool nan_check_enabled = []() {
+        const char* env = std::getenv("MFA_NAN_CHECK");
+        return env && env[0] == '1';
+    }();
+    if (nan_check_enabled && torch::isnan(result).any().item<bool>()) {
+        if (used_instream) {
+            stats.fp32_instream.fetch_sub(1, std::memory_order_relaxed);
+        } else {
+            stats.fp32_direct.fetch_sub(1, std::memory_order_relaxed);
+        }
         stats.pytorch_fallback.fetch_add(1, std::memory_order_relaxed);
         return at::native::scaled_dot_product_attention(
             query, key, value, native_safe_mask(), dropout_p, is_causal, scale, enable_gqa);
@@ -2328,14 +2630,10 @@ public:
       throw std::runtime_error("Metal SDPA backend not initialized");
     }
 
-    // Promote fp16/bf16 → fp32, make contiguous BHSD.
+    // Keep fp16/bf16 inputs in their native memory format; the Swift
+    // descriptor now carries the actual input precision.
     auto orig_dtype = query.scalar_type();
-    if (query.scalar_type() == torch::kFloat16 ||
-        query.scalar_type() == torch::kBFloat16) {
-      query = query.to(torch::kFloat32);
-      key = key.to(torch::kFloat32);
-      value = value.to(torch::kFloat32);
-    }
+    auto input_precision = MetalSDPABackend::torch_dtype_to_mfa_dtype(orig_dtype);
     query = query.contiguous();
     key = key.contiguous();
     value = value.contiguous();
@@ -2355,7 +2653,8 @@ public:
       sm_scale = 1.0f / std::sqrt(static_cast<float>(dim));
     }
 
-    auto output = torch::empty_like(query);
+    auto output_dtype = orig_dtype == torch::kFloat32 ? orig_dtype : torch::kFloat32;
+    auto output = torch::empty(query.sizes(), query.options().dtype(output_dtype));
     auto lse = torch::empty(
         {batch * heads * seq_q}, torch::kFloat32).to(query.device());
 
@@ -2377,6 +2676,7 @@ public:
         q_b, k_b, v_b, out_b, lse_b,
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
+        input_precision, input_precision,
         false, false, false, false);
 
     mfa_destroy_buffer(q_b);
@@ -2391,9 +2691,9 @@ public:
           std::to_string(result));
     }
 
-    // Convert back to original dtype.
+    auto returned_output = output;
     if (output.scalar_type() != orig_dtype) {
-      output = output.to(orig_dtype);
+      returned_output = output.to(orig_dtype);
     }
 
     ctx->save_for_backward({query, key, value, output});
@@ -2401,8 +2701,9 @@ public:
     ctx->saved_data["scale"] = sm_scale;
     ctx->saved_data["is_causal"] = is_causal;
     ctx->saved_data["orig_dtype"] = static_cast<int64_t>(orig_dtype);
+    ctx->saved_data["input_precision"] = static_cast<int64_t>(input_precision);
 
-    return output;
+    return returned_output;
   }
 
   static torch::autograd::tensor_list backward(
@@ -2421,10 +2722,12 @@ public:
     auto d_output = grad_outputs[0];
     auto orig_dtype = static_cast<torch::ScalarType>(
         ctx->saved_data["orig_dtype"].toInt());
+    auto input_precision = static_cast<mfa_precision_t>(
+        ctx->saved_data["input_precision"].toInt());
 
-    // Promote grad to fp32 + contiguous.
-    if (d_output.scalar_type() != torch::kFloat32) {
-      d_output = d_output.to(torch::kFloat32);
+    auto d_output_dtype = orig_dtype == torch::kFloat32 ? torch::kFloat32 : orig_dtype;
+    if (d_output.scalar_type() != d_output_dtype) {
+      d_output = d_output.to(d_output_dtype);
     }
     d_output = d_output.contiguous();
 
@@ -2440,14 +2743,14 @@ public:
     }
 
     auto mfa_ctx = MetalSDPABackend::get_swift_context();
-    auto d_query = torch::zeros_like(query);
-    auto d_key = torch::zeros_like(key);
-    auto d_value = torch::zeros_like(value);
+    auto fp32_options = query.options().dtype(torch::kFloat32);
+    auto d_query = torch::zeros(query.sizes(), fp32_options);
+    auto d_key = torch::zeros(key.sizes(), fp32_options);
+    auto d_value = torch::zeros(value.sizes(), fp32_options);
     auto d_buffer = torch::zeros(
         {batch * heads * seq_q}, torch::kFloat32).to(query.device());
 
-    // Forward output needs to be fp32 for the backward kernel.
-    auto output_fp32 = saved[3].to(torch::kFloat32);
+    auto output_fp32 = saved[3];
 
     auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
       mfa_buffer_t h = nullptr;
@@ -2472,6 +2775,7 @@ public:
         dq_b, dk_b, dv_b, d_b,
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
+        input_precision, input_precision,
         false, false, false, false);
 
     mfa_destroy_buffer(dout_b);
@@ -2775,6 +3079,8 @@ std::map<std::string, int64_t> get_dispatch_stats() {
         {"quantized_autograd", s.quantized_autograd.load(std::memory_order_relaxed)},
         {"fp32_autograd", s.fp32_autograd.load(std::memory_order_relaxed)},
         {"fp32_direct", s.fp32_direct.load(std::memory_order_relaxed)},
+        {"fp32_instream", s.fp32_instream.load(std::memory_order_relaxed)},
+        {"rope_instream", s.rope_instream.load(std::memory_order_relaxed)},
         {"pytorch_fallback", s.pytorch_fallback.load(std::memory_order_relaxed)},
         {"mask_all_true_skipped", s.mask_all_true_skipped.load(std::memory_order_relaxed)},
     };
@@ -2786,6 +3092,8 @@ void reset_dispatch_stats() {
     s.quantized_autograd.store(0);
     s.fp32_autograd.store(0);
     s.fp32_direct.store(0);
+    s.fp32_instream.store(0);
+    s.rope_instream.store(0);
     s.pytorch_fallback.store(0);
     s.mask_all_true_skipped.store(0);
 }
@@ -2799,4 +3107,8 @@ void reset_dispatch_stats() {
 // calls on MPS tensors.
 TORCH_LIBRARY_IMPL(aten, MPS, m) {
     m.impl("scaled_dot_product_attention", &metal_sdpa::MetalSDPABackend::scaled_dot_product_attention);
+}
+
+TORCH_LIBRARY_IMPL(aten, AutogradMPS, m) {
+    m.impl("scaled_dot_product_attention", torch::CppFunction::makeFallthrough());
 }
