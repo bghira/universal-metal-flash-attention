@@ -894,7 +894,7 @@ public func mfa_attention_forward(
   _ k: UnsafeMutableRawPointer?,
   _ v: UnsafeMutableRawPointer?,
   _ out: UnsafeMutableRawPointer?,
-  _: UInt32,
+  _ batchSize: UInt32,
   _ seqLenQ: UInt32,
   _ seqLenKV: UInt32,
   _ numHeads: UInt32,
@@ -962,7 +962,7 @@ public func mfa_attention_forward(
   do {
     preparedMask = try mfaContext.prepareMask(
       arguments: maskArguments,
-      batchSize: 1,
+      batchSize: batchSize,
       numHeads: numHeads,
       seqLenQ: seqLenQ,
       seqLenKV: seqLenKV
@@ -1002,7 +1002,7 @@ public func mfa_attention_forward(
       kBuffer: kBuffer.buffer,
       vBuffer: vBuffer.buffer,
       outBuffer: outBuffer.buffer,
-      batchSize: 1,
+      batchSize: batchSize,
       seqLenQ: seqLenQ,
       seqLenKV: seqLenKV,
       numHeads: numHeads,
