@@ -1573,6 +1573,7 @@ torch::Tensor MetalSDPABackend::rope_scaled_dot_product_attention(
         auto result = metal_rope_flash_attention_autograd(
             query, key, value, cos_t, sin_t, table_batch_stride, is_causal,
             scale.has_value() ? scale.value() : 0.0);
+        dispatch_stats().rope_autograd.fetch_add(1, std::memory_order_relaxed);
         dispatch_stats().rope_instream.fetch_add(1, std::memory_order_relaxed);
         return result;
     }
@@ -1797,7 +1798,7 @@ torch::Tensor MetalSDPABackend::scaled_dot_product_attention(
     bool needs_autograd = q.requires_grad() || k.requires_grad() ||
                           v.requires_grad();
     if (needs_autograd) {
-        if (is_causal) {
+        if (has_real_mask) {
             return fallback_to_native();
         }
         stats.fp32_autograd.fetch_add(1, std::memory_order_relaxed);
@@ -3396,6 +3397,7 @@ std::map<std::string, int64_t> get_dispatch_stats() {
         {"fp32_direct", s.fp32_direct.load(std::memory_order_relaxed)},
         {"fp32_instream", s.fp32_instream.load(std::memory_order_relaxed)},
         {"rope_instream", s.rope_instream.load(std::memory_order_relaxed)},
+        {"rope_autograd", s.rope_autograd.load(std::memory_order_relaxed)},
         {"pytorch_fallback", s.pytorch_fallback.load(std::memory_order_relaxed)},
         {"mask_all_true_skipped", s.mask_all_true_skipped.load(std::memory_order_relaxed)},
     };
@@ -3409,6 +3411,7 @@ void reset_dispatch_stats() {
     s.fp32_direct.store(0);
     s.fp32_instream.store(0);
     s.rope_instream.store(0);
+    s.rope_autograd.store(0);
     s.pytorch_fallback.store(0);
     s.mask_all_true_skipped.store(0);
 }

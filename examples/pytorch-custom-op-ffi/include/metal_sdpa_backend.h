@@ -669,6 +669,7 @@ public:
         std::atomic<int64_t> fp32_direct{0};
         std::atomic<int64_t> fp32_instream{0};
         std::atomic<int64_t> rope_instream{0};
+        std::atomic<int64_t> rope_autograd{0};
         std::atomic<int64_t> pytorch_fallback{0};
         std::atomic<int64_t> mask_all_true_skipped{0};
     };
