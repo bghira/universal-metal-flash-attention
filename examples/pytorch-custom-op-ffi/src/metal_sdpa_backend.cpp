@@ -1574,6 +1574,7 @@ torch::Tensor MetalSDPABackend::rope_scaled_dot_product_attention(
             query, key, value, cos_t, sin_t, table_batch_stride, is_causal,
             scale.has_value() ? scale.value() : 0.0);
         dispatch_stats().rope_autograd.fetch_add(1, std::memory_order_relaxed);
+        dispatch_stats().rope_instream.fetch_add(1, std::memory_order_relaxed);
         return result;
     }
 
