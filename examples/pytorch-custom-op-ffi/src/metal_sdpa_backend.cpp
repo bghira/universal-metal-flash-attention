@@ -1073,8 +1073,8 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
             throw std::runtime_error("Unsupported dtype for Metal Flash Attention");
     }
 
-    if (seq_len_q > 65535 || seq_len_kv > 65535) {
-        throw std::runtime_error("Sequence length too large (max 65535)");
+    if (seq_len_q > 1048576 || seq_len_kv > 1048576) {
+        throw std::runtime_error("Sequence length too large (max 1048576)");
     }
     if (head_dim > 1024) {
         throw std::runtime_error("Head dimension too large (max 1024)");
@@ -1377,7 +1377,7 @@ torch::Tensor MetalSDPABackend::try_instream_flash_attention(
         k.size(3) != head_dim || v.size(3) != head_dim) {
         return {};
     }
-    if (seq_q > 65535 || seq_kv > 65535 || head_dim > 1024 || batch > 1024) {
+    if (seq_q > 1048576 || seq_kv > 1048576 || head_dim > 1024 || batch > 1024) {
         return {};
     }
 
@@ -1511,7 +1511,7 @@ torch::Tensor MetalSDPABackend::rope_scaled_dot_product_attention(
     const int64_t D = query.size(3);
     const int64_t Hkv = key.size(1);
     const int64_t Skv = key.size(2);
-    if (D % 2 != 0 || D > 1024 || Sq > 65535 || Skv > 65535 || B > 1024) {
+    if (D % 2 != 0 || D > 1024 || Sq > 1048576 || Skv > 1048576 || B > 1024) {
         return eager();
     }
     if (key.size(0) != B || value.size(0) != B || value.size(1) != Hkv ||
