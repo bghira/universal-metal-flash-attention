@@ -515,7 +515,8 @@ extern "C" {
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
         int32_t q_target_precision, int32_t kv_target_precision,
-        int32_t quant_mode, int32_t input_precision);
+        int32_t quant_mode, int32_t input_precision,
+        void* external_command_buffer);
 
     // Backward: re-quantizes Q/K/V, runs quantized flash backward.
     int32_t mfa_quantized_backward(

@@ -2442,12 +2442,18 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     int32_t q_target = input_precision;  // e.g. 1 (BF16) — no quantization
     int32_t kv_target = target_quantization;  // 3 (INT8) or 4 (INT4)
 
+    // Quantized attention: use the blocking path. The quantized K/V buffers
+    // are created on UMFA's Metal queue — encoding the attention kernel onto
+    // PyTorch's MPS stream would trigger cross-queue hazard tracking and
+    // catastrophic slowdowns. The BF16 in-stream path avoids this because all
+    // buffers are PyTorch MPS allocator-owned.
     auto result = mfa_quantized_forward_with_lse(
         MetalSDPABackend::swift_context_,
         q_buffer, k_buffer, v_buffer, out_buffer, lse_buffer, nullptr,
         batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
         softmax_scale, config.is_causal,
-        q_target, kv_target, quantization_mode, input_precision
+        q_target, kv_target, quantization_mode, input_precision,
+        nullptr  // blocking path — own command buffer, commit + wait
     );
 
     mfa_destroy_buffer(q_buffer);
@@ -3099,7 +3105,8 @@ public:
         static_cast<int32_t>(target_precision),
         static_cast<int32_t>(target_precision),
         static_cast<int32_t>(quant_mode),
-        input_prec);
+        input_prec,
+        nullptr);
 
     mfa_destroy_buffer(q_b);
     mfa_destroy_buffer(k_b);
