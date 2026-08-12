@@ -129,10 +129,9 @@ More work can be done to identify performance loss in the baseline non-quantised
 ## Roadmap
 
 - Make it simpler to install this package, is probably step number one eg. providing precompiled wheels
-- Multihead backward pass. Currently not exposed through FFI to eg. Python callers, only available in Swift atm
 - Better abstraction for downstream use, eg. helpers for quantised buffers instead of having to reimplement in each adapter language
-- INT4 fused runtime quant w/ GPU bytepacking for improved performance in cases where CPU overhead dominates over mem bw constraints
 - Per-channel asymmetric quantisation to provide more options for granularity over the tensorWise, blockWise and rowWise impl we've got currently
+- Chain quantization dispatches into the attention command buffer (eliminate per-tensor sync points) for further latency reduction
 - Testing the gains from GLUON and other heuristics that don't exist in the original MFA repo on newer hardware, maybe someone buys me an M4 🤪
 - Attention dropout, low priority, as I have no personal use-case for it
 - Experimentation with newer attention strategies as they become available (_open a feature request!_)
