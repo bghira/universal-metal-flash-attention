@@ -1003,23 +1003,21 @@ torch::Tensor MetalSDPABackend::call_swift_flash_attention_impl(
     // Metal command queue. Without sync, the kernel sees stale/uninitialised
     // data.
     //
-    // Also synchronize on entry for already-contiguous tensors: PyTorch may
-    // have queued producer ops (matmul, activation, etc.) on the MPS command
-    // queue that write to the tensor's buffer. UMFA's kernel runs on a
-    // separate Metal command queue and would read the buffer before those
-    // writes complete. This matches the torch.mps.synchronize() the SimpleTuner
-    // wrapper now does, but makes the extension safe when called directly.
+    // On MPS we zero-copy bind the tensors' MTLBuffers. The UMFA kernel
+    // dispatches on its own Metal command queue, but because the buffers
+    // are .storageModeShared (MPS allocator default) the GPU writes from
+    // PyTorch's preceding ops are visible once the command buffer is
+    // submitted — Metal serialises command-buffer execution per queue and
+    // the shared storage mode provides cross-queue visibility without an
     if (use_mps_buffers) {
-        torch::mps::synchronize();
+        // no sync — rely on shared-storage visibility
     }
 
     bool did_contiguous = false;
     if (!q_tensor.is_contiguous()) { q_tensor = q_tensor.contiguous(); did_contiguous = true; }
     if (!k_tensor.is_contiguous()) { k_tensor = k_tensor.contiguous(); did_contiguous = true; }
     if (!v_tensor.is_contiguous()) { v_tensor = v_tensor.contiguous(); did_contiguous = true; }
-    if (did_contiguous) {
-        torch::mps::synchronize();
-    }
+    // no sync after contiguous — shared-storage buffers are visible cross-queue
 
     auto q_sizes = q_tensor.sizes();
     auto k_sizes = k_tensor.sizes();
@@ -2340,7 +2338,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     bool use_mps_buffers = query.device().is_mps() && key.device().is_mps() && value.device().is_mps();
     torch::Tensor q_staged, k_staged, v_staged;
     if (use_mps_buffers) {
-        torch::mps::synchronize();
         q_staged = query.contiguous();
         k_staged = key.contiguous();
         v_staged = value.contiguous();
@@ -2561,7 +2558,6 @@ public:
     key = key.contiguous();
     value = value.contiguous();
     if (query.device().type() == at::kMPS) {
-      torch::mps::synchronize();
     }
 
     auto q_sizes = query.sizes();
@@ -2662,7 +2658,6 @@ public:
     uint16_t dim = static_cast<uint16_t>(q_sizes[3]);
 
     if (query.device().type() == at::kMPS) {
-      torch::mps::synchronize();
     }
 
     auto mfa_ctx = MetalSDPABackend::get_swift_context();
@@ -2814,7 +2809,6 @@ public:
     // Drain the torch stream so the rotations (and any producer ops) are
     // visible to the attention primitive running on UMFA's own queue.
     if (query.device().type() == at::kMPS) {
-      torch::mps::synchronize();
     }
 
     auto output_dtype = orig_dtype == torch::kFloat32 ? orig_dtype : torch::kFloat32;
@@ -2899,7 +2893,6 @@ public:
     }
     d_output = d_output.contiguous();
     if (q_rot.device().type() == at::kMPS) {
-      torch::mps::synchronize();
     }
 
     auto q_sizes = q_rot.sizes();
@@ -3043,7 +3036,6 @@ public:
     key = key.contiguous();
     value = value.contiguous();
     if (query.device().type() == at::kMPS) {
-      torch::mps::synchronize();
     }
 
     auto q_sizes = query.sizes();
@@ -3095,7 +3087,6 @@ public:
         m = m.expand({batch, heads, seq_q, seq_kv}).contiguous();
         mask_tensor = m;
         if (query.device().type() == at::kMPS) {
-            torch::mps::synchronize();
         }
         mask_b = bind(mask_tensor);
     }
@@ -3180,7 +3171,6 @@ public:
     // the FFI writes. Without this, the MPS zero-fill can execute after the
     // FFI write, overwriting the gradients.
     if (query.device().type() == at::kMPS) {
-      torch::mps::synchronize();
     }
 
     auto bind = [&](torch::Tensor &t) -> mfa_buffer_t {
@@ -3202,7 +3192,6 @@ public:
     mfa_buffer_t mask_b = nullptr;
     if (mask_tensor.defined()) {
         if (query.device().type() == at::kMPS) {
-            torch::mps::synchronize();
         }
         mask_b = bind(mask_tensor);
     }
