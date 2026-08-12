@@ -107,28 +107,27 @@ Quantised training semantics were inspired by the GLUON project provided by Trit
 
 ### FLUX.1 Schnell
 
-| Resolution      | Configuration     | Time (s) | Speedup | Notes                                                              |
-| --------------- | ----------------- | -------- | ------- | ------------------------------------------------------------------ |
-| **256x256**     | PyTorch Vanilla   | 5.53     | baseline| Baseline for comparison.                                           |
-|                 | Metal UMFA BF16   | 4.88     | **1.13x**   | **Faster** — lower overhead at small resolutions.              |
-|                 | Metal UMFA INT8   | 5.15     | **1.08x**   | **Faster** — quantization overhead amortised.                  |
-|                 | Metal UMFA INT4   | 4.92     | **1.13x**   | **Faster** — best memory efficiency.                          |
-| **512x512**     | PyTorch Vanilla   | 9.59     | baseline| Baseline for comparison.                                           |
-|                 | Metal UMFA BF16   | 9.43     | **1.02x**   | Marginal improvement.                                          |
-|                 | Metal UMFA INT8   | 9.76     | 0.98x   | Slight overhead from per-layer runtime quantization.               |
-|                 | Metal UMFA INT4   | 10.17    | 0.94x   | Slight overhead from per-layer runtime quantization.               |
-| **1024x1024**   | PyTorch Vanilla   | 32.88    | baseline| Baseline for comparison.                                           |
-|                 | Metal UMFA BF16   | 34.61    | 0.95x   | Comparable; offers higher precision.                                |
-|                 | Metal UMFA INT8   | 43.75    | 0.75x   | Quantization dispatch overhead dominates at this resolution.        |
-|                 | Metal UMFA INT4   | 50.75    | 0.65x   | Quantization dispatch overhead dominates at this resolution.        |
+| Resolution      | Configuration     | Time (s) | Speedup | PSNR (dB) |
+| --------------- | ----------------- | -------- | ------- | --------- |
+| **256x256**     | PyTorch Vanilla   | 5.04     | baseline| —         |
+|                 | Metal UMFA BF16   | 4.89     | **1.03x**   | inf   |
+|                 | Metal UMFA INT8   | 5.18     | 0.97x   | 13.27     |
+|                 | Metal UMFA INT4   | 5.09     | 0.99x   | 8.47      |
+| **512x512**     | PyTorch Vanilla   | 9.47     | baseline| —         |
+|                 | Metal UMFA BF16   | 9.28     | **1.02x**   | inf   |
+|                 | Metal UMFA INT8   | 9.52     | 1.00x   | 16.13     |
+|                 | Metal UMFA INT4   | 9.43     | 1.00x   | 15.65     |
+| **1024x1024**   | PyTorch Vanilla   | 31.83    | baseline| —         |
+|                 | Metal UMFA BF16   | 34.33    | 0.93x   | inf       |
+|                 | Metal UMFA INT8   | 34.13    | 0.93x   | 17.93     |
+|                 | Metal UMFA INT4   | 32.80    | **0.97x**   | 15.53 |
 
-BF16 UMFA is competitive with or faster than PyTorch SDPA at all resolutions.
+BF16 UMFA matches or beats PyTorch SDPA at 256x256 and 512x512.
 
-Quantised modes (INT8/INT4) currently incur per-attention-layer runtime quantization
-sync overhead (3 GPU command-buffer commits per forward call). This overhead is
-amortised at short sequence lengths (256x256) but dominates at longer ones.
-Chaining quantization dispatches into the attention command buffer (eliminating
-the sync points) is on the roadmap and will close this gap.
+Quantised modes (INT8/INT4) keep Q in BF16 and quantise only K/V to preserve
+the attention pattern. PSNR is measured against PyTorch vanilla output on the
+same seed (lower in diffusion models due to stochastic amplification across
+denoising steps). INT4 at 1024x1024 is within 3% of PyTorch vanilla speed.
 
 Tested on M3 Max 128 GB, 4 inference steps, FLUX.1-schnell (Apache 2.0).
 

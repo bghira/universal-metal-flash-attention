@@ -2302,10 +2302,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     const torch::Tensor& value,
     const QuantizationConfig& config
 ) {
-    printf("🚨 ENTERING unified quantized attention with granularity: %s\n",
-           QuantizationConfig::granularity_to_string(config.granularity).c_str());
-    fflush(stdout);
-
     ensure_initialized();
 
     // Handle hybrid granularity selection with per-tensor analysis
@@ -2313,7 +2309,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     HybridGranularityConfig hybrid_config;
 
     if (config.granularity == QuantizationGranularity::HYBRID) {
-        printf("🎯 Performing hybrid granularity selection...\n");
         hybrid_config = select_hybrid_granularities(query, key, value, config);
 
         // For now, use unified granularity for compatibility with current FFI
@@ -2340,52 +2335,33 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     }
 
     // Stage tensors for the kernel. On MPS, keep them on-device and bind their
-    // MTLBuffers directly like the regular path — wrapping CPU malloc memory
-    // with makeBuffer(bytesNoCopy:) is unreliable (intermittent NaN on first
-    // dispatch). Promote to FP32 here: the Swift kernel reads FP32.
-    // Synchronize around the on-device conversions so UMFA's separate Metal
-    // command queue doesn't read the buffers before PyTorch's queue has
-    // finished writing them.
+    // MTLBuffers directly. Do NOT promote to FP32 — the Swift quantization
+    // path handles FP16/BF16/FP32 natively.
     bool use_mps_buffers = query.device().is_mps() && key.device().is_mps() && value.device().is_mps();
-    torch::Tensor q_cpu, k_cpu, v_cpu;
+    torch::Tensor q_staged, k_staged, v_staged;
     if (use_mps_buffers) {
         torch::mps::synchronize();
-        q_cpu = query.contiguous().to(torch::kFloat32);
-        k_cpu = key.contiguous().to(torch::kFloat32);
-        v_cpu = value.contiguous().to(torch::kFloat32);
-        torch::mps::synchronize();
+        q_staged = query.contiguous();
+        k_staged = key.contiguous();
+        v_staged = value.contiguous();
     } else {
-        q_cpu = MetalSDPABackend::ensure_contiguous_cpu(query).to(torch::kFloat32);
-        k_cpu = MetalSDPABackend::ensure_contiguous_cpu(key).to(torch::kFloat32);
-        v_cpu = MetalSDPABackend::ensure_contiguous_cpu(value).to(torch::kFloat32);
+        q_staged = MetalSDPABackend::ensure_contiguous_cpu(query);
+        k_staged = MetalSDPABackend::ensure_contiguous_cpu(key);
+        v_staged = MetalSDPABackend::ensure_contiguous_cpu(value);
     }
 
-    // Detect tensor layout and convert if necessary
-    printf("🔍 Analyzing tensor layouts for FLUX compatibility...\n");
-
-    auto q_layout = detect_tensor_layout(q_cpu);
-    auto k_layout = detect_tensor_layout(k_cpu);
-    auto v_layout = detect_tensor_layout(v_cpu);
-
-    // Check layout consistency
-    if (q_layout.is_flux_layout != k_layout.is_flux_layout || q_layout.is_flux_layout != v_layout.is_flux_layout) {
-        printf("⚠️  Warning: Inconsistent tensor layouts detected:\n");
-        printf("   Query: %s\n", q_layout.to_string().c_str());
-        printf("   Key: %s\n", k_layout.to_string().c_str());
-        printf("   Value: %s\n", v_layout.to_string().c_str());
-    }
-
-    // Convert FLUX layout to Metal layout if needed
+    // Detect tensor layout (FLUX vs standard BHSD).
+    auto q_layout = detect_tensor_layout(q_staged);
     bool input_was_flux_layout = q_layout.is_flux_layout;
-    torch::Tensor q_metal = q_cpu;
-    torch::Tensor k_metal = k_cpu;
-    torch::Tensor v_metal = v_cpu;
 
-    if (q_layout.is_flux_layout) {
-        printf("🔄 Converting FLUX layout tensors to Metal layout...\n");
-        q_metal = convert_flux_to_metal_layout(q_cpu);
-        k_metal = convert_flux_to_metal_layout(k_cpu);
-        v_metal = convert_flux_to_metal_layout(v_cpu);
+    torch::Tensor q_metal = q_staged;
+    torch::Tensor k_metal = k_staged;
+    torch::Tensor v_metal = v_staged;
+
+    if (input_was_flux_layout) {
+        q_metal = convert_flux_to_metal_layout(q_staged);
+        k_metal = convert_flux_to_metal_layout(k_staged);
+        v_metal = convert_flux_to_metal_layout(v_staged);
     }
 
     // Get tensor dimensions. The layout "conversion" above is a passthrough
@@ -2401,192 +2377,99 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
         seq_len_kv = static_cast<uint32_t>(k_metal.sizes()[2]);
         head_dim = static_cast<uint16_t>(q_sizes[3]);
 
-        printf("📊 Final tensor dimensions: batch=%u, seq_q=%u, seq_kv=%u, heads=%u, dim=%u\n",
-               batch_size, seq_len_q, seq_len_kv, num_heads, head_dim);
-
-        // Validate head count for FLUX
-        if (input_was_flux_layout) {
-            if (num_heads < 12 || num_heads > 96) {
-                printf("⚠️  Warning: Unusual head count for FLUX: %u (expected 12-96)\n", num_heads);
-            } else {
-                printf("✅ FLUX head count validation passed: %u heads\n", num_heads);
-            }
-        }
     } else {
         throw std::runtime_error("Unified quantized attention currently only supports 4D tensors [batch, seq_len, num_heads, head_dim]");
     }
 
-    // The Swift entry point (mfa_attention_forward_quantized_direct) dispatches
-    // MultiHeadAttention with default precisions: it reads Q/K/V as FP32 and
-    // writes FP32 output, ignoring the precision parameters. Feed it FP32 and
-    // cast back to the caller's dtype at the end.
-    OutputPrecision optimal_output_precision = OutputPrecision::FP32;
+    float softmax_scale = config.scale.has_value()
+        ? static_cast<float>(*config.scale)
+        : (1.0f / std::sqrt(static_cast<float>(head_dim)));
 
-    // Create type-safe output tensor with validation (using Metal layout)
-    auto output = metal_sdpa::create_typed_output_tensor(q_metal, optimal_output_precision, true);
+    // Output must be FP32 — the quantized attention kernel writes FP32
+    // (accumulates in FP32 registers, stores as FP32 via memoryPrecisions[.O]
+    // default). We convert to the caller's dtype at return.
+    auto output = torch::empty(
+        q_metal.sizes(), torch::dtype(torch::kFloat32).device(q_metal.device()));
 
+    // LSE buffer (required by the quantized FFI; not needed for inference
+    // but must be allocated).
+    auto lse = torch::empty(
+        {batch_size * num_heads * seq_len_q}, torch::kFloat32
+    ).to(q_metal.device());
 
-    // Calculate softmax scale
-    float softmax_scale = config.scale ? static_cast<float>(*config.scale) : (1.0f / std::sqrt(static_cast<float>(head_dim)));
+    // Determine input precision from tensor dtype.
+    int32_t input_precision = 2;
+    auto q_dtype = q_metal.scalar_type();
+    if (q_dtype == torch::kHalf) {
+        input_precision = 0;
+    } else if (q_dtype == torch::kBFloat16) {
+        input_precision = 1;
+    } else if (q_dtype != torch::kFloat32) {
+        q_metal = q_metal.to(torch::kFloat32);
+        k_metal = k_metal.to(torch::kFloat32);
+        v_metal = v_metal.to(torch::kFloat32);
+        input_precision = 2;
+    }
 
-    // REMOVED: C++ quantization logic - now using runtime quantization
-    // The new runtime quantization API handles all quantization on the GPU side
-    printf("🚀 Using runtime quantization - bypassing C++ side quantization\n");
+    // Determine target quantization precision from config.
+    int32_t target_quantization = 3;
+    if (config.key_precision == QuantizationPrecision::INT4 ||
+        config.value_precision == QuantizationPrecision::INT4) {
+        target_quantization = 4;
+    }
 
-    // Tensors were already promoted to FP32 during staging above.
-    torch::Tensor q_processed = q_metal;
-    torch::Tensor k_processed = k_metal;
-    torch::Tensor v_processed = v_metal;
+    int32_t quantization_mode = 0;
+    if (effective_config.granularity == QuantizationGranularity::BLOCK_WISE) {
+        quantization_mode = 2;
+    }
 
-    // Create MFA buffers. On MPS, bind the tensors' MTLBuffers directly
-    // (same mechanism as the regular path); on CPU, wrap the host pointers.
-    mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer;
-
-    auto bind_buffer = [&](const char* name, const torch::Tensor& tensor, mfa_buffer_t& buffer) {
+    // Bind MTLBuffers.
+    auto bind_buffer = [&](const torch::Tensor& tensor, mfa_buffer_t& buffer) {
         size_t bytes = tensor.numel() * tensor.element_size();
-        mfa_error_t bind_result;
         if (use_mps_buffers) {
             void* handle = mps_utils::get_mtl_buffer_handle(tensor);
-            if (!handle) {
-                throw std::runtime_error(std::string("Failed to acquire MTLBuffer for ") + name + " in unified quantized attention");
-            }
-            bind_result = mfa_buffer_from_mtl_buffer(MetalSDPABackend::swift_context_, handle, bytes, &buffer);
+            mfa_buffer_from_mtl_buffer(MetalSDPABackend::swift_context_, handle, bytes, &buffer);
         } else {
-            bind_result = mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, tensor.data_ptr(), bytes, &buffer);
-        }
-        if (bind_result != MFA_SUCCESS) {
-            throw std::runtime_error(std::string("Failed to create ") + name + " buffer for unified quantized attention");
+            mfa_buffer_from_ptr(MetalSDPABackend::swift_context_, tensor.data_ptr(), bytes, &buffer);
         }
     };
 
-    mfa_error_t result;
+    mfa_buffer_t q_buffer, k_buffer, v_buffer, out_buffer, lse_buffer;
+    bind_buffer(q_metal, q_buffer);
+    bind_buffer(k_metal, k_buffer);
+    bind_buffer(v_metal, v_buffer);
+    bind_buffer(output, out_buffer);
+    bind_buffer(lse, lse_buffer);
 
-    bind_buffer("query", q_processed, q_buffer);
-    bind_buffer("key", k_processed, k_buffer);
-    bind_buffer("value", v_processed, v_buffer);
+    // Q stays in input precision (BF16); K/V are quantized to INT8/INT4.
+    int32_t q_target = input_precision;  // e.g. 1 (BF16) — no quantization
+    int32_t kv_target = target_quantization;  // 3 (INT8) or 4 (INT4)
 
-    bind_buffer("output", output, out_buffer);
+    auto result = mfa_quantized_forward_with_lse(
+        MetalSDPABackend::swift_context_,
+        q_buffer, k_buffer, v_buffer, out_buffer, lse_buffer, nullptr,
+        batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
+        softmax_scale, config.is_causal,
+        q_target, kv_target, quantization_mode, input_precision
+    );
 
-    try {
-        // Convert effective granularity enum to int32_t for FFI
-        int32_t granularity_int = static_cast<int32_t>(effective_config.granularity);
+    mfa_destroy_buffer(q_buffer);
+    mfa_destroy_buffer(k_buffer);
+    mfa_destroy_buffer(v_buffer);
+    mfa_destroy_buffer(out_buffer);
+    mfa_destroy_buffer(lse_buffer);
 
-        printf("🚀 Calling unified quantized attention with:\n");
-        printf("   Effective Granularity: %s (%d)\n", QuantizationConfig::granularity_to_string(effective_config.granularity).c_str(), granularity_int);
-        printf("   Block sizes: Q=%u, K=%u, V=%u\n", effective_config.block_sizes.query_block_size, effective_config.block_sizes.key_block_size, effective_config.block_sizes.value_block_size);
-        printf("   Mixed precision: %s, Symmetric quantization: %s\n", effective_config.enable_mixed_precision ? "enabled" : "disabled", effective_config.force_symmetric_quantization ? "enabled" : "disabled");
-        if (config.granularity == QuantizationGranularity::HYBRID) {
-            printf("   Hybrid Selection Reasoning: %s\n", hybrid_config.selection_reasoning.c_str());
-        }
-        fflush(stdout);
-
-        // Scale arrays are no longer needed - runtime quantization handles scaling internally
-
-        // Call new runtime quantized attention function that takes FP16/BF16/FP32 inputs
-        // The new API parameters are:
-        // - q_precision: Input tensor precision (0=FP16, 1=BF16, 2=FP32)
-        // - k_precision: Target quantization precision (3=INT8, 4=INT4)
-        // - v_precision: Quantization mode (0=tensorWise, 2=blockwise)
-
-        // Determine input precision from tensor dtype
-        int32_t input_precision = 0; // Default to FP16
-        if (q_processed.scalar_type() == torch::kFloat32) {
-            input_precision = 2; // FP32
-        } else if (q_processed.scalar_type() == torch::kBFloat16) {
-            input_precision = 1; // BF16
-        } else if (q_processed.scalar_type() == torch::kFloat16) {
-            input_precision = 0; // FP16
-        }
-
-        // Determine target quantization precision from config
-        int32_t target_quantization = 3; // Default to INT8
-        if (config.key_precision == QuantizationPrecision::INT4 || config.value_precision == QuantizationPrecision::INT4) {
-            target_quantization = 4; // INT4
-        }
-
-        // Determine quantization mode from granularity
-        int32_t quantization_mode = 0; // Default to tensor-wise
-        if (effective_config.granularity == QuantizationGranularity::BLOCK_WISE) {
-            quantization_mode = 2; // Block-wise (use default block size of 64)
-        }
-
-        // Determine output precision
-        int32_t output_precision_int = 2; // Default to FP32
-        if (optimal_output_precision == OutputPrecision::FP16) {
-            output_precision_int = 0; // FP16
-        } else if (optimal_output_precision == OutputPrecision::BF16) {
-            output_precision_int = 1; // BF16
-        }
-
-        printf("🚀 Calling runtime quantized attention with:\n");
-        printf("   Input precision: %s (%d)\n",
-               input_precision == 0 ? "FP16" : input_precision == 1 ? "BF16" : "FP32",
-               input_precision);
-        printf("   Target quantization: %s (%d)\n",
-               target_quantization == 3 ? "INT8" : "INT4",
-               target_quantization);
-        printf("   Quantization mode: %s (%d)\n",
-               quantization_mode == 0 ? "tensor-wise" : "block-wise",
-               quantization_mode);
-        printf("   Output precision: %s (%d)\n",
-               output_precision_int == 0 ? "FP16" : output_precision_int == 1 ? "BF16" : "FP32",
-               output_precision_int);
-
-        result = mfa_attention_forward_quantized_direct(
-            MetalSDPABackend::swift_context_,
-            q_buffer, k_buffer, v_buffer, out_buffer,
-            batch_size, seq_len_q, seq_len_kv, num_heads, head_dim,
-            softmax_scale, config.is_causal,
-            0.0f, 0,  // qScale, qZeroPoint - not used in new API
-            0.0f, 0,  // kScale, kZeroPoint - not used in new API
-            0.0f, 0,  // vScale, vZeroPoint - not used in new API
-            input_precision,        // Input precision: 0=FP16, 1=BF16, 2=FP32
-            target_quantization,    // Target quantization precision: 3=INT8, 4=INT4
-            quantization_mode,      // Quantization mode: 0=tensorWise, 2=blockwise
-            output_precision_int,   // Output precision
-            false, false, false, false  // No transpose for standard layout
-        );
-
-        if (result != MFA_SUCCESS) {
-            throw std::runtime_error("Runtime quantized attention forward pass failed with error code: " + std::to_string(result));
-        }
-
-        // Validate output buffer type matches expectations
-        size_t expected_size = metal_sdpa::calculate_expected_buffer_size(output, optimal_output_precision);
-        if (!metal_sdpa::validate_output_buffer_type(output, optimal_output_precision, expected_size)) {
-            throw std::runtime_error("Output buffer type validation failed - potential data corruption detected");
-        }
-
-        printf("✅ Unified quantized attention completed successfully with type validation\n");
-
-        // Convert output back to original layout if input was FLUX
-        torch::Tensor final_output = output;
-        if (input_was_flux_layout) {
-            printf("🔄 Converting output back to FLUX layout...\n");
-            printf("   Output tensor before conversion: shape=%s dtype=%s\n",
-                   ("[" + std::to_string(output.size(0)) + "," + std::to_string(output.size(1)) + "," + std::to_string(output.size(2)) + "," + std::to_string(output.size(3)) + "]").c_str(),
-                   scalar_type_to_string(output.scalar_type()).c_str());
-            final_output = convert_metal_to_flux_layout(output);
-        }
-
-        // IMPORTANT: Ensure tensor data is copied before buffer cleanup to prevent use-after-free
-        // This is especially important for small tensors where PyTorch may not automatically copy
-        printf("🧹 Creating safe copy of output tensor before buffer cleanup...\n");
-        torch::Tensor safe_output = final_output.clone().contiguous();
-
-        // Convert to target device and the caller's dtype AFTER creating safe copy
-        torch::Tensor final_result = safe_output.to(query.device(), query.scalar_type());
-
-        // Now safe to clean up MFA buffers since we have an independent copy
-        printf("🧹 Skipping MFA buffer destruction (zero-copy views are owned by PyTorch)\n");
-
-        fflush(stdout);
-        return final_result;
-
-    } catch (...) {
-        printf("🚨 Exception occurred; skipping MFA buffer destruction to avoid touching shared memory\n");
-        throw;
+    if (result != 0) {
+        throw std::runtime_error("Quantized attention forward failed with code " + std::to_string(result));
     }
+
+    // Convert output back to original layout if input was FLUX.
+    torch::Tensor final_output = output;
+    if (input_was_flux_layout) {
+        final_output = convert_metal_to_flux_layout(output);
+    }
+
+    return final_output.to(query.device(), query.scalar_type());
 }
 
 // BACKWARD COMPATIBILITY WRAPPERS
@@ -2600,7 +2483,7 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
     bool is_causal,
     std::optional<double> scale
 ) {
-    printf("🔀 COMPATIBILITY: Routing legacy quantized_scaled_dot_product_attention to unified implementation\n");
+    // Route to unified implementation.
 
     // Convert legacy string-based API to unified QuantizationConfig
     QuantizationConfig config;
@@ -2618,15 +2501,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention(
     config.key_precision = QuantizationConfig::string_to_quantization_precision(precision);
     config.value_precision = QuantizationConfig::string_to_quantization_precision(precision);
 
-    // Default to FP32 output for stability with MPS accumulators
-    config.output_precision = OutputPrecision::FP32;
-
-    printf("🔀 Legacy API converted to: granularity=%s, q_precision=%s, kv_precision=%s\n",
-           QuantizationConfig::granularity_to_string(config.granularity).c_str(),
-           QuantizationConfig::quantization_precision_to_string(config.query_precision).c_str(),
-           QuantizationConfig::quantization_precision_to_string(config.key_precision).c_str());
-
-    // Route to unified implementation
     return quantized_scaled_dot_product_attention_unified(query, key, value, config);
 }
 
@@ -2636,9 +2510,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_with_conf
     const torch::Tensor& value,
     const QuantizationConfig& config
 ) {
-    printf("🔀 COMPATIBILITY: Routing quantized_scaled_dot_product_attention_with_config to unified implementation\n");
-
-    // This function already uses QuantizationConfig, so route directly
     return quantized_scaled_dot_product_attention_unified(query, key, value, config);
 }
 
@@ -2648,7 +2519,6 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_enhanced(
     const torch::Tensor& value,
     const QuantizationConfig& config
 ) {
-    printf("🔀 COMPATIBILITY: Routing quantized_scaled_dot_product_attention_enhanced to unified implementation\n");
 
     // This function already uses QuantizationConfig, so route directly
     return quantized_scaled_dot_product_attention_unified(query, key, value, config);
@@ -3236,6 +3106,7 @@ public:
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
         static_cast<int32_t>(target_precision),
+        static_cast<int32_t>(target_precision),
         static_cast<int32_t>(quant_mode),
         input_prec);
 
@@ -3343,6 +3214,7 @@ public:
         dq_b, dk_b, dv_b, mask_b,
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
+        static_cast<int32_t>(target_precision),
         static_cast<int32_t>(target_precision),
         static_cast<int32_t>(quant_mode),
         static_cast<int32_t>(input_prec));
