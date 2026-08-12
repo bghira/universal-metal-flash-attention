@@ -514,7 +514,8 @@ extern "C" {
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
-        int32_t target_precision, int32_t quant_mode);
+        int32_t target_precision, int32_t quant_mode,
+        int32_t input_precision);
 
     // Backward: re-quantizes Q/K/V, runs quantized flash backward.
     int32_t mfa_quantized_backward(
@@ -526,7 +527,8 @@ extern "C" {
         uint32_t batch_size, uint32_t seq_len_q, uint32_t seq_len_kv,
         uint32_t num_heads, uint16_t head_dim,
         float softmax_scale, bool causal,
-        int32_t target_precision, int32_t quant_mode);
+        int32_t target_precision, int32_t quant_mode,
+        int32_t input_precision);
 
     // =============================================================================
     // Multi-Latent Attention (MLA) Support

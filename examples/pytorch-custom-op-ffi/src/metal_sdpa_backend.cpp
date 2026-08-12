@@ -3152,10 +3152,26 @@ public:
       throw std::runtime_error("Metal SDPA backend not initialized");
     }
 
-    // Promote to fp32 — the quantization kernel reads FP32 input.
-    query = query.to(torch::kFloat32).contiguous();
-    key = key.to(torch::kFloat32).contiguous();
-    value = value.to(torch::kFloat32).contiguous();
+    // Detect input precision — avoid FP32 promotion to save memory.
+    // The Swift quantization path handles FP16/BF16/FP32 natively.
+    int32_t input_prec;
+    auto q_dtype = query.scalar_type();
+    if (q_dtype == torch::kHalf) {
+        input_prec = 0; // FP16
+    } else if (q_dtype == torch::kBFloat16) {
+        input_prec = 1; // BF16
+    } else {
+        // Non-floating-point or already FP32: promote to FP32 for safety.
+        if (q_dtype != torch::kFloat32) {
+            query = query.to(torch::kFloat32);
+            key = key.to(torch::kFloat32);
+            value = value.to(torch::kFloat32);
+        }
+        input_prec = 2; // FP32
+    }
+    query = query.contiguous();
+    key = key.contiguous();
+    value = value.contiguous();
     if (query.device().type() == at::kMPS) {
       torch::mps::synchronize();
     }
@@ -3172,7 +3188,10 @@ public:
       sm_scale = 1.0f / std::sqrt(static_cast<float>(dim));
     }
 
-    auto output = torch::empty_like(query);
+    // Output is always FP32 (the quantized kernel accumulates in FP32).
+    auto output = torch::empty(
+        {batch, heads, seq_q, dim},
+        torch::dtype(torch::kFloat32).device(query.device()));
     auto lse = torch::empty(
         {batch * heads * seq_q}, torch::kFloat32).to(query.device());
 
@@ -3217,7 +3236,8 @@ public:
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
         static_cast<int32_t>(target_precision),
-        static_cast<int32_t>(quant_mode));
+        static_cast<int32_t>(quant_mode),
+        input_prec);
 
     mfa_destroy_buffer(q_b);
     mfa_destroy_buffer(k_b);
@@ -3238,6 +3258,7 @@ public:
     ctx->saved_data["is_causal"] = is_causal;
     ctx->saved_data["target_precision"] = target_precision;
     ctx->saved_data["quant_mode"] = quant_mode;
+    ctx->saved_data["input_precision"] = static_cast<int64_t>(input_prec);
     if (mask_tensor.defined()) {
         ctx->saved_data["mask"] = mask_tensor;
     }
@@ -3259,6 +3280,9 @@ public:
     bool is_causal = ctx->saved_data["is_causal"].toBool();
     int64_t target_precision = ctx->saved_data["target_precision"].toInt();
     int64_t quant_mode = ctx->saved_data["quant_mode"].toInt();
+    int64_t input_prec = ctx->saved_data.count("input_precision")
+                             ? ctx->saved_data["input_precision"].toInt()
+                             : 2; // default FP32
     torch::Tensor mask_tensor;
     if (ctx->saved_data.count("mask") && ctx->saved_data["mask"].isTensor()) {
         mask_tensor = ctx->saved_data["mask"].toTensor();
@@ -3275,9 +3299,11 @@ public:
 
     auto mfa_ctx = MetalSDPABackend::get_swift_context();
     auto output_fp32 = saved[3];
-    auto d_query = torch::zeros_like(query);
-    auto d_key = torch::zeros_like(key);
-    auto d_value = torch::zeros_like(value);
+    // Gradient buffers are FP32 — the backward kernel writes FP32 data.
+    auto fp32_opts = torch::dtype(torch::kFloat32).device(query.device());
+    auto d_query = torch::zeros(query.sizes(), fp32_opts);
+    auto d_key = torch::zeros(key.sizes(), fp32_opts);
+    auto d_value = torch::zeros(value.sizes(), fp32_opts);
 
     // Synchronize AFTER zeros_like (which schedules MPS zero-fill) but BEFORE
     // the FFI writes. Without this, the MPS zero-fill can execute after the
@@ -3318,7 +3344,8 @@ public:
         batch, seq_q, seq_kv, heads, dim,
         sm_scale, is_causal,
         static_cast<int32_t>(target_precision),
-        static_cast<int32_t>(quant_mode));
+        static_cast<int32_t>(quant_mode),
+        static_cast<int32_t>(input_prec));
 
     mfa_destroy_buffer(q_b);
     mfa_destroy_buffer(k_b);
@@ -3335,6 +3362,17 @@ public:
       throw std::runtime_error(
           "Quantized flash attention backward failed with code " +
           std::to_string(result));
+    }
+
+    // Cast gradients back to the original input dtype for autograd.
+    if (input_prec == 0) { // FP16
+      d_query = d_query.to(torch::kHalf);
+      d_key = d_key.to(torch::kHalf);
+      d_value = d_value.to(torch::kHalf);
+    } else if (input_prec == 1) { // BF16
+      d_query = d_query.to(torch::kBFloat16);
+      d_key = d_key.to(torch::kBFloat16);
+      d_value = d_value.to(torch::kBFloat16);
     }
 
     return {d_query, d_key, d_value,

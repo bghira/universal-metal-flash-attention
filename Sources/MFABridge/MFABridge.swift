@@ -328,7 +328,9 @@ final class MFAContext {
       do {
         let opts = MTLCompileOptions()
         opts.languageVersion = .version3_2
-        let library = try device.makeLibrary(source: Self.ropeKernelSource, options: opts)
+        let library = try MetalLibraryCompiler.makeLibrary(
+          device: device, source: Self.ropeKernelSource, options: opts
+        )
         guard let function = library.makeFunction(name: functionName) else {
           return nil
         }
@@ -348,8 +350,8 @@ final class MFAContext {
     }
 
     do {
-      let library = try device.makeLibrary(
-        source: Self.maskKernelSource,
+      let library = try MetalLibraryCompiler.makeLibrary(
+        device: device, source: Self.maskKernelSource,
         options: mfaCompileOptions()
       )
       guard let function = library.makeFunction(name: "mfa_prepare_mask") else {
@@ -1251,7 +1253,10 @@ public func mfa_attention_forward(
 
       // Get the Metal function using native kernel source (no string replacement!)
       let source = kernel.createSource()
-      let library = try mfaContext.device.makeLibrary(source: source, options: mfaCompileOptions())
+      let library = try MetalLibraryCompiler.makeLibrary(
+        device: mfaContext.device, source: source,
+        options: mfaCompileOptions()
+      )
       let function = try library.makeFunction(name: "attention", constantValues: constants)
 
       // Create pipeline descriptor with proper settings for Apple Silicon
@@ -2596,7 +2601,9 @@ private func dequantizeBuffer(
   let compileOptions = mfaCompileOptions(mathSafe: true)
 
   guard
-    let library = try? device.makeLibrary(source: kernelSource, options: compileOptions),
+    let library = try? MetalLibraryCompiler.makeLibrary(
+      device: device, source: kernelSource, options: compileOptions
+    ),
     let function = library.makeFunction(name: "dequantize_int8_to_fp16"),
     let pipeline = try? device.makeComputePipelineState(function: function)
   else {

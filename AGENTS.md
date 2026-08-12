@@ -33,6 +33,7 @@ The `metal-flash-attention` directory is a git submodule pointing at
 | `metal-flash-attention/.../AttentionKernel+Source.swift` | Code-generated Metal kernel source (all kernel types) |
 | `metal-flash-attention/.../AttentionKernel+Accumulate.swift` | Outer-product accumulate loop with blockwise dequantize-on-load |
 | `metal-flash-attention/.../GEMMHeaders.swift` | Metal header: simdgroup storage, load_quantized_int8/int4, buffer bindings |
+| `metal-flash-attention/.../MetalLibraryCompiler.swift` | CLI fallback: JIT → `xcrun metal` for macOS 26 `__asm` support |
 | `metal-flash-attention/.../HadamardRotation.swift` | ConvRot-style FWHT kernel for outlier smoothing |
 
 ## Build
@@ -77,6 +78,26 @@ disables `__HAVE_BFLOAT__`. All `device.makeLibrary` calls must use
 `languageVersion = .version3_2`. The `mfaCompileOptions()` helper in
 `MFABridge.swift` and the inline options in `MultiHeadAttention.swift`
 enforce this.
+
+### macOS 26 (Tahoe) rejects `__asm` in runtime JIT
+
+macOS 26's runtime Metal compiler (`device.makeLibrary(source:)`) rejects
+inline `__asm(...)` directives with "illegal string literal in 'asm'". The
+flash-attention codegen emits `__asm` for simdgroup async-copy intrinsics
+(`createMetalSimdgroupEvent()` in `GEMMHeaders.swift`), so runtime JIT
+compilation fails on macOS 26.
+
+The workaround is `MetalLibraryCompiler.makeLibrary(device:source:options:)`
+(`metal-flash-attention/Sources/FlashAttention/MetalLibraryCompiler.swift`):
+it tries the runtime JIT first (fast path — works on macOS 15 and for kernels
+without `__asm`), then transparently falls back to the offline `xcrun metal`
+CLI (`xcrun metal -std=macos-metal3.2 -c src.metal -o src.air` →
+`xcrun metallib src.air -o src.metallib` → `device.makeLibrary(URL:)`),
+which still accepts `__asm`. All production `makeLibrary(source:)` call sites
+route through this helper. Bfloat diagnostic probes
+(`mfa_has_native_bfloat*`) intentionally bypass the helper.
+
+Reference: <https://github.com/imperatormk/metal24-asm-repro>
 
 ### Multi-head buffer binding contract
 
