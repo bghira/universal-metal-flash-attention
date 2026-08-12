@@ -240,7 +240,8 @@ public func mfa_quantized_forward_with_lse(
   _ headDim: UInt16,
   _ softmaxScale: Float,
   _ causal: Bool,
-  _ targetPrecision: Int32,
+  _ qTargetPrecision: Int32,
+  _ kvTargetPrecision: Int32,
   _ quantMode: Int32,
   _ inputPrecision: Int32
 )
@@ -264,7 +265,8 @@ public func mfa_quantized_forward_with_lse(
     Unmanaged<MFABuffer>.fromOpaque($0).takeUnretainedValue()
   }
 
-  let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
+  let qPrec = GEMMOperandPrecision(rawValue: UInt16(qTargetPrecision)) ?? .INT8
+  let kvPrec = GEMMOperandPrecision(rawValue: UInt16(kvTargetPrecision)) ?? .INT8
   let mode: QuantizationMode = switch quantMode {
   case 0: .tensorWise
   case 2: .blockwise(blockSizeK: 64)
@@ -287,17 +289,17 @@ public func mfa_quantized_forward_with_lse(
   guard
     let qTensor = quantAttention.createQuantizedTensorFromBufferPublic(
       buffer: qBuffer.buffer, shape: fullQShape,
-      inputPrecision: inputPrec, targetPrecision: precision,
+      inputPrecision: inputPrec, targetPrecision: qPrec,
       quantizationMode: mode, targetStrategy: .symmetric
     ),
     let kTensor = quantAttention.createQuantizedTensorFromBufferPublic(
       buffer: kBuffer.buffer, shape: fullKVShape,
-      inputPrecision: inputPrec, targetPrecision: precision,
+      inputPrecision: inputPrec, targetPrecision: kvPrec,
       quantizationMode: mode, targetStrategy: .symmetric
     ),
     let vTensor = quantAttention.createQuantizedTensorFromBufferPublic(
       buffer: vBuffer.buffer, shape: fullKVShape,
-      inputPrecision: inputPrec, targetPrecision: precision,
+      inputPrecision: inputPrec, targetPrecision: kvPrec,
       quantizationMode: mode, targetStrategy: .symmetric
     )
   else {
@@ -382,7 +384,8 @@ public func mfa_quantized_backward(
   _ headDim: UInt16,
   _ softmaxScale: Float,
   _ causal: Bool,
-  _ targetPrecision: Int32,
+  _ qTargetPrecision: Int32,
+  _ kvTargetPrecision: Int32,
   _ quantMode: Int32,
   _ inputPrecision: Int32
 )
@@ -413,7 +416,8 @@ public func mfa_quantized_backward(
     Unmanaged<MFABuffer>.fromOpaque($0).takeUnretainedValue()
   }
 
-  let precision = GEMMOperandPrecision(rawValue: UInt16(targetPrecision)) ?? .INT8
+  let qPrec = GEMMOperandPrecision(rawValue: UInt16(qTargetPrecision)) ?? .INT8
+  let kvPrec = GEMMOperandPrecision(rawValue: UInt16(kvTargetPrecision)) ?? .INT8
   let mode: QuantizationMode = switch quantMode {
   case 0: .tensorWise
   case 2: .blockwise(blockSizeK: 64)
@@ -435,17 +439,17 @@ public func mfa_quantized_backward(
   guard
     let qTensor = quantAttention.createQuantizedTensorFromBufferPublic(
       buffer: qBuffer.buffer, shape: fullQShape,
-      inputPrecision: inputPrec, targetPrecision: precision,
+      inputPrecision: inputPrec, targetPrecision: qPrec,
       quantizationMode: mode, targetStrategy: .symmetric
     ),
     let kTensor = quantAttention.createQuantizedTensorFromBufferPublic(
       buffer: kBuffer.buffer, shape: fullKVShape,
-      inputPrecision: inputPrec, targetPrecision: precision,
+      inputPrecision: inputPrec, targetPrecision: kvPrec,
       quantizationMode: mode, targetStrategy: .symmetric
     ),
     let vTensor = quantAttention.createQuantizedTensorFromBufferPublic(
       buffer: vBuffer.buffer, shape: fullKVShape,
-      inputPrecision: inputPrec, targetPrecision: precision,
+      inputPrecision: inputPrec, targetPrecision: kvPrec,
       quantizationMode: mode, targetStrategy: .symmetric
     )
   else {
