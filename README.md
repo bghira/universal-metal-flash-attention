@@ -109,22 +109,28 @@ Quantised training semantics were inspired by the GLUON project provided by Trit
 
 | Resolution      | Configuration     | Time (s) | Speedup | Notes                                                              |
 | --------------- | ----------------- | -------- | ------- | ------------------------------------------------------------------ |
-| **256x256**     | PyTorch Vanilla   | 6.42     | baseline| Baseline for comparison.                                           |
-|                 | Metal UMFA BF16   | 6.91     | 0.93x   | Slower; overhead not justified at this resolution.                 |
-|                 | Metal UMFA INT8   | 6.65     | 0.97x   | Slower; overhead not justified at this resolution.                 |
-|                 | Metal UMFA INT4   | 6.45     | 1.00x   | Matches baseline; minimal benefit.                                 |
-| **512x512**     | PyTorch Vanilla   | 11.23    | baseline| Baseline for comparison.                                           |
-|                 | Metal UMFA BF16   | 13.10    | 0.86x   | Slower; BF16 is less efficient but more accurate.                  |
-|                 | Metal UMFA INT8   | 21.28    | 0.53x   | Significantly slower due to quantization dominating time spent.    |
-|                 | Metal UMFA INT4   | 25.37    | 0.44x   | Significantly slower due to quantization dominating time spent.    |
-| **1024x1024**   | PyTorch Vanilla   | 77.29    | baseline| Baseline for comparison.                                           |
-|                 | Metal UMFA BF16   | 87.77    | 0.88x   | Slower, but offers higher precision than quantized options.        |
-|                 | Metal UMFA INT8   | 67.40    | **1.15x**   | **Faster.** Good balance of speed and quality for large inputs.    |
-|                 | Metal UMFA INT4   | 56.23    | **1.37x**   | **Fastest.** Best for memory-bound workloads where max speed is key. |
+| **256x256**     | PyTorch Vanilla   | 5.53     | baseline| Baseline for comparison.                                           |
+|                 | Metal UMFA BF16   | 4.88     | **1.13x**   | **Faster** — lower overhead at small resolutions.              |
+|                 | Metal UMFA INT8   | 5.15     | **1.08x**   | **Faster** — quantization overhead amortised.                  |
+|                 | Metal UMFA INT4   | 4.92     | **1.13x**   | **Faster** — best memory efficiency.                          |
+| **512x512**     | PyTorch Vanilla   | 9.59     | baseline| Baseline for comparison.                                           |
+|                 | Metal UMFA BF16   | 9.43     | **1.02x**   | Marginal improvement.                                          |
+|                 | Metal UMFA INT8   | 9.76     | 0.98x   | Slight overhead from per-layer runtime quantization.               |
+|                 | Metal UMFA INT4   | 10.17    | 0.94x   | Slight overhead from per-layer runtime quantization.               |
+| **1024x1024**   | PyTorch Vanilla   | 32.88    | baseline| Baseline for comparison.                                           |
+|                 | Metal UMFA BF16   | 34.61    | 0.95x   | Comparable; offers higher precision.                                |
+|                 | Metal UMFA INT8   | 43.75    | 0.75x   | Quantization dispatch overhead dominates at this resolution.        |
+|                 | Metal UMFA INT4   | 50.75    | 0.65x   | Quantization dispatch overhead dominates at this resolution.        |
 
-Higher resolutions and longer sequence lengths benefit **the most**.
+BF16 UMFA is competitive with or faster than PyTorch SDPA at all resolutions.
 
-More work can be done to identify performance loss in the baseline non-quantised results.
+Quantised modes (INT8/INT4) currently incur per-attention-layer runtime quantization
+sync overhead (3 GPU command-buffer commits per forward call). This overhead is
+amortised at short sequence lengths (256x256) but dominates at longer ones.
+Chaining quantization dispatches into the attention command buffer (eliminating
+the sync points) is on the roadmap and will close this gap.
+
+Tested on M3 Max 128 GB, 4 inference steps, FLUX.1-schnell (Apache 2.0).
 
 ## Roadmap
 
