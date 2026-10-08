@@ -366,8 +366,12 @@ def flash_attention_forward(
         )
         mask_meta = _prepare_mask_metadata(attn_mask, target_shape)
 
-    # Create output array
-    output = np.zeros_like(q)
+    # Create output array. MFA's forward kernel always writes O as FP32 in
+    # memory (see AttentionDescriptor+Precisions.swift), so the output buffer
+    # must be FP32 whenever inputs are FP16/BF16, regardless of
+    # output_precision. Cast back to the input dtype before returning.
+    output_dtype = q.dtype if q.dtype not in (np.float16,) else np.float32
+    output = np.zeros(q.shape, dtype=output_dtype)
 
     # Create MFA buffers (zero-copy)
     q_buf = MFABuffer(context, q)
@@ -414,6 +418,10 @@ def flash_attention_forward(
         v_buf.close()
         out_buf.close()
 
+    # Cast back to the input dtype when the kernel wrote FP32 into a widened
+    # output buffer (16-bit inputs).
+    if output_dtype != q.dtype:
+        output = output.astype(q.dtype)
     return output
 
 
@@ -581,8 +589,12 @@ def _quantized_attention_forward(
     kv_prec = _parse_precision(kv_precision)
     output_prec = _parse_precision(output_precision)
 
-    # Create output array
-    output = np.zeros_like(q)
+    # Create output array. MFA's forward kernel always writes O as FP32 in
+    # memory (see AttentionDescriptor+Precisions.swift), so the output buffer
+    # must be FP32 whenever inputs are FP16/BF16, regardless of
+    # output_precision. Cast back to the input dtype before returning.
+    output_dtype = q.dtype if q.dtype not in (np.float16,) else np.float32
+    output = np.zeros(q.shape, dtype=output_dtype)
 
     # Create MFA buffers (zero-copy)
     q_buf = MFABuffer(context, q)
@@ -629,4 +641,8 @@ def _quantized_attention_forward(
         v_buf.close()
         out_buf.close()
 
+    # Cast back to the input dtype when the kernel wrote FP32 into a widened
+    # output buffer (16-bit inputs).
+    if output_dtype != q.dtype:
+        output = output.astype(q.dtype)
     return output

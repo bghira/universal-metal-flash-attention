@@ -871,6 +871,49 @@ public func mfa_create_buffer(
   return 0 // MFA_SUCCESS
 }
 
+@_cdecl("mfa_buffer_from_ptr_gpu")
+/// Same as mfa_buffer_from_ptr but skips didModifyRange: for buffers whose
+/// contents are produced by GPU commands on the same command buffer (e.g. when
+/// encoding MFA onto PyTorch's MPS stream), marking the memory CPU-modified
+/// while GPU writes are still pending corrupts the data.
+public func mfa_buffer_from_ptr_gpu(
+  _ context: UnsafeMutableRawPointer?,
+  _ dataPtr: UnsafeMutableRawPointer?,
+  _ sizeBytes: Int,
+  _ buffer: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+)
+  -> Int32
+{
+  guard
+    let context,
+    let dataPtr,
+    let buffer
+  else { return 1 } // MFA_ERROR_INVALID_ARGS
+
+  let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+
+  guard
+    let mtlBuffer = mfaContext.device.makeBuffer(
+      bytesNoCopy: dataPtr,
+      length: sizeBytes,
+      options: .storageModeShared,
+      deallocator: nil
+    )
+  else {
+    return 2 // MFA_ERROR_MEMORY_ALLOCATION
+  }
+
+  let mfaBuffer = MFABuffer(
+    buffer: mtlBuffer,
+    originalDataPtr: nil,
+    dataSize: 0
+  )
+  let unmanagedBuffer = Unmanaged.passRetained(mfaBuffer)
+  buffer.pointee = unmanagedBuffer.toOpaque()
+
+  return 0 // MFA_SUCCESS
+}
+
 @_cdecl("mfa_buffer_from_ptr")
 public func mfa_buffer_from_ptr(
   _ context: UnsafeMutableRawPointer?,
@@ -1052,6 +1095,92 @@ public func mfa_buffer_from_mtl_buffer_with_strides(
   buffer.pointee = unmanagedBuffer.toOpaque()
 
   return 0 // MFA_SUCCESS
+}
+
+@_cdecl("mfa_new_shared_event")
+public func mfa_new_shared_event(
+  _ context: UnsafeMutableRawPointer?,
+  _ event: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+) -> Int32 {
+  guard let context, let event else { return 1 }
+  let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  guard let sharedEvent = mfaContext.device.makeSharedEvent() else { return 2 }
+  event.pointee = Unmanaged.passRetained(sharedEvent).toOpaque()
+  return 0
+}
+
+@_cdecl("mfa_release_object")
+public func mfa_release_object(_ object: UnsafeMutableRawPointer?) {
+  guard let object else { return }
+  Unmanaged<AnyObject>.fromOpaque(object).release()
+}
+
+@_cdecl("mfa_cmd_encode_wait")
+public func mfa_cmd_encode_wait(
+  _ cmdBuffer: UnsafeMutableRawPointer?,
+  _ event: UnsafeMutableRawPointer?,
+  _ value: UInt64
+) -> Int32 {
+  guard let cmdBuffer, let event else { return 1 }
+  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer,
+        let ev = Unmanaged<AnyObject>.fromOpaque(event).takeUnretainedValue() as? MTLSharedEvent
+  else { return 1 }
+  cb.encodeWaitForEvent(ev, value: value)
+  return 0
+}
+
+@_cdecl("mfa_cmd_encode_signal")
+public func mfa_cmd_encode_signal(
+  _ cmdBuffer: UnsafeMutableRawPointer?,
+  _ event: UnsafeMutableRawPointer?,
+  _ value: UInt64
+) -> Int32 {
+  guard let cmdBuffer, let event else { return 1 }
+  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer,
+        let ev = Unmanaged<AnyObject>.fromOpaque(event).takeUnretainedValue() as? MTLSharedEvent
+  else { return 1 }
+  cb.encodeSignalEvent(ev, value: value)
+  return 0
+}
+
+@_cdecl("mfa_new_command_buffer")
+public func mfa_new_command_buffer(
+  _ context: UnsafeMutableRawPointer?,
+  _ cmdBuffer: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+) -> Int32 {
+  guard let context, let cmdBuffer else { return 1 }
+  let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
+  guard let cb = mfaContext.commandQueue.makeCommandBuffer()
+  else { return 2 }
+  cmdBuffer.pointee = Unmanaged.passRetained(cb).toOpaque()
+  return 0
+}
+
+@_cdecl("mfa_wait_command_buffer")
+public func mfa_wait_command_buffer(_ cmdBuffer: UnsafeMutableRawPointer?) -> Int32 {
+  guard let cmdBuffer else { return 1 }
+  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer
+  else { return 1 }
+  cb.waitUntilCompleted()
+  return 0
+}
+
+@_cdecl("mfa_commit_command_buffer")
+public func mfa_commit_command_buffer(_ cmdBuffer: UnsafeMutableRawPointer?) -> Int32 {
+  guard let cmdBuffer else { return 1 }
+  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer
+  else { return 1 }
+  cb.commit()
+  return 0
+}
+
+@_cdecl("mfa_buffer_mtl_pointer")
+public func mfa_buffer_mtl_pointer(
+  _ buffer: UnsafeMutableRawPointer?
+) -> UnsafeMutableRawPointer? {
+  guard let buffer else { return nil }
+  let mfaBuffer = Unmanaged<MFABuffer>.fromOpaque(buffer).takeUnretainedValue()
+  return Unmanaged.passUnretained(mfaBuffer.buffer).toOpaque()
 }
 
 @_cdecl("mfa_buffer_contents")
@@ -2522,23 +2651,34 @@ public func mfa_attention_encode_mtl(
     return Array(UnsafeBufferPointer(start: p, count: 4))
   }
 
-  let encoded = mfaContext.multiHeadAttention.encodeForward(
+  // Create a per-call instance: the cached context instance accumulates
+  // command-queue state and produces NaN/garbage (same issue documented in
+  // mfa_attention_forward_multihead_internal).
+  let multiHeadAttention = MultiHeadAttention(device: mfaContext.device)
+  let encoded = multiHeadAttention.encodeForward(
     commandBuffer: cb,
-    query: qBuf,
-    key: kBuf,
-    value: vBuf,
-    output: outBuf,
-    queryOffset: qOffset,
-    keyOffset: kOffset,
-    valueOffset: vOffset,
-    outputOffset: outOffset,
-    queryStrides: strideArray(qStrides),
-    keyStrides: strideArray(kStrides),
-    valueStrides: strideArray(vStrides),
-    logsumexp: nil,
+    query: qBuf, key: kBuf, value: vBuf, output: outBuf,
     descriptor: multiHeadDescriptor,
     maskBuffer: preparedMask?.buffer
   )
+  // The first dispatch on a freshly compiled pipeline produces no output
+  // (driver quirk, see the note in mfa_attention_forward_multihead_internal's
+  // vicinity). With the shared pipeline cache this only happens once per
+  // pipeline shape; absorb it by dispatching again into the same buffers.
+  if false, multiHeadAttention.lastPipelineWasNew {
+    multiHeadAttention.lastPipelineWasNew = false
+    let _ = multiHeadAttention.encodeForward(
+      commandBuffer: cb,
+      query: qBuf, key: kBuf, value: vBuf, output: outBuf,
+      queryOffset: qOffset, keyOffset: kOffset,
+      valueOffset: vOffset, outputOffset: outOffset,
+      queryStrides: strideArray(qStrides), keyStrides: strideArray(kStrides),
+      valueStrides: strideArray(vStrides),
+      logsumexp: nil,
+      descriptor: multiHeadDescriptor,
+      maskBuffer: preparedMask?.buffer
+    )
+  }
   return encoded ? 0 : 5 // MFA_SUCCESS : MFA_ERROR_EXECUTION_FAILED
 }
 
