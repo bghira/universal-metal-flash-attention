@@ -1101,7 +1101,9 @@ public func mfa_buffer_from_mtl_buffer_with_strides(
 public func mfa_new_shared_event(
   _ context: UnsafeMutableRawPointer?,
   _ event: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
-) -> Int32 {
+)
+  -> Int32
+{
   guard let context, let event else { return 1 }
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
   guard let sharedEvent = mfaContext.device.makeSharedEvent() else { return 2 }
@@ -1120,10 +1122,13 @@ public func mfa_cmd_encode_wait(
   _ cmdBuffer: UnsafeMutableRawPointer?,
   _ event: UnsafeMutableRawPointer?,
   _ value: UInt64
-) -> Int32 {
+)
+  -> Int32
+{
   guard let cmdBuffer, let event else { return 1 }
-  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer,
-        let ev = Unmanaged<AnyObject>.fromOpaque(event).takeUnretainedValue() as? MTLSharedEvent
+  guard
+    let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer,
+    let ev = Unmanaged<AnyObject>.fromOpaque(event).takeUnretainedValue() as? MTLSharedEvent
   else { return 1 }
   cb.encodeWaitForEvent(ev, value: value)
   return 0
@@ -1134,10 +1139,13 @@ public func mfa_cmd_encode_signal(
   _ cmdBuffer: UnsafeMutableRawPointer?,
   _ event: UnsafeMutableRawPointer?,
   _ value: UInt64
-) -> Int32 {
+)
+  -> Int32
+{
   guard let cmdBuffer, let event else { return 1 }
-  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer,
-        let ev = Unmanaged<AnyObject>.fromOpaque(event).takeUnretainedValue() as? MTLSharedEvent
+  guard
+    let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer,
+    let ev = Unmanaged<AnyObject>.fromOpaque(event).takeUnretainedValue() as? MTLSharedEvent
   else { return 1 }
   cb.encodeSignalEvent(ev, value: value)
   return 0
@@ -1147,7 +1155,9 @@ public func mfa_cmd_encode_signal(
 public func mfa_new_command_buffer(
   _ context: UnsafeMutableRawPointer?,
   _ cmdBuffer: UnsafeMutablePointer<UnsafeMutableRawPointer?>?
-) -> Int32 {
+)
+  -> Int32
+{
   guard let context, let cmdBuffer else { return 1 }
   let mfaContext = Unmanaged<MFAContext>.fromOpaque(context).takeUnretainedValue()
   guard let cb = mfaContext.commandQueue.makeCommandBuffer()
@@ -1159,7 +1169,9 @@ public func mfa_new_command_buffer(
 @_cdecl("mfa_wait_command_buffer")
 public func mfa_wait_command_buffer(_ cmdBuffer: UnsafeMutableRawPointer?) -> Int32 {
   guard let cmdBuffer else { return 1 }
-  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer
+  guard
+    let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer)
+      .takeUnretainedValue() as? MTLCommandBuffer
   else { return 1 }
   cb.waitUntilCompleted()
   return 0
@@ -1168,7 +1180,9 @@ public func mfa_wait_command_buffer(_ cmdBuffer: UnsafeMutableRawPointer?) -> In
 @_cdecl("mfa_commit_command_buffer")
 public func mfa_commit_command_buffer(_ cmdBuffer: UnsafeMutableRawPointer?) -> Int32 {
   guard let cmdBuffer else { return 1 }
-  guard let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer).takeUnretainedValue() as? MTLCommandBuffer
+  guard
+    let cb = Unmanaged<AnyObject>.fromOpaque(cmdBuffer)
+      .takeUnretainedValue() as? MTLCommandBuffer
   else { return 1 }
   cb.commit()
   return 0
@@ -1177,7 +1191,9 @@ public func mfa_commit_command_buffer(_ cmdBuffer: UnsafeMutableRawPointer?) -> 
 @_cdecl("mfa_buffer_mtl_pointer")
 public func mfa_buffer_mtl_pointer(
   _ buffer: UnsafeMutableRawPointer?
-) -> UnsafeMutableRawPointer? {
+)
+  -> UnsafeMutableRawPointer?
+{
   guard let buffer else { return nil }
   let mfaBuffer = Unmanaged<MFABuffer>.fromOpaque(buffer).takeUnretainedValue()
   return Unmanaged.passUnretained(mfaBuffer.buffer).toOpaque()
