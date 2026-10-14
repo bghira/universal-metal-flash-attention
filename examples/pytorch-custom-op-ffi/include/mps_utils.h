@@ -10,6 +10,12 @@ bool is_mps_tensor(const at::Tensor& tensor);
 // Returns opaque pointer to id<MTLBuffer> (or nullptr on failure)
 void* get_mtl_buffer_handle(const at::Tensor& tensor);
 
+/// Returns the current MPS-stream command buffer as an opaque pointer
+/// (id<MTLCommandBuffer> bridged to void*). Calls endKernelCoalescing()
+/// first so the returned buffer gets its own properly-ordered pass.
+/// Returns nullptr if no MPS stream is available.
+void* acquire_mps_command_buffer();
+
 // Encode UMFA attention into PyTorch's current MPS-stream command buffer and
 // commit (without waiting). Q/K/V/output must be contiguous MPS tensors in
 // BHSD layout with matching dtypes. Optional masks must be MPS tensors with

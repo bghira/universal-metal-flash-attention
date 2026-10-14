@@ -58,6 +58,17 @@ void* get_mtl_buffer_handle(const at::Tensor& tensor) {
     return (__bridge void*)buffer;
 }
 
+void* acquire_mps_command_buffer() {
+    at::mps::MPSStream* stream = at::mps::getCurrentMPSStream();
+    if (!stream) return nullptr;
+    __block id<MTLCommandBuffer> cb = nil;
+    dispatch_sync(stream->queue(), ^{
+        stream->endKernelCoalescing();
+        cb = stream->commandBuffer();
+    });
+    return cb ? (__bridge void*)cb : nullptr;
+}
+
 int encode_rope_rotate_on_torch_stream(
     void* mfa_context,
     const at::Tensor& src,
