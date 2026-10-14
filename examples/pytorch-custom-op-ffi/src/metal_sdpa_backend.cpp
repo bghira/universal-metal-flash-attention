@@ -2394,7 +2394,11 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
         {batch_size * num_heads * seq_len_q}, torch::kFloat32
     ).to(q_metal.device());
 
-    // Determine input precision from tensor dtype.
+    // Determine input precision from tensor dtype. NOTE: the
+    // mfa_quantized_forward_with_lse FFI uses the MFA convention for the
+    // input precision (FP16=0, BF16=1, FP32=2) and GEMMOperandPrecision raw
+    // values for the target precisions (FP32=0, FP16=1, BF16=2, INT8=3,
+    // INT4=4).
     int32_t input_precision = 2;
     auto q_dtype = q_metal.scalar_type();
     if (q_dtype == torch::kHalf) {
@@ -2438,8 +2442,12 @@ torch::Tensor MetalSDPABackend::quantized_scaled_dot_product_attention_unified(
     bind_buffer(output, out_buffer);
     bind_buffer(lse, lse_buffer);
 
-    // Q stays in input precision (BF16); K/V are quantized to INT8/INT4.
-    int32_t q_target = input_precision;  // e.g. 1 (BF16) — no quantization
+    // Q stays in the input precision; K/V are quantized to INT8/INT4.
+    // input_precision uses the MFA convention; q_target must be a
+    // GEMMOperandPrecision raw value, so convert.
+    int32_t q_target = input_precision == 2 ? 0
+        : input_precision == 1 ? 2   // BF16
+        : 1;                          // FP16
     int32_t kv_target = target_quantization;  // 3 (INT8) or 4 (INT4)
 
     // Quantized attention: use the blocking path. The quantized K/V buffers
@@ -3023,6 +3031,8 @@ public:
 
     // Detect input precision — avoid FP32 promotion to save memory.
     // The Swift quantization path handles FP16/BF16/FP32 natively.
+    // NOTE: input_prec uses the MFA precision convention (FP16=0, BF16=1,
+    // FP32=2); target_precision must be a GEMMOperandPrecision raw value.
     int32_t input_prec;
     auto q_dtype = query.scalar_type();
     if (q_dtype == torch::kHalf) {
