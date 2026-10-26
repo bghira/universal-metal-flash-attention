@@ -16,6 +16,10 @@ let package = Package(
       type: .dynamic,
       targets: ["MFAFFI"]
     ),
+    .executable(
+      name: "AttentionBenchmark",
+      targets: ["AttentionBenchmark"]
+    ),
   ],
   dependencies: [
     .package(path: "./metal-flash-attention"),
@@ -41,6 +45,24 @@ let package = Package(
         .unsafeFlags(["-O3"]),
         .unsafeFlags(["-ffast-math"]),
         .unsafeFlags(["-funroll-loops"]),
+      ]
+    ),
+    .executableTarget(
+      name: "AttentionBenchmark",
+      dependencies: [
+        .product(name: "FlashAttention", package: "metal-flash-attention"),
+      ],
+      path: "benchmarks",
+      exclude: [
+        "BenchmarkQuantizedAttention.swift",
+        "GEMMBenchmark.swift",
+        "GluonOptimizationBenchmark.swift",
+        "MemoryBandwidthBenchmark.swift",
+        "QuantizedBackwardBenchmark.swift",
+        "SimpleGEMMBenchmark.swift",
+      ],
+      swiftSettings: [
+        .enableUpcomingFeature("StrictConcurrency"),
       ]
     ),
     .testTarget(

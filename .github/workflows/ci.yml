@@ -13,6 +13,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The repo default is read-only. The security job uploads a SARIF report to
+# the code-scanning API, which requires `security-events: write`; without it
+# the upload step fails with "Resource not accessible by integration" on every
+# push to main (PR runs use a different upload path and pass).
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   # Pre-commit hooks and linting
   lint:
@@ -197,14 +205,16 @@ jobs:
 
       - name: Run benchmarks
         run: |
-          cd benchmarks
-          swift run -c release AttentionBenchmark --iterations 100 --output results.json
+          swift run -c release AttentionBenchmark \
+            --iterations 50 \
+            --output benchmarks/results.json
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v7
         with:
           name: benchmark-results
           path: benchmarks/results.json
+          if-no-files-found: error
 
   # Security scanning
   security:
